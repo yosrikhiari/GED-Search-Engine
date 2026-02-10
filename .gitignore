@@ -1,0 +1,59 @@
+# Build artifacts
+**/bin/
+**/obj/
+**/runtimes/
+**/x64/
+**/x86/
+
+# Dependencies
+**/node_modules/
+package-lock.json
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs
+**/logs/
+*.log
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
+
+# Documents/Storage
+**/documents/
+**/storage/
+/var/lib/ged/
+
+# Cache
+**/__pycache__/
+*.cache
+*.deps.json
+*.runtimeconfig.json
+*.dll
+*.pdb
+*.exe
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test files (optional - remove this line if you want to include testfiles/)
+testfiles/
+
+# Generated/scraped files
+code.txt
+project_source_code.txt
+scrape_project.py

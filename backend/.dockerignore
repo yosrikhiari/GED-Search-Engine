@@ -1,0 +1,50 @@
+# Backend .dockerignore
+
+# Build outputs
+**/bin/
+**/obj/
+**/out/
+**/publish/
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio
+.vs/
+.vscode/
+*.rsuser
+
+# Test files
+**/TestResults/
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/
+project.lock.json
+project.fragment.lock.json
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+README.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml

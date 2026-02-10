@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # OpenSearch - Document search engine
+  opensearch:
+    image: opensearchproject/opensearch:2.12.0
+    container_name: ged-opensearch
+    environment:
+      - discovery.type=single-node
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_SECURITY_PLUGIN=true
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # RabbitMQ - Message queue for OCR jobs
+  rabbitmq:
+      image: rabbitmq:3.12-management
+      container_name: ged-rabbitmq
+      environment:
+        - RABBITMQ_DEFAULT_USER=admin
+        - RABBITMQ_DEFAULT_PASS=admin123
+        - RABBITMQ_DEFAULT_VHOST=/
+      ports:
+        - "5673:5672"
+        - "15673:15672"    
+      volumes:
+        - rabbitmq-data:/var/lib/rabbitmq
+      networks:
+        - ged-network
+      healthcheck:
+        test: ["CMD", "rabbitmq-diagnostics", "ping"]
+        interval: 30s
+        timeout: 10s
+        retries: 5
+
+  # PostgreSQL - Metadata database
+  postgres:
+    image: postgres:16-alpine
+    container_name: ged-postgres
+    environment:
+      - POSTGRES_USER=ged_user
+      - POSTGRES_PASSWORD=ged_pass
+      - POSTGRES_DB=ged_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ged_user -d ged_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API - .NET 8 Web API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ged-backend
+    ports:
+      - "5001:8080"
+    # ⭐ FIX FOR LINUX: Allow container to access host Ollama ⭐
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Works on Linux, Mac, and Windows
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080
+      - OpenSearch__Url=http://opensearch:9200
+      - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__Port=5672
+      - RabbitMQ__Username=admin
+      - RabbitMQ__Password=admin123
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=ged_db;Username=ged_user;Password=ged_pass;Port=5432
+      - NLP__Enabled=true
+      # ⭐ THIS NOW WORKS ON LINUX ⭐
+      - NLP__LlmApiEndpoint=http://host.docker.internal:11434/api/generate
+      - NLP__Model=llama3.2
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ged-network
+    volumes:
+      - ged-documents:/var/lib/ged/documents
+      - ./backend/logs:/app/logs
+    restart: unless-stopped
+
+  # Frontend - Vue.js SPA
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ged-frontend
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:5001
+    depends_on:
+      - backend
+    networks:
+      - ged-network
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:
+    driver: local
+  rabbitmq-data:
+    driver: local
+  postgres-data:
+    driver: local
+  ged-documents:
+    driver: local
+
+networks:
+  ged-network:
+    driver: bridge
