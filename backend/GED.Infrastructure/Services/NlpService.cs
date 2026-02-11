@@ -145,11 +145,14 @@ public class NlpService : INlpService
                 }
             }
 
-            // Extract file type entities
-            var fileTypes = new[] { "pdf", "doc", "docx", "xls", "xlsx", "jpg", "jpeg", "png", "tiff" };
+            // Extract file type entities - FIXED WITH WORD BOUNDARIES
+            var fileTypes = new[] { "pdf", "doc", "docx", "xls", "xlsx", "jpg", "jpeg", "png", "text", "txt" };
             foreach (var fileType in fileTypes)
             {
-                if (lowerText.Contains(fileType))
+                // ⭐ CRITICAL FIX: Use word boundaries to avoid matching partial words
+                // This prevents "pdf" from matching in "documents"
+                var pattern = $@"\b{fileType}(?:s|fs)?\b";
+                if (System.Text.RegularExpressions.Regex.IsMatch(lowerText, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 {
                     entities.Add($"FILETYPE:{fileType}");
                 }
@@ -297,122 +300,124 @@ public class NlpService : INlpService
         return QueryIntent.Search;
     }
 
-private Dictionary<string, string> ExtractFilters(string query)
-{
-    var filters = new Dictionary<string, string>();
-    var lowerQuery = query.ToLower();
-    var now = DateTime.UtcNow;
-
-    _logger.LogInformation("Extracting filters from query: '{Query}' (current date: {Now})", query, now);
-
-    // Extract year filter
-    var yearMatch = System.Text.RegularExpressions.Regex.Match(query, @"\b(20\d{2})\b");
-    if (yearMatch.Success)
+    private Dictionary<string, string> ExtractFilters(string query)
     {
-        var year = int.Parse(yearMatch.Value);
-        filters["fromDate"] = new DateTime(year, 1, 1).ToString("o");
-        filters["toDate"] = new DateTime(year, 12, 31, 23, 59, 59).ToString("o");
-        _logger.LogInformation("Parsed year '{Year}' as {From} to {To}", year, filters["fromDate"], filters["toDate"]);
-    }
+        var filters = new Dictionary<string, string>();
+        var lowerQuery = query.ToLower();
+        var now = DateTime.UtcNow;
 
-    // ⭐ FIXED: Extract file type filter using WORD BOUNDARIES
-    var fileTypes = new[] { "pdf", "doc", "docx", "xls", "xlsx", "jpg", "jpeg", "png" };
-    foreach (var fileType in fileTypes)
-    {
-        // Use word boundary regex to match whole words only
-        // \b ensures we match "pdf" or "pdfs" but NOT "pdf" within "documents"
-        var pattern = $@"\b{fileType}s?\b";  // 's?' makes the plural optional
-        if (System.Text.RegularExpressions.Regex.IsMatch(lowerQuery, pattern))
+        _logger.LogInformation("Extracting filters from query: '{Query}' (current date: {Now})", query, now);
+
+        // Extract year filter
+        var yearMatch = System.Text.RegularExpressions.Regex.Match(query, @"\b(20\d{2})\b");
+        if (yearMatch.Success)
         {
-            // Store the singular form (remove trailing 's' if present)
-            var singularType = fileType.EndsWith("s") ? fileType : fileType.TrimEnd('s');
-            filters["filetype"] = singularType;
-            _logger.LogInformation("Detected file type: {FileType}", singularType);
-            break;
+            var year = int.Parse(yearMatch.Value);
+            filters["fromDate"] = new DateTime(year, 1, 1).ToString("o");
+            filters["toDate"] = new DateTime(year, 12, 31, 23, 59, 59).ToString("o");
+            _logger.LogInformation("Parsed year '{Year}' as {From} to {To}", year, filters["fromDate"], filters["toDate"]);
         }
-    }
 
-    // Extract date range filters - CALCULATE ACTUAL DATES
-    if (lowerQuery.Contains("last month"))
-    {
-        var firstDayLastMonth = new DateTime(now.Year, now.Month, 1).AddMonths(-1);
-        var lastDayLastMonth = firstDayLastMonth.AddMonths(1).AddDays(-1);
-        filters["fromDate"] = firstDayLastMonth.ToString("o");
-        filters["toDate"] = lastDayLastMonth.Date.AddDays(1).AddSeconds(-1).ToString("o");
-        _logger.LogInformation("Parsed 'last month' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("last year"))
-    {
-        filters["fromDate"] = new DateTime(now.Year - 1, 1, 1).ToString("o");
-        filters["toDate"] = new DateTime(now.Year - 1, 12, 31, 23, 59, 59).ToString("o");
-        _logger.LogInformation("Parsed 'last year' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("this month"))
-    {
-        var firstDayThisMonth = new DateTime(now.Year, now.Month, 1);
-        filters["fromDate"] = firstDayThisMonth.ToString("o");
-        filters["toDate"] = now.ToString("o");
-        _logger.LogInformation("Parsed 'this month' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("this year"))
-    {
-        filters["fromDate"] = new DateTime(now.Year, 1, 1).ToString("o");
-        filters["toDate"] = now.ToString("o");
-        _logger.LogInformation("Parsed 'this year' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("last week"))
-    {
-        var lastWeekStart = now.AddDays(-7).Date;
-        filters["fromDate"] = lastWeekStart.ToString("o");
-        filters["toDate"] = now.ToString("o");
-        _logger.LogInformation("Parsed 'last week' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("today"))
-    {
-        filters["fromDate"] = now.Date.ToString("o");
-        filters["toDate"] = now.ToString("o");
-        _logger.LogInformation("Parsed 'today' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-    else if (lowerQuery.Contains("yesterday"))
-    {
-        var yesterday = now.AddDays(-1).Date;
-        filters["fromDate"] = yesterday.ToString("o");
-        filters["toDate"] = yesterday.AddDays(1).AddSeconds(-1).ToString("o");
-        _logger.LogInformation("Parsed 'yesterday' as {From} to {To}", filters["fromDate"], filters["toDate"]);
-    }
-
-    // Try to extract month names
-    var months = new Dictionary<string, int>
-    {
-        {"january", 1}, {"february", 2}, {"march", 3}, {"april", 4},
-        {"may", 5}, {"june", 6}, {"july", 7}, {"august", 8},
-        {"september", 9}, {"october", 10}, {"november", 11}, {"december", 12}
-    };
-
-    foreach (var month in months)
-    {
-        if (lowerQuery.Contains(month.Key))
+        // ⭐ CRITICAL FIX: Extract file type filter using WORD BOUNDARIES
+        var fileTypes = new[] { "pdf", "doc", "docx", "xls", "xlsx", "jpg", "jpeg", "png", "text", "txt" };
+        foreach (var fileType in fileTypes)
         {
-            // Determine year - if month hasn't occurred this year yet, assume last year
-            var targetYear = now.Year;
-            if (month.Value > now.Month)
+            // Use word boundary regex to match whole words only
+            // This prevents "pdf" from matching in "documents"
+            // Matches: "pdf", "pdfs", "pdf files", "PDF", etc.
+            var pattern = $@"\b{fileType}(?:s|fs)?\b";
+            if (System.Text.RegularExpressions.Regex.IsMatch(lowerQuery, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
-                targetYear = now.Year - 1;
+                // Normalize to singular lowercase
+                var normalizedType = fileType.ToLower();
+                filters["filetype"] = normalizedType;
+                _logger.LogInformation("✅ Detected file type: {FileType} from query '{Query}'", normalizedType, query);
+                break; // Stop after first match
             }
-            
-            var firstDay = new DateTime(targetYear, month.Value, 1);
-            var lastDay = firstDay.AddMonths(1).AddDays(-1);
-            
-            filters["fromDate"] = firstDay.ToString("o");
-            filters["toDate"] = lastDay.Date.AddDays(1).AddSeconds(-1).ToString("o");
-            _logger.LogInformation("Parsed month '{Month}' as {From} to {To}", 
-                month.Key, filters["fromDate"], filters["toDate"]);
-            break;
         }
+
+        // Extract date range filters - CALCULATE ACTUAL DATES
+        if (lowerQuery.Contains("last month"))
+        {
+            var firstDayLastMonth = new DateTime(now.Year, now.Month, 1).AddMonths(-1);
+            var lastDayLastMonth = firstDayLastMonth.AddMonths(1).AddDays(-1);
+            filters["fromDate"] = firstDayLastMonth.ToString("o");
+            filters["toDate"] = lastDayLastMonth.Date.AddDays(1).AddSeconds(-1).ToString("o");
+            _logger.LogInformation("Parsed 'last month' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("last year"))
+        {
+            filters["fromDate"] = new DateTime(now.Year - 1, 1, 1).ToString("o");
+            filters["toDate"] = new DateTime(now.Year - 1, 12, 31, 23, 59, 59).ToString("o");
+            _logger.LogInformation("Parsed 'last year' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("this month"))
+        {
+            var firstDayThisMonth = new DateTime(now.Year, now.Month, 1);
+            filters["fromDate"] = firstDayThisMonth.ToString("o");
+            filters["toDate"] = now.ToString("o");
+            _logger.LogInformation("Parsed 'this month' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("this year"))
+        {
+            filters["fromDate"] = new DateTime(now.Year, 1, 1).ToString("o");
+            filters["toDate"] = now.ToString("o");
+            _logger.LogInformation("Parsed 'this year' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("last week"))
+        {
+            var lastWeekStart = now.AddDays(-7).Date;
+            filters["fromDate"] = lastWeekStart.ToString("o");
+            filters["toDate"] = now.ToString("o");
+            _logger.LogInformation("Parsed 'last week' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("today"))
+        {
+            filters["fromDate"] = now.Date.ToString("o");
+            filters["toDate"] = now.ToString("o");
+            _logger.LogInformation("Parsed 'today' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+        else if (lowerQuery.Contains("yesterday"))
+        {
+            var yesterday = now.AddDays(-1).Date;
+            filters["fromDate"] = yesterday.ToString("o");
+            filters["toDate"] = yesterday.AddDays(1).AddSeconds(-1).ToString("o");
+            _logger.LogInformation("Parsed 'yesterday' as {From} to {To}", filters["fromDate"], filters["toDate"]);
+        }
+
+        // Try to extract month names
+        var months = new Dictionary<string, int>
+        {
+            {"january", 1}, {"february", 2}, {"march", 3}, {"april", 4},
+            {"may", 5}, {"june", 6}, {"july", 7}, {"august", 8},
+            {"september", 9}, {"october", 10}, {"november", 11}, {"december", 12}
+        };
+
+        foreach (var month in months)
+        {
+            if (lowerQuery.Contains(month.Key))
+            {
+                // Determine year - if month hasn't occurred this year yet, assume last year
+                var targetYear = now.Year;
+                if (month.Value > now.Month)
+                {
+                    targetYear = now.Year - 1;
+                }
+                
+                var firstDay = new DateTime(targetYear, month.Value, 1);
+                var lastDay = firstDay.AddMonths(1).AddDays(-1);
+                
+                filters["fromDate"] = firstDay.ToString("o");
+                filters["toDate"] = lastDay.Date.AddDays(1).AddSeconds(-1).ToString("o");
+                _logger.LogInformation("Parsed month '{Month}' as {From} to {To}", 
+                    month.Key, filters["fromDate"], filters["toDate"]);
+                break;
+            }
+        }
+
+        _logger.LogInformation("Extracted {Count} filters from query: {Filters}", 
+            filters.Count, string.Join(", ", filters.Select(kv => $"{kv.Key}={kv.Value}")));
+        
+        return filters;
     }
-
-    _logger.LogInformation("Extracted {Count} filters from query", filters.Count);
-    return filters;
-}
-
 }

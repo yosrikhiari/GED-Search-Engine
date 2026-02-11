@@ -161,147 +161,158 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    private QueryContainer BuildQuery(
-        QueryContainerDescriptor<DocumentIndexModel> q,
-        string query,
-        CoreSearchRequest request,
-        NaturalLanguageQuery? nlQuery)
+// This is the CRITICAL fix for the BuildQuery method in OpenSearchService.cs
+// Replace the BuildQuery method (around line 105) with this version
+
+private QueryContainer BuildQuery(
+    QueryContainerDescriptor<DocumentIndexModel> q,
+    string query,
+    CoreSearchRequest request,
+    NaturalLanguageQuery? nlQuery)
+{
+    var textSearchQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
+    var filterQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
+
+    // ========== TEXT SEARCH QUERIES (for scoring) ==========
+    
+    // Main text query - ONLY add if we have actual search terms after processing
+    if (!string.IsNullOrWhiteSpace(query))
     {
-        var mustQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
-        var shouldQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
+        // Strategy 1: Multi-match with fuzziness (handles typos and variations)
+        textSearchQueries.Add(sq => sq.MultiMatch(m => m
+            .Query(query)
+            .Fields(f => f
+                .Field(doc => doc.Title, 5.0)
+                .Field(doc => doc.Category, 8.0)  // Boost category higher
+                .Field(doc => doc.FileName, 3.0)
+                .Field(doc => doc.Description, 2.0)
+                .Field(doc => doc.ExtractedText, 2.0)
+                .Field(doc => doc.OcrText, 1.0)
+            )
+            .Type(TextQueryType.BestFields)
+            .Fuzziness(Fuzziness.Auto)  // Handles singular/plural
+            .Operator(Operator.Or)
+        ));
 
-        // Main text query - ONLY add if we have actual search terms after processing
-        if (!string.IsNullOrWhiteSpace(query))
+        // Strategy 2: Wildcard on category (case-insensitive prefix matching)
+        textSearchQueries.Add(sq => sq.Wildcard(w => w
+            .Field(doc => doc.Category)
+            .Value($"{query.ToLower()}*")
+            .CaseInsensitive(true)
+            .Boost(10.0)
+        ));
+
+        // Strategy 3: Wildcard on title (case-insensitive partial matching)
+        textSearchQueries.Add(sq => sq.Wildcard(w => w
+            .Field(doc => doc.Title)
+            .Value($"*{query.ToLower()}*")
+            .CaseInsensitive(true)
+            .Boost(4.0)
+        ));
+
+        // Strategy 4: Match on extracted text
+        textSearchQueries.Add(sq => sq.Match(m => m
+            .Field(doc => doc.ExtractedText)
+            .Query(query)
+            .Fuzziness(Fuzziness.Auto)
+            .Boost(2.0)
+        ));
+    }
+
+    // ========== FILTER QUERIES (hard exclusions, no scoring) ==========
+    
+    // ⭐ CRITICAL: Status filter - Only show indexed documents
+    filterQueries.Add(sq => sq.Term(t => t.Field("status").Value("Indexed")));
+    
+    // ⭐ CRITICAL: Content type filter - HARD EXCLUSION
+    if (request.ContentTypes?.Any() == true)
+    {
+        _logger.LogInformation("🔒 Applying HARD contentType filter: {Types}", 
+            string.Join(", ", request.ContentTypes));
+        
+        filterQueries.Add(ctq => ctq.Terms(t => t
+            .Field(doc => doc.ContentType)
+            .Terms(request.ContentTypes)
+        ));
+    }
+
+    // Category filter
+    if (request.Categories?.Any() == true)
+    {
+        _logger.LogInformation("🔒 Applying category filter: {Categories}", 
+            string.Join(", ", request.Categories));
+        
+        filterQueries.Add(cq => cq.Terms(t => t
+            .Field("category.keyword")
+            .Terms(request.Categories)
+        ));
+    }
+
+    // Tags filter
+    if (request.Tags?.Any() == true)
+    {
+        _logger.LogInformation("🔒 Applying tags filter: {Tags}", 
+            string.Join(", ", request.Tags));
+        
+        filterQueries.Add(tq => tq.Terms(t => t
+            .Field(doc => doc.Tags)
+            .Terms(request.Tags)
+        ));
+    }
+
+    // ⭐ CRITICAL: Date range filter - HARD EXCLUSION
+    if (request.FromDate.HasValue || request.ToDate.HasValue)
+    {
+        _logger.LogInformation("🔒 Applying date range filter: {From} to {To}", 
+            request.FromDate?.ToString("yyyy-MM-dd") ?? "start", 
+            request.ToDate?.ToString("yyyy-MM-dd") ?? "end");
+        
+        filterQueries.Add(dq => dq.DateRange(dr => dr
+            .Field(doc => doc.CreatedAt)
+            .GreaterThanOrEquals(request.FromDate)
+            .LessThanOrEquals(request.ToDate)
+        ));
+    }
+
+    // ========== BUILD FINAL QUERY ==========
+    
+    _logger.LogInformation("📊 Query structure: {TextQueries} text queries, {FilterQueries} filter queries",
+        textSearchQueries.Count, filterQueries.Count);
+    
+    // Build bool query with proper Filter vs Must separation
+    return q.Bool(b =>
+    {
+        var boolQuery = b;
+        
+        // ⭐ CRITICAL: Apply filters in Filter clause (not Must)
+        // Filter clause = hard exclusion, no scoring, cacheable
+        if (filterQueries.Any())
         {
-            // Strategy 1: Multi-match with fuzziness (handles typos and variations)
-            shouldQueries.Add(sq => sq.MultiMatch(m => m
-                .Query(query)
-                .Fields(f => f
-                    .Field(doc => doc.Title, 5.0)
-                    .Field(doc => doc.Category, 8.0)  // Boost category higher
-                    .Field(doc => doc.FileName, 3.0)
-                    .Field(doc => doc.Description, 2.0)
-                    .Field(doc => doc.ExtractedText, 2.0)
-                    .Field(doc => doc.OcrText, 1.0)
-                )
-                .Type(TextQueryType.BestFields)
-                .Fuzziness(Fuzziness.Auto)  // Handles singular/plural
-                .Operator(Operator.Or)
-            ));
-
-            // Strategy 2: Wildcard on category (case-insensitive prefix matching)
-            shouldQueries.Add(sq => sq.Wildcard(w => w
-                .Field(doc => doc.Category)
-                .Value($"{query.ToLower()}*")
-                .CaseInsensitive(true)
-                .Boost(10.0)
-            ));
-
-            // Strategy 3: Wildcard on title (case-insensitive partial matching)
-            shouldQueries.Add(sq => sq.Wildcard(w => w
-                .Field(doc => doc.Title)
-                .Value($"*{query.ToLower()}*")
-                .CaseInsensitive(true)
-                .Boost(4.0)
-            ));
-
-            // Strategy 4: Match on extracted text
-            shouldQueries.Add(sq => sq.Match(m => m
-                .Field(doc => doc.ExtractedText)
-                .Query(query)
-                .Fuzziness(Fuzziness.Auto)
-                .Boost(2.0)
-            ));
+            boolQuery = boolQuery.Filter(filterQueries.ToArray());
         }
-
-        // Category filter
-        if (request.Categories?.Any() == true)
+        
+        // Apply text search in Must clause (affects scoring)
+        if (textSearchQueries.Any())
         {
-            mustQueries.Add(cq => cq.Terms(t => t
-                .Field("category.keyword")
-                .Terms(request.Categories)
-            ));
-            _logger.LogInformation("Applied category filter: {Categories}", string.Join(", ", request.Categories));
-        }
-
-        // Tags filter
-        if (request.Tags?.Any() == true)
-        {
-            mustQueries.Add(tq => tq.Terms(t => t
-                .Field(doc => doc.Tags)
-                .Terms(request.Tags)
-            ));
-            _logger.LogInformation("Applied tags filter: {Tags}", string.Join(", ", request.Tags));
-        }
-
-        // Content type filter
-        if (request.ContentTypes?.Any() == true)
-        {
-            mustQueries.Add(ctq => ctq.Terms(t => t
-                .Field(doc => doc.ContentType)
-                .Terms(request.ContentTypes)
-            ));
-            _logger.LogInformation("Applied content type filter: {Types}", string.Join(", ", request.ContentTypes));
-        }
-
-        // Date range filter - THIS IS WHERE NLP-EXTRACTED DATES GET APPLIED
-        if (request.FromDate.HasValue || request.ToDate.HasValue)
-        {
-            mustQueries.Add(dq => dq.DateRange(dr => dr
-                .Field(doc => doc.CreatedAt)
-                .GreaterThanOrEquals(request.FromDate)
-                .LessThanOrEquals(request.ToDate)
-            ));
-            _logger.LogInformation("Applied date range filter: {From} to {To}", 
-                request.FromDate?.ToString("yyyy-MM-dd") ?? "start", 
-                request.ToDate?.ToString("yyyy-MM-dd") ?? "end");
-        }
-
-        // Status filter - Only show indexed documents
-        mustQueries.Add(sq => sq.Term(t => t.Field("status").Value("Indexed")));
-
-        // CRITICAL FIX: Handle empty query after NLP processing
-        if (!shouldQueries.Any())
-        {
-            // No text search - return all documents matching filters
-            _logger.LogInformation("Empty search query after NLP processing - returning all indexed documents matching filters");
-            
-            // Return match_all query with filters
-            return q.Bool(b => b
-                .Must(mustQueries.ToArray())
-                .Filter(f => f.MatchAll())
-            );
-        }
-
-        // Build full bool query with text search
-        return q.Bool(b =>
-        {
-            var boolQuery = b;
-
-            // Add all must queries (filters)
-            if (mustQueries.Any())
-            {
-                foreach (var mustQuery in mustQueries)
-                {
-                    boolQuery = boolQuery.Must(mustQuery);
-                }
-            }
-
-            // Add should queries for text search
             boolQuery = boolQuery.Must(m => m.Bool(sb =>
             {
                 var shouldBool = sb;
-                foreach (var shouldQuery in shouldQueries)
+                foreach (var textQuery in textSearchQueries)
                 {
-                    shouldBool = shouldBool.Should(shouldQuery);
+                    shouldBool = shouldBool.Should(textQuery);
                 }
                 return shouldBool.MinimumShouldMatch(1);
             }));
-
-            return boolQuery;
-        });
-    }
-
+        }
+        else
+        {
+            // No text search - just return all documents matching filters
+            boolQuery = boolQuery.Must(m => m.MatchAll());
+        }
+        
+        return boolQuery;
+    });
+}
     private SortDescriptor<DocumentIndexModel> BuildSort(
         SortDescriptor<DocumentIndexModel> sort,
         SortField sortBy,
