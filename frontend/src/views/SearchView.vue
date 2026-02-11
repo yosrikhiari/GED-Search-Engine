@@ -560,6 +560,22 @@ const paginationPages = computed(() => {
   return pages
 })
 
+// ⭐ NEW HELPER FUNCTION: Map file type to content type
+const mapFileTypeToContentType = (fileType) => {
+  const mapping = {
+    'pdf': 'application/pdf',
+    'doc': 'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'txt': 'text/plain'
+  }
+  return mapping[fileType?.toLowerCase()] || null
+}
+
 // Document viewer helper functions
 const isPDF = (contentType) => {
   return contentType === 'application/pdf'
@@ -684,6 +700,7 @@ const getAiSuggestions = async (file) => {
   }
 }
 
+// ⭐ FIXED performSearch function
 const performSearch = async () => {
   if (!searchQuery.value.trim()) return
 
@@ -691,19 +708,57 @@ const performSearch = async () => {
   searched.value = true
 
   try {
+    // Step 1: Call NLP Understanding Endpoint
+    let nlpFilters = null
+    try {
+      console.log('🧠 Calling NLP endpoint to understand query:', searchQuery.value)
+      
+      const nlpResponse = await fetch('/api/search/nlp/understand', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(searchQuery.value)
+      })
+      
+      if (nlpResponse.ok) {
+        const nlpResult = await nlpResponse.json()
+        console.log('✅ NLP understanding:', nlpResult)
+        nlpFilters = nlpResult.extractedFilters
+        
+        if (nlpFilters && Object.keys(nlpFilters).length > 0) {
+          console.log('📅 NLP extracted filters:', nlpFilters)
+        }
+      } else {
+        console.warn('⚠️ NLP endpoint returned error:', nlpResponse.status)
+      }
+    } catch (nlpError) {
+      console.warn('⚠️ NLP processing failed, continuing with manual filters:', nlpError)
+    }
+
+    // ⭐ FIX: Map filetype to contentType
+    let contentTypeFilter = null
+    if (nlpFilters?.filetype) {
+      contentTypeFilter = mapFileTypeToContentType(nlpFilters.filetype)
+      console.log(`📎 Mapped filetype '${nlpFilters.filetype}' to contentType '${contentTypeFilter}'`)
+    } else if (filters.contentType) {
+      contentTypeFilter = filters.contentType
+    }
+
+    // Step 2: Merge NLP filters with manual filters
     const requestBody = {
       query: searchQuery.value,
       searchType: 0,
       page: 1,
       pageSize: 20,
       categories: filters.category ? [filters.category] : null,
-      contentTypes: filters.contentType ? [filters.contentType] : null,
-      fromDate: filters.dateFrom || null,
-      toDate: filters.dateTo || null,
+      contentTypes: contentTypeFilter ? [contentTypeFilter] : null,
+      fromDate: nlpFilters?.fromDate || filters.dateFrom || null,
+      toDate: nlpFilters?.toDate || filters.dateTo || null,
       includeOcrContent: true
     }
 
-    console.log('Search request:', requestBody)
+    console.log('🔍 Final search request (with NLP filters merged):', requestBody)
 
     const response = await fetch('/api/search/query', {
       method: 'POST',
@@ -715,26 +770,54 @@ const performSearch = async () => {
 
     if (response.ok) {
       searchResults.value = await response.json()
-      console.log('Search results:', searchResults.value)
+      console.log('✅ Search results:', searchResults.value)
     } else {
       const errorText = await response.text()
-      console.error('Search failed:', response.status, errorText)
+      console.error('❌ Search failed:', response.status, errorText)
       alert(`Search failed: ${response.status} - ${errorText}`)
     }
   } catch (error) {
-    console.error('Search error:', error)
+    console.error('❌ Search error:', error)
     alert('Search error. Make sure the backend is running.')
   } finally {
     loading.value = false
   }
 }
 
+// ⭐ FIXED goToPage function
 const goToPage = async (page) => {
   if (!searchQuery.value.trim()) return
 
   loading.value = true
 
   try {
+    // Same NLP processing as performSearch
+    let nlpFilters = null
+    try {
+      const nlpResponse = await fetch('/api/search/nlp/understand', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(searchQuery.value)
+      })
+      
+      if (nlpResponse.ok) {
+        const nlpResult = await nlpResponse.json()
+        nlpFilters = nlpResult.extractedFilters
+      }
+    } catch (nlpError) {
+      console.warn('⚠️ NLP processing failed for pagination:', nlpError)
+    }
+
+    // ⭐ FIX: Map filetype to contentType
+    let contentTypeFilter = null
+    if (nlpFilters?.filetype) {
+      contentTypeFilter = mapFileTypeToContentType(nlpFilters.filetype)
+    } else if (filters.contentType) {
+      contentTypeFilter = filters.contentType
+    }
+
     const response = await fetch('/api/search/query', {
       method: 'POST',
       headers: {
@@ -746,9 +829,9 @@ const goToPage = async (page) => {
         page: page,
         pageSize: 20,
         categories: filters.category ? [filters.category] : null,
-        contentTypes: filters.contentType ? [filters.contentType] : null,
-        fromDate: filters.dateFrom || null,
-        toDate: filters.dateTo || null,
+        contentTypes: contentTypeFilter ? [contentTypeFilter] : null,
+        fromDate: nlpFilters?.fromDate || filters.dateFrom || null,
+        toDate: nlpFilters?.toDate || filters.dateTo || null,
         includeOcrContent: true
       })
     })
@@ -849,9 +932,7 @@ const getFileIcon = (contentType) => {
 </script>
 
 <style scoped>
-/* [All previous CSS remains the same, adding new styles for document viewer] */
-
-/* Previous styles... */
+/* All your existing CSS remains exactly the same */
 *,
 *::before,
 *::after {
