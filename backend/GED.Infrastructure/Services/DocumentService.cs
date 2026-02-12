@@ -9,16 +9,19 @@ public class DocumentService : IDocumentService
     private readonly ILogger<DocumentService> _logger;
     private readonly IStorageService _storageService;
     private readonly ITextExtractionService _textExtractionService;
+    private readonly DocumentDateExtractor? _dateExtractor; // ⭐ NEW
     private readonly string _basePath;
 
     public DocumentService(
         ILogger<DocumentService> logger,
         IStorageService storageService,
-        ITextExtractionService textExtractionService)
+        ITextExtractionService textExtractionService,
+        DocumentDateExtractor? dateExtractor = null) // ⭐ OPTIONAL - graceful degradation
     {
         _logger = logger;
         _storageService = storageService;
         _textExtractionService = textExtractionService;
+        _dateExtractor = dateExtractor; // ⭐ NEW
         _basePath = "/var/lib/ged/documents";
         Directory.CreateDirectory(_basePath);
     }
@@ -78,6 +81,48 @@ public class DocumentService : IDocumentService
                 _logger.LogWarning(ex, "Could not extract text from document");
             }
 
+            // ⭐ NEW: Extract document date using LLM
+            DateTime? documentDate = null;
+            if (_dateExtractor != null && !string.IsNullOrWhiteSpace(extractedText))
+            {
+                var category = metadata?.ContainsKey("category") == true ? 
+                    metadata["category"]?.ToString() : "Other";
+                
+                try
+                {
+                    var dateInfo = await _dateExtractor.ExtractDocumentDateAsync(
+                        extractedText,
+                        fileName,
+                        category ?? "Other",
+                        cancellationToken
+                    );
+
+                    if (dateInfo?.DocumentDate != null && dateInfo.Confidence > 0.5f)
+                    {
+                        documentDate = dateInfo.DocumentDate.Value;
+                        
+                        // Store in metadata for debugging
+                        metadata ??= new Dictionary<string, object>();
+                        metadata["extracted_date"] = documentDate.Value.ToString("yyyy-MM-dd");
+                        metadata["date_confidence"] = dateInfo.Confidence;
+                        metadata["date_type"] = dateInfo.DateType;
+                        
+                        _logger.LogInformation(
+                            "✅ Document date extracted: {Date} (confidence: {Confidence:F2})",
+                            documentDate.Value.ToString("yyyy-MM-dd"),
+                            dateInfo.Confidence
+                        );
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to extract document date, using upload date");
+                }
+            }
+
+            // ⭐ CRITICAL: Use extracted date if available, otherwise use upload time
+            var createdAt = documentDate ?? DateTime.UtcNow;
+
             var document = new Document
             {
                 Id = documentId,
@@ -86,8 +131,8 @@ public class DocumentService : IDocumentService
                 FilePath = filePath,
                 ContentType = contentType,
                 FileSize = fileInfo.Length,
-                CreatedAt = DateTime.UtcNow,
-                Status = DocumentStatus.Indexed,  // ✅ Set to Indexed
+                CreatedAt = createdAt, // ⭐ CHANGED: Use extracted date
+                Status = DocumentStatus.Indexed,
                 ExtractedText = extractedText,
                 Metadata = metadata,
                 Category = metadata?.ContainsKey("category") == true ? 
@@ -99,12 +144,14 @@ public class DocumentService : IDocumentService
             var metadataPath = Path.Combine(_basePath, $"{documentId}.json");
             var json = System.Text.Json.JsonSerializer.Serialize(document);
             await File.WriteAllTextAsync(metadataPath, json, cancellationToken);
+            
             _logger.LogInformation(
-                "Document created: ID={Id}, Title={Title}, Category={Category}, ExtractedText length={Length}",
+                "Document created: ID={Id}, Title={Title}, Category={Category}, DocumentDate={DocumentDate}, ExtractedText length={Length}",
                 document.Id, document.Title, document.Category, 
+                documentDate?.ToString("yyyy-MM-dd") ?? "NOT_EXTRACTED",
                 document.ExtractedText?.Length ?? 0
             );
-            _logger.LogInformation("Document {DocumentId} uploaded successfully", documentId);
+            
             return document;
         }
         catch (Exception ex)

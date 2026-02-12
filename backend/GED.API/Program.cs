@@ -73,6 +73,11 @@ builder.Services.AddSingleton<IMessageQueueService>(sp =>
 
 // Register Services
 builder.Services.AddHttpClient<INlpService, NlpService>();
+
+// ⭐ NEW: Register DocumentDateExtractor
+builder.Services.AddHttpClient<DocumentDateExtractor>();
+builder.Services.AddScoped<DocumentDateExtractor>();
+
 // Register dependencies FIRST
 builder.Services.AddScoped<ITextExtractionService, TextExtractionService>();
 builder.Services.AddScoped<INlpService, NlpService>();
