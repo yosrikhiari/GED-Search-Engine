@@ -458,9 +458,19 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label">Category</label>
-            <select v-model="uploadData.category" class="filter-select" :class="{ 'ai-suggested': aiSuggestion }">
-              <option value="">{{ useAiSuggestions ? 'AI will suggest a category' : 'Select a category' }}</option>
+            <label class="form-label">
+              Category <span class="required-indicator">*</span>
+            </label>
+            <select 
+              v-model="uploadData.category" 
+              class="filter-select" 
+              :class="{ 
+                'ai-suggested': aiSuggestion,
+                'error': !uploadData.category && selectedFile 
+              }"
+              required
+            >
+              <option value="">{{ useAiSuggestions ? 'AI will suggest a category' : 'Select a category (required)' }}</option>
               <option value="Invoice">📄 Invoice</option>
               <option value="Contract">📜 Contract</option>
               <option value="Report">📊 Report</option>
@@ -471,14 +481,18 @@
               <option value="Image">🖼️ Image</option>
               <option value="Other">📎 Other</option>
             </select>
+            <p v-if="!uploadData.category && selectedFile" class="error-message">
+              Category is required
+            </p>
           </div>
 
           <!-- Action Buttons -->
           <div class="modal-actions">
             <button
               @click="uploadDocument"
-              :disabled="!selectedFile || uploading"
+              :disabled="!selectedFile || uploading || !uploadData.category"
               class="upload-submit"
+              :class="{ 'disabled': !selectedFile || uploading || !uploadData.category }"
             >
               <span v-if="!uploading">Upload</span>
               <span v-else class="loading-text">
@@ -493,6 +507,7 @@
               Cancel
             </button>
           </div>
+          
         </div>
       </div>
     </div>
@@ -848,7 +863,16 @@ const goToPage = async (page) => {
 }
 
 const uploadDocument = async () => {
-  if (!selectedFile.value) return
+  if (!selectedFile.value) {
+    alert('Please select a file to upload')
+    return
+  }
+
+  // ⭐ NEW: Validate category is selected
+  if (!uploadData.category || uploadData.category.trim() === '') {
+    alert('Please select a category for the document')
+    return
+  }
 
   uploading.value = true
 
@@ -856,9 +880,7 @@ const uploadDocument = async () => {
     const formData = new FormData()
     formData.append('file', selectedFile.value)
     formData.append('title', uploadData.title || selectedFile.value.name)
-    if (uploadData.category) {
-      formData.append('category', uploadData.category)
-    }
+    formData.append('category', uploadData.category)
 
     console.log('Uploading document:', {
       fileName: selectedFile.value.name,
@@ -883,7 +905,7 @@ const uploadDocument = async () => {
     } else {
       const error = await response.json()
       console.error('Upload failed:', error)
-      alert(`Upload failed: ${error.message || 'Unknown error'}`)
+      alert(`Upload failed: ${error.error || error.message || 'Unknown error'}`)
     }
   } catch (error) {
     console.error('Upload error:', error)
@@ -1085,6 +1107,52 @@ const getFileIcon = (contentType) => {
   color: #9ca3af;
   pointer-events: none;
   flex-shrink: 0;
+}
+
+/* Required field indicator */
+.required-indicator {
+  color: #ef4444;
+  font-weight: 700;
+  margin-left: 0.25rem;
+}
+
+/* Error state for form fields */
+.filter-select.error,
+.form-input.error {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.filter-select.error:focus,
+.form-input.error:focus {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.1);
+}
+
+/* Error message */
+.error-message {
+  font-size: 0.75rem;
+  color: #ef4444;
+  margin-top: 0.375rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.error-message::before {
+  content: "⚠";
+  font-size: 0.875rem;
+}
+
+/* Disabled upload button styling */
+.upload-submit.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.upload-submit.disabled:hover {
+  box-shadow: none;
 }
 
 .search-input {

@@ -25,62 +25,75 @@ public class DocumentsController : ControllerBase
         _logger = logger;
     }
 
-    [HttpPost("upload")]
-    public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromForm] string? title = null, [FromForm] string? category = null)
+[HttpPost("upload")]
+public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromForm] string? title = null, [FromForm] string? category = null)
+{
+    try
     {
-        try
+        if (file == null || file.Length == 0)
         {
-            if (file == null || file.Length == 0)
-            {
-                return BadRequest(new { error = "No file uploaded" });
-            }
-
-            _logger.LogInformation("Uploading document: {FileName}, Title: {Title}, Category: {Category}", 
-                file.FileName, title, category);
-
-            using var stream = file.OpenReadStream();
-            var metadata = new Dictionary<string, object>();
-            if (!string.IsNullOrEmpty(category))
-            {
-                metadata["category"] = category;
-            }
-
-            var document = await _documentService.UploadDocumentAsync(
-                stream,
-                file.FileName,
-                file.ContentType,
-                title ?? file.FileName,
-                metadata
-            );
-
-            _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
-
-            // Index the document - CRITICAL for search
-            var indexed = await _searchService.IndexDocumentAsync(document);
-            if (!indexed)
-            {
-                _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
-            }
-            else
-            {
-                _logger.LogInformation("Document {DocumentId} successfully indexed", document.Id);
-            }
-
-            // Queue OCR if it's an image or PDF
-            if (document.ContentType.StartsWith("image/") || document.ContentType == "application/pdf")
-            {
-                await _ocrService.QueueOcrJobAsync(document.Id);
-                _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
-            }
-
-            return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
+            return BadRequest(new { error = "No file uploaded" });
         }
-        catch (Exception ex)
+
+        // ⭐ NEW: Validate that category is provided
+        if (string.IsNullOrWhiteSpace(category))
         {
-            _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
-            return StatusCode(500, new { error = "Upload failed", message = ex.Message, details = ex.ToString() });
+            return BadRequest(new { error = "Category is required. Please select a category for the document." });
         }
+
+        // ⭐ NEW: Validate category against allowed values
+        var allowedCategories = new[] { "Invoice", "Contract", "Report", "Letter", "Memo", "Presentation", "Spreadsheet", "Image", "Other" };
+        if (!allowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
+        {
+            return BadRequest(new { error = $"Invalid category. Allowed values: {string.Join(", ", allowedCategories)}" });
+        }
+
+        _logger.LogInformation("Uploading document: {FileName}, Title: {Title}, Category: {Category}", 
+            file.FileName, title, category);
+
+        using var stream = file.OpenReadStream();
+        var metadata = new Dictionary<string, object>();
+        
+        // Category is now guaranteed to be non-null
+        metadata["category"] = category;
+
+        var document = await _documentService.UploadDocumentAsync(
+            stream,
+            file.FileName,
+            file.ContentType,
+            title ?? file.FileName,
+            metadata
+        );
+
+        _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
+
+        // Index the document - CRITICAL for search
+        var indexed = await _searchService.IndexDocumentAsync(document);
+        if (!indexed)
+        {
+            _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
+        }
+        else
+        {
+            _logger.LogInformation("Document {DocumentId} successfully indexed", document.Id);
+        }
+
+        // Queue OCR if it's an image or PDF
+        if (document.ContentType.StartsWith("image/") || document.ContentType == "application/pdf")
+        {
+            await _ocrService.QueueOcrJobAsync(document.Id);
+            _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
+        }
+
+        return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
     }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
+        return StatusCode(500, new { error = "Upload failed", message = ex.Message, details = ex.ToString() });
+    }
+}
+
 
     [HttpGet("{id}")]
     public async Task<ActionResult<Document>> GetDocument(Guid id)
