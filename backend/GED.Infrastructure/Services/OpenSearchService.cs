@@ -241,19 +241,55 @@ private QueryContainer BuildPrecisionQuery(
     }
 
     // Date range filter
+// Date range filter
     if (request.FromDate.HasValue || request.ToDate.HasValue)
     {
         _logger.LogInformation("🔒 Applying date range filter: {From} to {To}", 
             request.FromDate?.ToString("yyyy-MM-dd") ?? "start", 
             request.ToDate?.ToString("yyyy-MM-dd") ?? "end");
         
-        filterQueries.Add(dq => dq.DateRange(dr => dr
-            .Field(doc => doc.CreatedAt)
-            .GreaterThanOrEquals(request.FromDate)
-            .LessThanOrEquals(request.ToDate)
+        // ⭐ CRITICAL FIX: The previous version didn't work correctly because
+        // OpenSearch's "Should" clause on date ranges doesn't properly handle
+        // nullable fields. We need to explicitly check field existence.
+        
+        filterQueries.Add(dq => dq.Bool(b => b
+            .Should(
+                // Option 1: DocumentDate EXISTS and is within the date range
+                // This matches documents where the content date (e.g., contract effective date) 
+                // falls within the search range
+                s => s.Bool(b1 => b1
+                    .Must(
+                        // MUST have the DocumentDate field
+                        m => m.Exists(e => e.Field(doc => doc.DocumentDate)),
+                        // AND the DocumentDate must be in the specified range
+                        m => m.DateRange(dr => dr
+                            .Field(doc => doc.DocumentDate)
+                            .GreaterThanOrEquals(request.FromDate)
+                            .LessThanOrEquals(request.ToDate)
+                        )
+                    )
+                ),
+                // Option 2: DocumentDate does NOT exist, so use CreatedAt (upload date)
+                // This matches documents that don't have an extracted document date,
+                // so we fall back to when they were uploaded to the system
+                s => s.Bool(b2 => b2
+                    .Must(
+                        // MUST NOT have the DocumentDate field
+                        m => m.Bool(nb => nb
+                            .MustNot(mn => mn.Exists(e => e.Field(doc => doc.DocumentDate)))
+                        ),
+                        // AND the CreatedAt (upload date) must be in the specified range
+                        m => m.DateRange(dr => dr
+                            .Field(doc => doc.CreatedAt)
+                            .GreaterThanOrEquals(request.FromDate)
+                            .LessThanOrEquals(request.ToDate)
+                        )
+                    )
+                )
+            )
+            .MinimumShouldMatch(1)  // At least one of the two options must match
         ));
     }
-
     // ========== TEXT SEARCH QUERIES (Tiered scoring) ==========
     
     if (!string.IsNullOrWhiteSpace(query))
@@ -613,36 +649,37 @@ private SortDescriptor<DocumentIndexModel> BuildSort(
             );
     }
 
-    private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
+private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
+{
+    var doc = hit.Source;
+    var highlights = new List<string>();
+
+    if (hit.Highlight != null)
     {
-        var doc = hit.Source;
-        var highlights = new List<string>();
-
-        if (hit.Highlight != null)
+        foreach (var highlight in hit.Highlight.Values)
         {
-            foreach (var highlight in hit.Highlight.Values)
-            {
-                highlights.AddRange(highlight);
-            }
+            highlights.AddRange(highlight);
         }
-
-        return new DocumentSearchHit
-        {
-            Id = doc.Id,
-            Title = doc.Title,
-            Description = doc.Description,
-            FileName = doc.FileName,
-            ContentType = doc.ContentType,
-            FileSize = doc.FileSize,
-            CreatedAt = doc.CreatedAt,
-            ModifiedAt = doc.ModifiedAt,
-            Category = doc.Category,
-            Tags = doc.Tags,
-            Score = (float)(hit.Score ?? 0),
-            Highlights = highlights.Any() ? highlights : null,
-            Metadata = doc.Metadata
-        };
     }
+
+    return new DocumentSearchHit
+    {
+        Id = doc.Id,
+        Title = doc.Title,
+        Description = doc.Description,
+        FileName = doc.FileName,
+        ContentType = doc.ContentType,
+        FileSize = doc.FileSize,
+        CreatedAt = doc.CreatedAt,  // Upload date
+        DocumentDate = doc.DocumentDate,  // ⭐ NEW: Document content date
+        ModifiedAt = doc.ModifiedAt,
+        Category = doc.Category,
+        Tags = doc.Tags,
+        Score = (float)(hit.Score ?? 0),
+        Highlights = highlights.Any() ? highlights : null,
+        Metadata = doc.Metadata
+    };
+}
 
     private Dictionary<string, List<FacetValue>> ExtractFacets(IReadOnlyDictionary<string, IAggregate> aggregations)
     {
@@ -820,26 +857,27 @@ private SortDescriptor<DocumentIndexModel> BuildSort(
         return response.Found ? response.Source : null;
     }
 
-    private DocumentIndexModel MapToIndexModel(Document document)
+private DocumentIndexModel MapToIndexModel(Document document)
+{
+    return new DocumentIndexModel
     {
-        return new DocumentIndexModel
-        {
-            Id = document.Id,
-            Title = document.Title,
-            Description = document.Description,
-            FileName = document.FileName,
-            ContentType = document.ContentType,
-            FileSize = document.FileSize,
-            CreatedAt = document.CreatedAt,
-            ModifiedAt = document.ModifiedAt,
-            Status = document.Status.ToString(),
-            ExtractedText = document.ExtractedText,
-            OcrText = document.OcrText,
-            Tags = document.Tags,
-            Category = document.Category,
-            Metadata = document.Metadata
-        };
-    }
+        Id = document.Id,
+        Title = document.Title,
+        Description = document.Description,
+        FileName = document.FileName,
+        ContentType = document.ContentType,
+        FileSize = document.FileSize,
+        CreatedAt = document.CreatedAt,  // Upload date
+        DocumentDate = document.DocumentDate,  // ⭐ NEW: Document content date
+        ModifiedAt = document.ModifiedAt,
+        Status = document.Status.ToString(),
+        ExtractedText = document.ExtractedText,
+        OcrText = document.OcrText,
+        Tags = document.Tags,
+        Category = document.Category,
+        Metadata = document.Metadata
+    };
+}
 
     private string MapFileTypeToContentType(string fileType)
     {
@@ -866,7 +904,8 @@ public class DocumentIndexModel
     public string FileName { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
     public long FileSize { get; set; }
-    public DateTime CreatedAt { get; set; }
+    public DateTime CreatedAt { get; set; }  // Upload date
+    public DateTime? DocumentDate { get; set; }  // ⭐ NEW: Document content date
     public DateTime? ModifiedAt { get; set; }
     public string Status { get; set; } = "Indexed";
     public string? ExtractedText { get; set; }

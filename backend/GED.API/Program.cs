@@ -134,11 +134,12 @@ try
                     .Keyword(k => k.Name(n => n.ContentType))
                     .Keyword(k => k.Name(n => n.FileName))
                     .Number(n => n.Name(nn => nn.FileSize).Type(NumberType.Long))
-                    .Date(d => d.Name(n => n.CreatedAt))
+                    .Date(d => d.Name(n => n.CreatedAt))  // Upload date
+                    .Date(d => d.Name(n => n.DocumentDate))  // ⭐ NEW: Document date
                     .Date(d => d.Name(n => n.ModifiedAt))
                     .Keyword(k => k.Name(n => n.Status))
                 )
-            )
+            )    
         );
 
         if (createIndexResponse.IsValid)

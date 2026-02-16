@@ -88,7 +88,9 @@ public class DocumentSearchHit
     
     public long FileSize { get; set; }
     
-    public DateTime CreatedAt { get; set; }
+    public DateTime CreatedAt { get; set; }  // Upload date
+    
+    public DateTime? DocumentDate { get; set; }  // ⭐ NEW: Document content date
     
     public DateTime? ModifiedAt { get; set; }
     

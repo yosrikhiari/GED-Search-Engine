@@ -26,7 +26,11 @@ public class Document
     
     public string? FileHash { get; set; }
     
-    public DateTime CreatedAt { get; set; }
+    // ⭐ CHANGED: CreatedAt is now UPLOAD time, not document time
+    public DateTime CreatedAt { get; set; }  // When uploaded to platform
+    
+    // ⭐ NEW: Actual date from document content (e.g., contract effective date)
+    public DateTime? DocumentDate { get; set; }  // Extracted from document
     
     public DateTime? ModifiedAt { get; set; }
     
