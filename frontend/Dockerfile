@@ -4,11 +4,14 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 
+# Fix npm "Exit handler never called" crash on Alpine (memory issue)
+ENV NODE_OPTIONS=--max-old-space-size=2048
+
 # Copy package files
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 # Copy source code
 COPY . .

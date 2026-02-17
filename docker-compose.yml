@@ -25,31 +25,31 @@ services:
     networks:
       - ged-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
 
   # RabbitMQ - Message queue for OCR jobs
   rabbitmq:
-      image: rabbitmq:3.12-management
-      container_name: ged-rabbitmq
-      environment:
-        - RABBITMQ_DEFAULT_USER=admin
-        - RABBITMQ_DEFAULT_PASS=admin123
-        - RABBITMQ_DEFAULT_VHOST=/
-      ports:
-        - "5673:5672"
-        - "15673:15672"    
-      volumes:
-        - rabbitmq-data:/var/lib/rabbitmq
-      networks:
-        - ged-network
-      healthcheck:
-        test: ["CMD", "rabbitmq-diagnostics", "ping"]
-        interval: 30s
-        timeout: 10s
-        retries: 5
+    image: rabbitmq:3.12-management
+    container_name: ged-rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin123
+      - RABBITMQ_DEFAULT_VHOST=/
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   # PostgreSQL - Metadata database
   postgres:
@@ -71,17 +71,61 @@ services:
       timeout: 5s
       retries: 5
 
+  # Ollama - Local LLM server (llama3.2)
+  # FIX: The ollama/ollama image does not ship with curl, so we use the
+  # Ollama HTTP API with wget (also absent) or the ollama CLI itself.
+  # Solution: use `ollama list` which exits 0 when the server is ready.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ged-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - ged-network
+    healthcheck:
+      # `ollama list` calls the local REST API internally and exits 0 when ready.
+      # start_period gives Ollama time to initialize before health checks begin.
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Ollama model puller - runs once to pull llama3.2, then exits
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ged-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - ged-network
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: >
+      /bin/sh -c "
+        echo '⏳ Pulling llama3.2 model (this may take a few minutes on first run)...' &&
+        ollama pull llama3.2 &&
+        echo '✅ llama3.2 is ready!'
+      "
+    restart: "no"
+
   # Backend API - .NET 8 Web API
+  # FIX: Removed hard dependency on ollama being healthy.
+  # The backend handles a missing/unavailable Ollama gracefully (NLP:Enabled=true
+  # but the code already has try/catch fallbacks throughout). This means the
+  # backend starts even if Ollama is still loading its model.
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      network: host
     container_name: ged-backend
     ports:
       - "5001:8080"
-    # ⭐ FIX FOR LINUX: Allow container to access host Ollama ⭐
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Works on Linux, Mac, and Windows
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - ASPNETCORE_URLS=http://+:8080
@@ -92,8 +136,7 @@ services:
       - RabbitMQ__Password=admin123
       - ConnectionStrings__DefaultConnection=Host=postgres;Database=ged_db;Username=ged_user;Password=ged_pass;Port=5432
       - NLP__Enabled=true
-      # ⭐ THIS NOW WORKS ON LINUX ⭐
-      - NLP__LlmApiEndpoint=http://host.docker.internal:11434/api/generate
+      - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
       - NLP__Model=llama3.2
     depends_on:
       opensearch:
@@ -102,6 +145,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      # FIX: Use "service_started" instead of "service_healthy" for Ollama.
+      # The backend has full try/catch fallbacks for all NLP/LLM calls, so it
+      # works fine if Ollama is still warming up. This prevents the entire
+      # stack from failing when Ollama's health check takes time.
+      ollama:
+        condition: service_started
     networks:
       - ged-network
     volumes:
@@ -114,6 +163,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      network: host
     container_name: ged-frontend
     ports:
       - "3000:80"
@@ -133,6 +183,8 @@ volumes:
   postgres-data:
     driver: local
   ged-documents:
+    driver: local
+  ollama-data:
     driver: local
 
 networks:
