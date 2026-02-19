@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 
@@ -12,88 +13,133 @@ public class DocumentsController : ControllerBase
     private readonly ISearchService _searchService;
     private readonly IOcrService _ocrService;
     private readonly ILogger<DocumentsController> _logger;
+    private readonly IConfiguration _configuration;
+
+    // Allowed categories — single source of truth, referenced by both validation and error messages
+    private static readonly string[] AllowedCategories =
+    {
+        "Invoice", "Contract", "Report", "Letter",
+        "Memo", "Presentation", "Spreadsheet", "Image", "Other"
+    };
 
     public DocumentsController(
         IDocumentService documentService,
         ISearchService searchService,
         IOcrService ocrService,
-        ILogger<DocumentsController> logger)
+        ILogger<DocumentsController> logger,
+        IConfiguration configuration)
     {
         _documentService = documentService;
-        _searchService = searchService;
-        _ocrService = ocrService;
-        _logger = logger;
+        _searchService   = searchService;
+        _ocrService      = ocrService;
+        _logger          = logger;
+        _configuration   = configuration;
     }
 
-[HttpPost("upload")]
-public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromForm] string? title = null, [FromForm] string? category = null)
-{
-    try
+    [HttpPost("upload")]
+    public async Task<ActionResult<Document>> UploadDocument(
+        IFormFile file,
+        [FromForm] string? title    = null,
+        [FromForm] string? category = null)
     {
-        if (file == null || file.Length == 0)
+        try
         {
-            return BadRequest(new { error = "No file uploaded" });
-        }
+            // ── Validate: file present ────────────────────────────────────────
+            if (file == null || file.Length == 0)
+                return BadRequest(new { error = "No file uploaded" });
 
-        // ⭐ NEW: Validate that category is provided
-        if (string.IsNullOrWhiteSpace(category))
+            // ── FIX #4: Enforce file size limit from appsettings.json ─────────
+            // Previously MaxUploadSizeMB was declared in config but never read here.
+            var maxSizeMb  = _configuration.GetValue<int>("Document:MaxUploadSizeMB", 100);
+            var maxSizeBytes = (long)maxSizeMb * 1024 * 1024;
+
+            if (file.Length > maxSizeBytes)
+            {
+                _logger.LogWarning(
+                    "File upload rejected — size {SizeMB:F1}MB exceeds limit of {LimitMB}MB",
+                    file.Length / 1_048_576.0, maxSizeMb);
+
+                return BadRequest(new
+                {
+                    error  = $"File size {file.Length / 1_048_576.0:F1}MB exceeds the maximum allowed size of {maxSizeMb}MB.",
+                    limitMb   = maxSizeMb,
+                    actualMb  = Math.Round(file.Length / 1_048_576.0, 2)
+                });
+            }
+
+            // ── Validate: allowed MIME type ───────────────────────────────────
+            var allowedTypes = _configuration
+                .GetSection("Document:AllowedFileTypes")
+                .Get<string[]>() ?? Array.Empty<string>();
+
+            if (allowedTypes.Length > 0 &&
+                !allowedTypes.Contains(file.ContentType, StringComparer.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "File upload rejected — content type '{ContentType}' not in allowed list",
+                    file.ContentType);
+
+                return BadRequest(new
+                {
+                    error        = $"File type '{file.ContentType}' is not allowed.",
+                    allowedTypes = allowedTypes
+                });
+            }
+
+            // ── Validate: category required ───────────────────────────────────
+            if (string.IsNullOrWhiteSpace(category))
+                return BadRequest(new { error = "Category is required. Please select a category for the document." });
+
+            if (!AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
+                return BadRequest(new
+                {
+                    error            = $"Invalid category '{category}'.",
+                    allowedCategories = AllowedCategories
+                });
+
+            _logger.LogInformation(
+                "Uploading document: {FileName} ({SizeMB:F2}MB), Title: {Title}, Category: {Category}",
+                file.FileName, file.Length / 1_048_576.0, title, category);
+
+            // ── Upload & index ────────────────────────────────────────────────
+            using var stream = file.OpenReadStream();
+            var metadata = new Dictionary<string, object>
+            {
+                ["category"] = category
+            };
+
+            var document = await _documentService.UploadDocumentAsync(
+                stream,
+                file.FileName,
+                file.ContentType,
+                title ?? file.FileName,
+                metadata
+            );
+
+            _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
+
+            var indexed = await _searchService.IndexDocumentAsync(document);
+            if (!indexed)
+                _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
+            else
+                _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
+
+            // Queue OCR for images and PDFs
+            if (document.ContentType.StartsWith("image/") ||
+                document.ContentType == "application/pdf")
+            {
+                await _ocrService.QueueOcrJobAsync(document.Id);
+                _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
+            }
+
+            return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
+        }
+        catch (Exception ex)
         {
-            return BadRequest(new { error = "Category is required. Please select a category for the document." });
+            _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
+            return StatusCode(500, new { error = "Upload failed", message = ex.Message });
         }
-
-        // ⭐ NEW: Validate category against allowed values
-        var allowedCategories = new[] { "Invoice", "Contract", "Report", "Letter", "Memo", "Presentation", "Spreadsheet", "Image", "Other" };
-        if (!allowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
-        {
-            return BadRequest(new { error = $"Invalid category. Allowed values: {string.Join(", ", allowedCategories)}" });
-        }
-
-        _logger.LogInformation("Uploading document: {FileName}, Title: {Title}, Category: {Category}", 
-            file.FileName, title, category);
-
-        using var stream = file.OpenReadStream();
-        var metadata = new Dictionary<string, object>();
-        
-        // Category is now guaranteed to be non-null
-        metadata["category"] = category;
-
-        var document = await _documentService.UploadDocumentAsync(
-            stream,
-            file.FileName,
-            file.ContentType,
-            title ?? file.FileName,
-            metadata
-        );
-
-        _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
-
-        // Index the document - CRITICAL for search
-        var indexed = await _searchService.IndexDocumentAsync(document);
-        if (!indexed)
-        {
-            _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
-        }
-        else
-        {
-            _logger.LogInformation("Document {DocumentId} successfully indexed", document.Id);
-        }
-
-        // Queue OCR if it's an image or PDF
-        if (document.ContentType.StartsWith("image/") || document.ContentType == "application/pdf")
-        {
-            await _ocrService.QueueOcrJobAsync(document.Id);
-            _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
-        }
-
-        return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
     }
-    catch (Exception ex)
-    {
-        _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
-        return StatusCode(500, new { error = "Upload failed", message = ex.Message, details = ex.ToString() });
-    }
-}
-
 
     [HttpGet("{id}")]
     public async Task<ActionResult<Document>> GetDocument(Guid id)
@@ -101,11 +147,7 @@ public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromFo
         try
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
-            if (document == null)
-            {
-                return NotFound();
-            }
-            return Ok(document);
+            return document == null ? NotFound() : Ok(document);
         }
         catch (Exception ex)
         {
@@ -120,10 +162,7 @@ public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromFo
         try
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
-            if (document == null)
-            {
-                return NotFound();
-            }
+            if (document == null) return NotFound();
 
             var stream = await _documentService.GetDocumentContentAsync(id);
             return File(stream, document.ContentType, document.FileName);
@@ -141,10 +180,7 @@ public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromFo
         try
         {
             var deleted = await _documentService.DeleteDocumentAsync(id);
-            if (!deleted)
-            {
-                return NotFound();
-            }
+            if (!deleted) return NotFound();
 
             await _searchService.DeleteDocumentIndexAsync(id);
             return NoContent();
@@ -162,13 +198,10 @@ public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromFo
         try
         {
             if (id != document.Id)
-            {
                 return BadRequest(new { error = "ID mismatch" });
-            }
 
             var updated = await _documentService.UpdateDocumentAsync(id, document);
             await _searchService.UpdateDocumentIndexAsync(updated);
-
             return Ok(updated);
         }
         catch (Exception ex)
@@ -184,15 +217,11 @@ public async Task<ActionResult<Document>> UploadDocument(IFormFile file, [FromFo
         try
         {
             var job = await _ocrService.GetOcrJobStatusAsync(id);
-            if (job == null)
-            {
-                return NotFound();
-            }
-            return Ok(job);
+            return job == null ? NotFound() : Ok(job);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting OCR status");
+            _logger.LogError(ex, "Error getting OCR status for document {DocumentId}", id);
             return StatusCode(500, new { error = "Failed to get OCR status", message = ex.Message });
         }
     }
