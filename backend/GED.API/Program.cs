@@ -206,7 +206,118 @@ if (app.Environment.IsDevelopment())
         c.RoutePrefix = string.Empty;
     });
 }
+// ── ADDITIONS to Program.cs (replace the "Application Services" section) ─────
+//
+// This file shows ONLY the changed / added blocks.
+// Everything else in Program.cs (Serilog, CORS, Swagger, Kestrel limits,
+// PostgreSQL, OpenSearch client, RabbitMQ, OcrWorkerService) remains the same.
+//
+// ─────────────────────────────────────────────────────────────────────────────
 
+// ── #13 Redis caching ─────────────────────────────────────────────────────────
+// StackExchange.Redis backed IDistributedCache.
+// When Redis is unavailable at startup the app still works — CachedSearchService
+// degrades gracefully on every call.
+
+var redisEnabled        = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
+var redisConnectionStr  = builder.Configuration["Redis:ConnectionString"]
+                          ?? "localhost:6379";
+
+if (redisEnabled)
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionStr;
+        options.InstanceName  = "ged:";           // namespace prefix
+    });
+    Log.Information("✅ Redis cache configured: {Conn}", redisConnectionStr);
+}
+else
+{
+    // Fallback to in-process memory cache so IDistributedCache is always registered
+    builder.Services.AddDistributedMemoryCache();
+    Log.Information("⚠️  Redis disabled — using in-memory distributed cache");
+}
+
+// ── #14 Embeddings & vector search ───────────────────────────────────────────
+
+builder.Services.AddHttpClient<OllamaEmbeddingService>();
+builder.Services.AddSingleton<IEmbeddingService>(sp =>
+    sp.GetRequiredService<OllamaEmbeddingService>());
+
+builder.Services.AddScoped<VectorSearchService>();
+
+// ── Application Services ──────────────────────────────────────────────────────
+
+// Step 1: Leaf services (no custom-service dependencies)
+builder.Services.AddScoped<ITextExtractionService, TextExtractionService>();
+builder.Services.AddScoped<IStorageService, LocalStorageService>();
+
+// Step 2: Services that need a typed HttpClient
+builder.Services.AddHttpClient<NlpService>();
+builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
+
+builder.Services.AddHttpClient<DocumentMetadataService>();
+builder.Services.AddScoped<DocumentMetadataService>();
+
+builder.Services.AddHttpClient<DocumentDateExtractor>();
+builder.Services.AddScoped<DocumentDateExtractor>();
+
+// Step 3: Core search pipeline
+//
+//   OpenSearchService    ← keyword/BM25 (concrete class, needed by HybridSearchService)
+//   HybridSearchService  ← combines keyword + vector (#14)  → registered as ISearchService
+//   CachedSearchService  ← Redis cache decorator (#13)      → wraps ISearchService
+//
+// Registration order matters: later registrations for ISearchService WIN.
+
+builder.Services.AddScoped<OpenSearchService>();     // concrete — injected by HybridSearchService
+
+// #14: Hybrid search — becomes the "inner" ISearchService
+builder.Services.AddScoped<HybridSearchService>();
+
+// #13: Cache decorator — outermost layer, what controllers see
+builder.Services.AddScoped<ISearchService>(sp =>
+{
+    var hybrid  = sp.GetRequiredService<HybridSearchService>();
+    var cache   = sp.GetRequiredService<IDistributedCache>();
+    var logger  = sp.GetRequiredService<ILogger<CachedSearchService>>();
+    var config  = sp.GetRequiredService<IConfiguration>();
+    return new CachedSearchService(hybrid, cache, logger, config);
+});
+
+builder.Services.AddScoped<IOcrService, TesseractOcrService>();
+builder.Services.AddScoped<IDocumentService, DocumentService>();
+
+// ── Background workers ────────────────────────────────────────────────────────
+
+// OCR consumer (existing)
+builder.Services.AddHostedService(sp => new OcrWorkerService(
+    sp,
+    sp.GetRequiredService<ILogger<OcrWorkerService>>(),
+    rabbitMqHost,
+    rabbitMqUser,
+    rabbitMqPass
+));
+
+// #15: Auto-reindex worker
+builder.Services.AddHostedService<AutoReindexService>();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In the startup block, after OpenSearch index creation, add vector index init:
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── #14: Vector index initialization ─────────────────────────────────────────
+try
+{
+    using var scope = app.Services.CreateScope();
+    var vectorSvc   = scope.ServiceProvider.GetRequiredService<VectorSearchService>();
+    await vectorSvc.EnsureIndexAsync();
+}
+catch (Exception ex)
+{
+    Log.Warning(ex, "Vector index initialization failed — semantic search unavailable");
+}
 app.Use(async (context, next) =>
 {
     Log.Information("HTTP {Method} {Path}", context.Request.Method, context.Request.Path);

@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # OpenSearch - Document search engine
   opensearch:
     image: opensearchproject/opensearch:2.12.0
     container_name: ged-opensearch
@@ -30,7 +29,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # RabbitMQ - Message queue for OCR jobs
   rabbitmq:
     image: rabbitmq:3.12-management
     container_name: ged-rabbitmq
@@ -51,7 +49,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # PostgreSQL - Metadata database
   postgres:
     image: postgres:16-alpine
     container_name: ged-postgres
@@ -71,10 +68,30 @@ services:
       timeout: 5s
       retries: 5
 
-  # Ollama - Local LLM server (llama3.2)
-  # FIX: The ollama/ollama image does not ship with curl, so we use the
-  # Ollama HTTP API with wget (also absent) or the ollama CLI itself.
-  # Solution: use `ollama list` which exits 0 when the server is ready.
+  # ── #13: Redis cache ──────────────────────────────────────────────────────────
+  # Single-node Redis for search result caching.
+  # maxmemory-policy allkeys-lru: when Redis is full it evicts the least-recently
+  # used keys — safe for a cache (we never store data that can't be rebuilt).
+  redis:
+    image: redis:7.2-alpine
+    container_name: ged-redis
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ged-ollama
@@ -85,8 +102,6 @@ services:
     networks:
       - ged-network
     healthcheck:
-      # `ollama list` calls the local REST API internally and exits 0 when ready.
-      # start_period gives Ollama time to initialize before health checks begin.
       test: ["CMD", "ollama", "list"]
       interval: 15s
       timeout: 10s
@@ -94,7 +109,6 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # Ollama model puller - runs once to pull llama3.2, then exits
   ollama-pull:
     image: ollama/ollama:latest
     container_name: ged-ollama-pull
@@ -107,17 +121,14 @@ services:
       - OLLAMA_HOST=http://ollama:11434
     entrypoint: >
       /bin/sh -c "
-        echo '⏳ Pulling llama3.2 model (this may take a few minutes on first run)...' &&
+        echo '⏳ Pulling llama3.2...' &&
         ollama pull llama3.2 &&
-        echo '✅ llama3.2 is ready!'
+        echo '⏳ Pulling nomic-embed-text (for semantic search)...' &&
+        ollama pull nomic-embed-text &&
+        echo '✅ All models ready!'
       "
     restart: "no"
 
-  # Backend API - .NET 8 Web API
-  # FIX: Removed hard dependency on ollama being healthy.
-  # The backend handles a missing/unavailable Ollama gracefully (NLP:Enabled=true
-  # but the code already has try/catch fallbacks throughout). This means the
-  # backend starts even if Ollama is still loading its model.
   backend:
     build:
       context: ./backend
@@ -138,6 +149,20 @@ services:
       - NLP__Enabled=true
       - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
       - NLP__Model=llama3.2
+      # #13: Redis
+      - Redis__Enabled=true
+      - Redis__ConnectionString=redis:6379
+      - Redis__SearchCacheTtlSeconds=120
+      # #14: Embeddings (opt-in — set to true once nomic-embed-text is pulled)
+      - Embeddings__Enabled=false
+      - Embeddings__Model=nomic-embed-text
+      - Embeddings__Dimensions=768
+      # #15: Auto-reindex
+      - Reindex__Enabled=true
+      - Reindex__BatchSize=50
+      - Reindex__StaleCheckIntervalMinutes=5
+      - Reindex__MissingCheckIntervalMinutes=15
+      - Reindex__FailedRetryIntervalMinutes=30
     depends_on:
       opensearch:
         condition: service_healthy
@@ -145,10 +170,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      # FIX: Use "service_started" instead of "service_healthy" for Ollama.
-      # The backend has full try/catch fallbacks for all NLP/LLM calls, so it
-      # works fine if Ollama is still warming up. This prevents the entire
-      # stack from failing when Ollama's health check takes time.
+      redis:
+        condition: service_healthy
       ollama:
         condition: service_started
     networks:
@@ -158,7 +181,6 @@ services:
       - ./backend/logs:/app/logs
     restart: unless-stopped
 
-  # Frontend - Vue.js SPA
   frontend:
     build:
       context: ./frontend
