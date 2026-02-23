@@ -51,7 +51,15 @@ public class GedDbContext : DbContext
             // Store Metadata dict as JSONB for flexible querying
             e.Property(d => d.Metadata)
              .HasColumnName("metadata")
-             .HasColumnType("jsonb");
+             .HasColumnType("jsonb")
+             .HasConversion(
+                v => v == null
+                    ? null
+                    : System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions?)null),
+                v => v == null
+                    ? null
+                    : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(v, (System.Text.Json.JsonSerializerOptions?)null)
+            );
 
             // Indexes for common queries
             e.HasIndex(d => d.CreatedAt).HasDatabaseName("ix_documents_created_at");

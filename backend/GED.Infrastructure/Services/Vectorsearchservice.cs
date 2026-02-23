@@ -3,6 +3,7 @@ using GED.Core.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using OpenSearch.Client;
+using OpenSearch.Net;
 using System.Text.Json;
 
 namespace GED.Infrastructure.Services;
@@ -12,24 +13,21 @@ namespace GED.Infrastructure.Services;
 ///   1. Creating the knn_vector mapping on the "ged-documents-vector" index
 ///   2. Indexing documents with their embeddings
 ///   3. Running k-NN queries and returning ranked document IDs
-///
-/// Works alongside the existing OpenSearchService (keyword search) so results
-/// from both can be merged / RRF-fused in SemanticSearchService.
 /// </summary>
 public class VectorSearchService
 {
-    private readonly IOpenSearchClient          _client;
-    private readonly IEmbeddingService          _embeddings;
+    private readonly IOpenSearchClient           _client;
+    private readonly IEmbeddingService           _embeddings;
     private readonly ILogger<VectorSearchService> _logger;
-    private readonly bool                       _enabled;
+    private readonly bool                        _enabled;
 
     private const string VectorIndex = "ged-documents-vector";
 
     public VectorSearchService(
-        IOpenSearchClient          client,
-        IEmbeddingService          embeddings,
+        IOpenSearchClient           client,
+        IEmbeddingService           embeddings,
         ILogger<VectorSearchService> logger,
-        IConfiguration             configuration)
+        IConfiguration              configuration)
     {
         _client     = client;
         _embeddings = embeddings;
@@ -39,29 +37,19 @@ public class VectorSearchService
 
     // ── Index management ──────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Creates the vector index with the knn_vector field mapping.
-    /// Safe to call repeatedly — skips if the index already exists.
-    /// Must be called BEFORE the first document is indexed.
-    /// </summary>
     public async Task EnsureIndexAsync(CancellationToken cancellationToken = default)
     {
         if (!_enabled) return;
 
         try
         {
-            var exists = await _client.Indices.ExistsAsync(
-                VectorIndex, ct: cancellationToken);
-
+            var exists = await _client.Indices.ExistsAsync(VectorIndex, ct: cancellationToken);
             if (exists.Exists)
             {
-                _logger.LogInformation(
-                    "✅ Vector index '{Index}' already exists", VectorIndex);
+                _logger.LogInformation("✅ Vector index '{Index}' already exists", VectorIndex);
                 return;
             }
 
-            // Build raw JSON mapping because the NEST/OSC fluent API
-            // doesn't expose knn_vector natively in v1.x
             var dims = _embeddings.Dimensions;
             var createBody = $$"""
             {
@@ -96,7 +84,7 @@ public class VectorSearchService
             }
             """;
 
-            var response = await _client.LowLevel.Indices.CreateAsync<StringResponse>(
+            var response = await _client.LowLevel.Indices.CreateAsync<DynamicResponse>(
                 VectorIndex,
                 PostData.String(createBody),
                 ctx: cancellationToken);
@@ -106,8 +94,11 @@ public class VectorSearchService
                     "✅ Vector index '{Index}' created ({Dims} dims, HNSW/cosine)",
                     VectorIndex, dims);
             else
-                _logger.LogError(
-                    "❌ Failed to create vector index: {Body}", response.Body);
+            {
+                // Cast body to string to avoid dynamic dispatch issue with logger extension methods
+                string bodyStr = response.Body?.ToString() ?? "unknown error";
+                _logger.LogError("❌ Failed to create vector index: {Body}", bodyStr);
+            }
         }
         catch (Exception ex)
         {
@@ -117,11 +108,6 @@ public class VectorSearchService
 
     // ── Document indexing ─────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Generates an embedding for the document's textual content and
-    /// upserts a vector document into the vector index.
-    /// No-ops gracefully when embeddings are disabled or unavailable.
-    /// </summary>
     public async Task IndexDocumentVectorAsync(
         Document document,
         CancellationToken cancellationToken = default)
@@ -130,7 +116,6 @@ public class VectorSearchService
 
         try
         {
-            // Build the text we want to embed — richer text = better semantic recall
             var textToEmbed = BuildEmbeddingText(document);
             var vector = await _embeddings.EmbedAsync(textToEmbed, cancellationToken);
 
@@ -155,7 +140,7 @@ public class VectorSearchService
 
             var json = JsonSerializer.Serialize(vectorDoc);
 
-            var response = await _client.LowLevel.IndexAsync<StringResponse>(
+            var response = await _client.LowLevel.IndexAsync<DynamicResponse>(
                 VectorIndex,
                 document.Id.ToString(),
                 PostData.String(json),
@@ -166,13 +151,15 @@ public class VectorSearchService
                     "🔢 Vector indexed document {DocumentId} ({Dims} dims)",
                     document.Id, vector.Length);
             else
+            {
+                string bodyStr = response.Body?.ToString() ?? "unknown error";
                 _logger.LogWarning(
                     "Vector index failed for {DocumentId}: {Body}",
-                    document.Id, response.Body);
+                    document.Id, bodyStr);
+            }
         }
         catch (Exception ex)
         {
-            // Non-fatal — keyword search still works
             _logger.LogWarning(ex,
                 "Failed to index vector for document {DocumentId}", document.Id);
         }
@@ -186,7 +173,7 @@ public class VectorSearchService
 
         try
         {
-            await _client.LowLevel.DeleteAsync<StringResponse>(
+            await _client.LowLevel.DeleteAsync<DynamicResponse>(
                 VectorIndex, documentId.ToString(), ctx: cancellationToken);
         }
         catch (Exception ex)
@@ -198,10 +185,6 @@ public class VectorSearchService
 
     // ── Semantic search ───────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Runs a k-NN search against the vector index.
-    /// Returns (documentId, similarity score) pairs ordered by cosine similarity.
-    /// </summary>
     public async Task<List<(Guid DocumentId, float Score)>> SemanticSearchAsync(
         string query,
         int topK = 20,
@@ -216,7 +199,6 @@ public class VectorSearchService
             if (queryVector == null)
                 return new List<(Guid, float)>();
 
-            // Raw k-NN query — OSC v1.x doesn't have a typed knn descriptor
             var vectorJson = string.Join(",", queryVector.Select(v => v.ToString("G")));
             var knnQuery = $$"""
             {
@@ -232,19 +214,21 @@ public class VectorSearchService
             }
             """;
 
-            var response = await _client.LowLevel.SearchAsync<StringResponse>(
+            var response = await _client.LowLevel.SearchAsync<DynamicResponse>(
                 VectorIndex,
                 PostData.String(knnQuery),
                 ctx: cancellationToken);
 
             if (!response.Success)
             {
-                _logger.LogWarning(
-                    "k-NN search failed: {Body}", response.Body);
+                string bodyStr = response.Body?.ToString() ?? "unknown error";
+                _logger.LogWarning("k-NN search failed: {Body}", bodyStr);
                 return new List<(Guid, float)>();
             }
 
-            return ParseKnnResponse(response.Body);
+            // Serialize the dynamic body to a JSON string for safe parsing
+            string responseJson = response.Body?.ToString() ?? "{}";
+            return ParseKnnResponse(responseJson);
         }
         catch (Exception ex)
         {
@@ -255,26 +239,20 @@ public class VectorSearchService
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Concatenate the most semantically meaningful fields for embedding.
-    /// Title and category are weighted by repetition.
-    /// </summary>
     private static string BuildEmbeddingText(Document document)
     {
         var parts = new List<string>();
 
-        // Repeat title & category to upweight them in the embedding
         if (!string.IsNullOrWhiteSpace(document.Title))
         {
             parts.Add(document.Title);
-            parts.Add(document.Title);   // intentional duplicate for weight
+            parts.Add(document.Title);
         }
         if (!string.IsNullOrWhiteSpace(document.Category))
             parts.Add(document.Category);
         if (!string.IsNullOrWhiteSpace(document.Description))
             parts.Add(document.Description);
 
-        // Truncate extracted text — first 2000 chars carries most signal
         var bodyText = document.ExtractedText ?? document.OcrText ?? "";
         if (!string.IsNullOrWhiteSpace(bodyText))
             parts.Add(bodyText.Length > 2000 ? bodyText[..2000] : bodyText);
@@ -285,12 +263,14 @@ public class VectorSearchService
         return string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
     }
 
-    private List<(Guid DocumentId, float Score)> ParseKnnResponse(string body)
+    private List<(Guid DocumentId, float Score)> ParseKnnResponse(string json)
     {
-        var results = new List<(Guid, float)>();
+        var results = new List<(Guid DocumentId, float Score)>();
         try
         {
-            using var doc = JsonDocument.Parse(body);
+            if (string.IsNullOrWhiteSpace(json)) return results;
+
+            using var doc  = JsonDocument.Parse(json);
             var hits = doc.RootElement
                 .GetProperty("hits")
                 .GetProperty("hits");
@@ -302,7 +282,7 @@ public class VectorSearchService
                               .GetString();
                 var score = (float)hit.GetProperty("_score").GetDouble();
 
-                if (Guid.TryParse(idStr, out var id))
+                if (idStr != null && Guid.TryParse(idStr, out Guid id))
                     results.Add((id, score));
             }
         }

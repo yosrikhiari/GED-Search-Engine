@@ -7,6 +7,7 @@ using iText.Kernel.Pdf.Canvas.Parser;
 using iText.Kernel.Pdf.Canvas.Parser.Listener;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace GED.Infrastructure.Services;
 
@@ -20,7 +21,7 @@ public class TesseractOcrService : IOcrService
     public TesseractOcrService(
         ILogger<TesseractOcrService> logger,
         IMessageQueueService messageQueue,
-        string tessDataPath = "/usr/share/tesseract-ocr/4.00/tessdata")
+        string tessDataPath = "/usr/share/tesseract-ocr/5/tessdata")
     {
         _logger = logger;
         _messageQueue = messageQueue;
@@ -43,7 +44,6 @@ public class TesseractOcrService : IOcrService
 
         _jobCache[job.Id] = job;
 
-        // Queue for async processing
         await _messageQueue.PublishAsync("ocr-queue", new
         {
             JobId = job.Id,
@@ -67,7 +67,26 @@ public class TesseractOcrService : IOcrService
 
         try
         {
-            _logger.LogInformation("Starting OCR processing for document {DocumentId}", documentId);
+            _logger.LogInformation(
+                "Starting OCR processing for document {DocumentId} (tessdata: {Path})",
+                documentId, _tessDataPath);
+
+            // ⭐ FIX: Verify tessdata path exists and log what's in it
+            if (!Directory.Exists(_tessDataPath))
+            {
+                _logger.LogError(
+                    "❌ Tesseract data directory does not exist: {Path}. " +
+                    "OCR will fail. Make sure tesseract-ocr is installed.",
+                    _tessDataPath);
+            }
+            else
+            {
+                var langFiles = Directory.GetFiles(_tessDataPath, "*.traineddata");
+                _logger.LogDebug(
+                    "Tesseract data directory found with {Count} language files: {Files}",
+                    langFiles.Length,
+                    string.Join(", ", langFiles.Select(Path.GetFileNameWithoutExtension)));
+            }
 
             var job = new OcrJob
             {
@@ -81,13 +100,18 @@ public class TesseractOcrService : IOcrService
 
             _jobCache[jobId] = job;
 
-            // Detect if it's a PDF or image
+            // Detect if it's a PDF or image by reading the magic bytes
             documentStream.Position = 0;
             var header = new byte[4];
             await documentStream.ReadAsync(header, 0, 4, cancellationToken);
             documentStream.Position = 0;
 
-            bool isPdf = header[0] == 0x25 && header[1] == 0x50 && header[2] == 0x44 && header[3] == 0x46; // %PDF
+            bool isPdf = header[0] == 0x25 && header[1] == 0x50 &&
+                         header[2] == 0x44 && header[3] == 0x46; // %PDF
+
+            _logger.LogInformation(
+                "Document {DocumentId} detected as {Type}",
+                documentId, isPdf ? "PDF" : "Image");
 
             List<PageOcrResult> pages;
             if (isPdf)
@@ -99,26 +123,25 @@ public class TesseractOcrService : IOcrService
                 pages = await ProcessImageAsync(documentStream, language ?? "eng", cancellationToken);
             }
 
-            var allText = string.Join("\n\n", pages.Select(p => p.Text));
+            var allText = string.Join("\n\n", pages.Select(p => p.Text).Where(t => !string.IsNullOrWhiteSpace(t)));
             var avgConfidence = pages.Any() ? pages.Average(p => p.Confidence) : 0f;
+
+            _logger.LogInformation(
+                "OCR completed for {DocumentId}: {Pages} pages, {TextLength} chars, confidence {Confidence:F2}",
+                documentId, pages.Count, allText.Length, avgConfidence);
 
             job.Status = OcrStatus.Completed;
             job.CompletedAt = DateTime.UtcNow;
             job.ExtractedText = allText;
             job.PageCount = pages.Count;
             job.Confidence = avgConfidence;
-
             _jobCache[jobId] = job;
-
-            _logger.LogInformation(
-                "OCR processing completed for document {DocumentId}. Pages: {PageCount}, Confidence: {Confidence}",
-                documentId, pages.Count, avgConfidence);
 
             return new OcrResult
             {
                 JobId = jobId,
                 DocumentId = documentId,
-                Success = true,
+                Success = !string.IsNullOrWhiteSpace(allText),
                 ExtractedText = allText,
                 PageCount = pages.Count,
                 Pages = pages,
@@ -167,32 +190,27 @@ public class TesseractOcrService : IOcrService
             try
             {
                 var page = pdfDocument.GetPage(i);
-                
-                // Try to extract text first (native text in PDF)
+
                 var strategy = new SimpleTextExtractionStrategy();
                 string extractedText = PdfTextExtractor.GetTextFromPage(page, strategy);
 
-                if (!string.IsNullOrWhiteSpace(extractedText) && extractedText.Length > 50)
+                if (!string.IsNullOrWhiteSpace(extractedText) && extractedText.Trim().Length > 50)
                 {
-                    // PDF has native text, use it
                     results.Add(new PageOcrResult
                     {
                         PageNumber = i,
                         Text = extractedText.Trim(),
-                        Confidence = 1.0f // Native text is 100% accurate
+                        Confidence = 1.0f
                     });
+                    _logger.LogDebug("PDF page {Page}: extracted {Chars} chars via native text", i, extractedText.Length);
                 }
                 else
                 {
-                    // PDF is scanned image, need OCR
-                    // This would require converting PDF page to image first
-                    // For now, add placeholder
-                    _logger.LogWarning("Page {PageNumber} appears to be an image, full OCR not yet implemented", i);
-                    
+                    _logger.LogWarning("PDF page {PageNumber} has little/no native text — full image-OCR not yet implemented", i);
                     results.Add(new PageOcrResult
                     {
                         PageNumber = i,
-                        Text = "[Image-based PDF page - OCR processing required]",
+                        Text = extractedText?.Trim() ?? string.Empty,
                         Confidence = 0f
                     });
                 }
@@ -212,53 +230,141 @@ public class TesseractOcrService : IOcrService
         CancellationToken cancellationToken)
     {
         var results = new List<PageOcrResult>();
+        string? tempPath = null;
 
         try
         {
-            // Load and preprocess image
-            using var image = await Image.LoadAsync(imageStream, cancellationToken);
-            
-            // Convert to grayscale and enhance contrast for better OCR
+            // ⭐ FIX: Copy stream to memory first so we can re-read it
+            using var ms = new MemoryStream();
+            await imageStream.CopyToAsync(ms, cancellationToken);
+            ms.Position = 0;
+
+            _logger.LogInformation(
+                "Processing image for OCR: {Bytes} bytes, language={Lang}",
+                ms.Length, language);
+
+            // ⭐ FIX: Load and preprocess image with ImageSharp
+            using var image = await Image.LoadAsync<Rgba32>(ms, cancellationToken);
+
+            _logger.LogInformation(
+                "Image loaded: {Width}x{Height} pixels",
+                image.Width, image.Height);
+
+            // ⭐ FIX: Scale up small images — Tesseract works much better at ~300 DPI.
+            // A typical document page is ~2480x3508 at 300 DPI.
+            // If image is small, scale it up for better OCR accuracy.
+            const int minDimension = 1000;
+            if (image.Width < minDimension || image.Height < minDimension)
+            {
+                var scaleFactor = Math.Max(
+                    (double)minDimension / image.Width,
+                    (double)minDimension / image.Height);
+
+                var newWidth  = (int)(image.Width  * scaleFactor);
+                var newHeight = (int)(image.Height * scaleFactor);
+
+                _logger.LogInformation(
+                    "Scaling image from {OldW}x{OldH} to {NewW}x{NewH} for better OCR",
+                    image.Width, image.Height, newWidth, newHeight);
+
+                image.Mutate(x => x.Resize(newWidth, newHeight));
+            }
+
+            // ⭐ FIX: Better preprocessing pipeline for OCR
             image.Mutate(x => x
-                .Grayscale()
-                .Contrast(1.2f)
+                .Grayscale()           // Convert to grayscale
+                .Contrast(1.5f)        // Boost contrast (was 1.2f)
+                .Brightness(1.1f)      // Slightly brighten
+                .GaussianSharpen(1.0f) // Sharpen edges to help character recognition
             );
 
-            // Save to temporary file for Tesseract
-            var tempPath = Path.GetTempFileName();
-            try
+            // Save to temp PNG (lossless — important for OCR quality)
+            tempPath = Path.Combine(Path.GetTempPath(), $"ocr_{Guid.NewGuid():N}.png");
+            await image.SaveAsPngAsync(tempPath, cancellationToken);
+
+            _logger.LogInformation(
+                "Preprocessed image saved to temp: {Path}", tempPath);
+
+            // ⭐ FIX: Try OCR with better error handling and fallback language
+            string ocrText = string.Empty;
+            float confidence = 0f;
+
+            var langList = new[] { language, "eng" }.Distinct().ToArray();
+
+            foreach (var lang in langList)
             {
-                await image.SaveAsPngAsync(tempPath, cancellationToken);
-
-                // Perform OCR
-                using var engine = new TesseractEngine(_tessDataPath, language, EngineMode.Default);
-                using var img = Pix.LoadFromFile(tempPath);
-                using var page = engine.Process(img);
-
-                var text = page.GetText();
-                var confidence = page.GetMeanConfidence();
-
-                results.Add(new PageOcrResult
+                try
                 {
-                    PageNumber = 1,
-                    Text = text.Trim(),
-                    Confidence = confidence
-                });
+                    _logger.LogInformation(
+                        "Attempting OCR with language '{Lang}', tessdata at '{Path}'",
+                        lang, _tessDataPath);
 
-                _logger.LogInformation("OCR completed with confidence: {Confidence}", confidence);
-            }
-            finally
-            {
-                if (File.Exists(tempPath))
+                    using var engine = new TesseractEngine(_tessDataPath, lang, EngineMode.Default);
+
+                    // ⭐ FIX: Set page segmentation mode — PSM_AUTO works well for most docs
+                    engine.SetVariable("tessedit_pageseg_mode", "1"); // Automatic page segmentation with OSD
+
+                    using var img = Pix.LoadFromFile(tempPath);
+                    using var page = engine.Process(img);
+
+                    ocrText    = page.GetText() ?? string.Empty;
+                    confidence = page.GetMeanConfidence();
+
+                    _logger.LogInformation(
+                        "OCR succeeded with lang='{Lang}': {Chars} chars, confidence={Conf:F2}",
+                        lang, ocrText.Length, confidence);
+
+                    // If we got meaningful text, stop trying other languages
+                    if (!string.IsNullOrWhiteSpace(ocrText) && ocrText.Trim().Length > 10)
+                        break;
+                }
+                catch (TesseractException tex)
                 {
-                    File.Delete(tempPath);
+                    _logger.LogWarning(tex,
+                        "Tesseract failed with language '{Lang}' — trying next option", lang);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Unexpected error during OCR with language '{Lang}'", lang);
                 }
             }
+
+            var trimmedText = ocrText.Trim();
+
+            _logger.LogInformation(
+                "Final OCR result: {Length} chars, confidence={Confidence:F2}, " +
+                "preview='{Preview}'",
+                trimmedText.Length,
+                confidence,
+                trimmedText.Length > 100 ? trimmedText[..100] + "..." : trimmedText);
+
+            results.Add(new PageOcrResult
+            {
+                PageNumber = 1,
+                Text = trimmedText,
+                Confidence = confidence
+            });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error performing OCR on image");
-            throw;
+            _logger.LogError(ex, "Fatal error performing OCR on image");
+            results.Add(new PageOcrResult
+            {
+                PageNumber = 1,
+                Text = string.Empty,
+                Confidence = 0f,
+                Metadata = new Dictionary<string, object> { ["error"] = ex.Message }
+            });
+        }
+        finally
+        {
+            // Clean up temp file
+            if (tempPath != null && File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); }
+                catch { /* best effort */ }
+            }
         }
 
         return results;

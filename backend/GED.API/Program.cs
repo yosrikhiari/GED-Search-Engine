@@ -1,11 +1,19 @@
 using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using OpenSearch.Client;
 using OpenSearch.Net;
 using Serilog;
+using Npgsql;
+
+// ── CRITICAL: Must be before WebApplication.CreateBuilder ────────────────────
+// Fix for Npgsql 8.x DateTime UTC requirement.
+// Tells Npgsql to treat DateTime.Kind=Unspecified the same as older versions did,
+// rather than throwing "Cannot write DateTime with Kind=Unspecified".
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -47,13 +55,11 @@ builder.Services.AddCors(options =>
 // ── Routing ───────────────────────────────────────────────────────────────────
 builder.Services.Configure<RouteOptions>(options =>
 {
-    options.LowercaseUrls          = true;
-    options.LowercaseQueryStrings  = false;
+    options.LowercaseUrls         = true;
+    options.LowercaseQueryStrings = false;
 });
 
-// ── FIX #4: Enforce request body size limit from config ───────────────────────
-// This sets the Kestrel/IIS limit so oversized uploads are rejected at the
-// transport level before they even reach the controller.
+// ── Request body size limit ───────────────────────────────────────────────────
 var maxUploadMb = builder.Configuration.GetValue<int>("Document:MaxUploadSizeMB", 100);
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
 {
@@ -64,14 +70,16 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = (long)maxUploadMb * 1024 * 1024;
 });
 
-// ── FIX #1: PostgreSQL with EF Core ──────────────────────────────────────────
-// Previously documents were stored as flat JSON files that were lost on restart.
-// Now they're persisted in PostgreSQL.
+// ── PostgreSQL / EF Core ──────────────────────────────────────────────────────
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Host=localhost;Database=ged_db;Username=ged_user;Password=ged_pass;Port=5432";
 
+var dataSource = new Npgsql.NpgsqlDataSourceBuilder(connectionString)
+    .EnableDynamicJson()
+    .Build();
+
 builder.Services.AddDbContext<GedDbContext>(options =>
-    options.UseNpgsql(connectionString, npgsql =>
+    options.UseNpgsql(dataSource, npgsql =>
     {
         npgsql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), null);
     })
@@ -100,13 +108,45 @@ builder.Services.AddSingleton<IMessageQueueService>(sp =>
         rabbitMqPass
     ));
 
-// ── Application Services ──────────────────────────────────────────────────────
+// ── Redis distributed cache ───────────────────────────────────────────────────
+var redisEnabled       = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
+var redisConnectionStr = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
 
-// Step 1: Leaf services (no custom-service dependencies)
+if (redisEnabled)
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionStr;
+        options.InstanceName  = "ged:";
+    });
+    Log.Information("✅ Redis cache configured: {Conn}", redisConnectionStr);
+}
+else
+{
+    builder.Services.AddDistributedMemoryCache();
+    Log.Information("⚠️  Redis disabled — using in-memory distributed cache");
+}
+
+// OCR text cleaning via Ollama — cleans up Tesseract artifacts before
+// date extraction and indexing. Uses the same Ollama instance as NLP.
+builder.Services.AddHttpClient<OcrTextCleaningService>();
+builder.Services.AddScoped<OcrTextCleaningService>();
+
+
+// ── Embeddings & vector search ────────────────────────────────────────────────
+builder.Services.AddHttpClient<OllamaEmbeddingService>();
+builder.Services.AddSingleton<IEmbeddingService>(sp =>
+    sp.GetRequiredService<OllamaEmbeddingService>());
+
+builder.Services.AddScoped<VectorSearchService>();
+
+// ── Application services ──────────────────────────────────────────────────────
+
+// Leaf services (no custom-service dependencies)
 builder.Services.AddScoped<ITextExtractionService, TextExtractionService>();
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
 
-// Step 2: Services that need a typed HttpClient
+// Services that need a typed HttpClient
 builder.Services.AddHttpClient<NlpService>();
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
@@ -116,15 +156,35 @@ builder.Services.AddScoped<DocumentMetadataService>();
 builder.Services.AddHttpClient<DocumentDateExtractor>();
 builder.Services.AddScoped<DocumentDateExtractor>();
 
-// Step 3: Services that depend on the above (DocumentService now needs GedDbContext)
-builder.Services.AddScoped<ISearchService, OpenSearchService>();
-builder.Services.AddScoped<IOcrService, TesseractOcrService>();
+// OCR text cleaning via Ollama (registered ONCE — was duplicated before)
+builder.Services.AddHttpClient<OcrTextCleaningService>();
+builder.Services.AddScoped<OcrTextCleaningService>();
+
+// Search pipeline
+builder.Services.AddScoped<OpenSearchService>();
+builder.Services.AddScoped<HybridSearchService>();
+builder.Services.AddScoped<ISearchService>(sp =>
+{
+    var hybrid = sp.GetRequiredService<HybridSearchService>();
+    var cache  = sp.GetRequiredService<IDistributedCache>();
+    var logger = sp.GetRequiredService<ILogger<CachedSearchService>>();
+    var config = sp.GetRequiredService<IConfiguration>();
+    return new CachedSearchService(hybrid, cache, logger, config);
+});
+
+// FIX: Registered ONCE with the tessdata path from config.
+// Previously two registrations existed — the second (plain AddScoped<IOcrService, TesseractOcrService>)
+// overwrote the first (factory lambda with explicit tessDataPath), causing Tesseract to look
+// for language files in the default path (/tmp or working dir) instead of the Docker-mounted path.
+builder.Services.AddScoped<IOcrService>(sp => new TesseractOcrService(
+    sp.GetRequiredService<ILogger<TesseractOcrService>>(),
+    sp.GetRequiredService<IMessageQueueService>(),
+    builder.Configuration["OCR:TessDataPath"] ?? "/usr/share/tesseract-ocr/5/tessdata"
+));
+
 builder.Services.AddScoped<IDocumentService, DocumentService>();
 
-// ── FIX #2: Register the OCR background worker ────────────────────────────────
-// Previously jobs were queued to RabbitMQ but nobody consumed them.
-// OcrWorkerService is a BackgroundService that reads from "ocr-queue" and
-// calls TesseractOcrService, then updates the DB and re-indexes in OpenSearch.
+// ── Background workers ────────────────────────────────────────────────────────
 builder.Services.AddHostedService(sp => new OcrWorkerService(
     sp,
     sp.GetRequiredService<ILogger<OcrWorkerService>>(),
@@ -133,11 +193,14 @@ builder.Services.AddHostedService(sp => new OcrWorkerService(
     rabbitMqPass
 ));
 
-// ── Build app ─────────────────────────────────────────────────────────────────
+builder.Services.AddHostedService<AutoReindexService>();
+
+// =============================================================================
+// ALL builder.Services calls must be ABOVE this line
+// =============================================================================
 var app = builder.Build();
 
-// ── FIX #1: Auto-migrate PostgreSQL on startup ────────────────────────────────
-// Creates the tables if they don't exist. Safe to run repeatedly.
+// ── Auto-migrate PostgreSQL ───────────────────────────────────────────────────
 try
 {
     using var scope = app.Services.CreateScope();
@@ -148,7 +211,6 @@ try
 catch (Exception ex)
 {
     Log.Error(ex, "❌ Failed to apply PostgreSQL migrations");
-    // Don't crash on startup — the app can still run for search-only operations
 }
 
 // ── OpenSearch index initialization ──────────────────────────────────────────
@@ -196,118 +258,7 @@ catch (Exception ex)
     Log.Error(ex, "Error initializing OpenSearch index");
 }
 
-// ── Middleware pipeline ───────────────────────────────────────────────────────
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "GED API v1");
-        c.RoutePrefix = string.Empty;
-    });
-}
-// ── ADDITIONS to Program.cs (replace the "Application Services" section) ─────
-//
-// This file shows ONLY the changed / added blocks.
-// Everything else in Program.cs (Serilog, CORS, Swagger, Kestrel limits,
-// PostgreSQL, OpenSearch client, RabbitMQ, OcrWorkerService) remains the same.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── #13 Redis caching ─────────────────────────────────────────────────────────
-// StackExchange.Redis backed IDistributedCache.
-// When Redis is unavailable at startup the app still works — CachedSearchService
-// degrades gracefully on every call.
-
-var redisEnabled        = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
-var redisConnectionStr  = builder.Configuration["Redis:ConnectionString"]
-                          ?? "localhost:6379";
-
-if (redisEnabled)
-{
-    builder.Services.AddStackExchangeRedisCache(options =>
-    {
-        options.Configuration = redisConnectionStr;
-        options.InstanceName  = "ged:";           // namespace prefix
-    });
-    Log.Information("✅ Redis cache configured: {Conn}", redisConnectionStr);
-}
-else
-{
-    // Fallback to in-process memory cache so IDistributedCache is always registered
-    builder.Services.AddDistributedMemoryCache();
-    Log.Information("⚠️  Redis disabled — using in-memory distributed cache");
-}
-
-// ── #14 Embeddings & vector search ───────────────────────────────────────────
-
-builder.Services.AddHttpClient<OllamaEmbeddingService>();
-builder.Services.AddSingleton<IEmbeddingService>(sp =>
-    sp.GetRequiredService<OllamaEmbeddingService>());
-
-builder.Services.AddScoped<VectorSearchService>();
-
-// ── Application Services ──────────────────────────────────────────────────────
-
-// Step 1: Leaf services (no custom-service dependencies)
-builder.Services.AddScoped<ITextExtractionService, TextExtractionService>();
-builder.Services.AddScoped<IStorageService, LocalStorageService>();
-
-// Step 2: Services that need a typed HttpClient
-builder.Services.AddHttpClient<NlpService>();
-builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
-
-builder.Services.AddHttpClient<DocumentMetadataService>();
-builder.Services.AddScoped<DocumentMetadataService>();
-
-builder.Services.AddHttpClient<DocumentDateExtractor>();
-builder.Services.AddScoped<DocumentDateExtractor>();
-
-// Step 3: Core search pipeline
-//
-//   OpenSearchService    ← keyword/BM25 (concrete class, needed by HybridSearchService)
-//   HybridSearchService  ← combines keyword + vector (#14)  → registered as ISearchService
-//   CachedSearchService  ← Redis cache decorator (#13)      → wraps ISearchService
-//
-// Registration order matters: later registrations for ISearchService WIN.
-
-builder.Services.AddScoped<OpenSearchService>();     // concrete — injected by HybridSearchService
-
-// #14: Hybrid search — becomes the "inner" ISearchService
-builder.Services.AddScoped<HybridSearchService>();
-
-// #13: Cache decorator — outermost layer, what controllers see
-builder.Services.AddScoped<ISearchService>(sp =>
-{
-    var hybrid  = sp.GetRequiredService<HybridSearchService>();
-    var cache   = sp.GetRequiredService<IDistributedCache>();
-    var logger  = sp.GetRequiredService<ILogger<CachedSearchService>>();
-    var config  = sp.GetRequiredService<IConfiguration>();
-    return new CachedSearchService(hybrid, cache, logger, config);
-});
-
-builder.Services.AddScoped<IOcrService, TesseractOcrService>();
-builder.Services.AddScoped<IDocumentService, DocumentService>();
-
-// ── Background workers ────────────────────────────────────────────────────────
-
-// OCR consumer (existing)
-builder.Services.AddHostedService(sp => new OcrWorkerService(
-    sp,
-    sp.GetRequiredService<ILogger<OcrWorkerService>>(),
-    rabbitMqHost,
-    rabbitMqUser,
-    rabbitMqPass
-));
-
-// #15: Auto-reindex worker
-builder.Services.AddHostedService<AutoReindexService>();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// In the startup block, after OpenSearch index creation, add vector index init:
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── #14: Vector index initialization ─────────────────────────────────────────
+// ── Vector index initialization ───────────────────────────────────────────────
 try
 {
     using var scope = app.Services.CreateScope();
@@ -318,11 +269,23 @@ catch (Exception ex)
 {
     Log.Warning(ex, "Vector index initialization failed — semantic search unavailable");
 }
+
+// ── Middleware pipeline ───────────────────────────────────────────────────────
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "GED API v1");
+        c.RoutePrefix = string.Empty;
+    });
+}
+
 app.Use(async (context, next) =>
 {
     Log.Information("HTTP {Method} {Path}", context.Request.Method, context.Request.Path);
     await next();
-    Log.Information("HTTP {Method} {Path} → {StatusCode}",
+    Log.Information("HTTP {Method} {Path} -> {StatusCode}",
         context.Request.Method, context.Request.Path, context.Response.StatusCode);
 });
 

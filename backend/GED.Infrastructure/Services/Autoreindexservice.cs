@@ -9,40 +9,17 @@ using Microsoft.Extensions.Logging;
 
 namespace GED.Infrastructure.Services;
 
-/// <summary>
-/// Background service that periodically reconciles PostgreSQL documents
-/// with the OpenSearch index.
-///
-/// Three reconciliation jobs run on independent schedules:
-///
-///   1. STALE CHECK  (every 5 min, configurable)
-///      Finds documents whose DB ModifiedAt > their OpenSearch indexed time.
-///      Happens naturally after OCR completes or a document is edited via the API.
-///
-///   2. MISSING CHECK  (every 15 min, configurable)
-///      Finds documents with Status=Indexed in DB but absent from OpenSearch.
-///      Covers restarts where OpenSearch lost data (e.g., index was recreated).
-///
-///   3. FAILED RETRY  (every 30 min, configurable)
-///      Finds documents with Status=Failed and retries indexing them.
-///      Gives transient failures (network blip, OpenSearch restarting) a chance
-///      to heal without manual intervention.
-///
-/// All jobs process in configurable batch sizes to avoid flooding OpenSearch.
-/// </summary>
 public class AutoReindexService : BackgroundService
 {
     private readonly IServiceProvider         _serviceProvider;
     private readonly ILogger<AutoReindexService> _logger;
 
-    // Schedules (configurable via appsettings)
     private readonly TimeSpan _staleInterval;
     private readonly TimeSpan _missingInterval;
     private readonly TimeSpan _failedInterval;
     private readonly int      _batchSize;
     private readonly bool     _enabled;
 
-    // Track when we last ran each job so independent timers aren't needed
     private DateTime _lastStaleCheck   = DateTime.MinValue;
     private DateTime _lastMissingCheck = DateTime.MinValue;
     private DateTime _lastFailedCheck  = DateTime.MinValue;
@@ -78,7 +55,6 @@ public class AutoReindexService : BackgroundService
             _missingInterval.TotalMinutes,
             _failedInterval.TotalMinutes);
 
-        // Small startup delay — let OpenSearch and Postgres finish initialising
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -114,14 +90,11 @@ public class AutoReindexService : BackgroundService
                 _logger.LogError(ex, "Unhandled error in AutoReindexService loop");
             }
 
-            // Poll every minute — the per-job logic decides whether to actually run
             await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
         }
 
         _logger.LogInformation("🛑 AutoReindexService stopped");
     }
-
-    // ── Job 1: Re-index documents modified after their last index time ────────
 
     private async Task ReindexStaleDocumentsAsync(CancellationToken ct)
     {
@@ -131,23 +104,17 @@ public class AutoReindexService : BackgroundService
 
         try
         {
-            // We track last-indexed time in the document's Metadata dict
-            // (key: "last_indexed_at"). Any document where ModifiedAt >
-            // last_indexed_at is considered stale.
-            //
-            // EF JSONB query: filter in memory after fetching candidates to
-            // avoid complex JSONB predicates — batch is small so this is fine.
             var candidates = await db.Documents
                 .AsNoTracking()
                 .Where(d => d.Status == DocumentStatus.Indexed &&
                             d.ModifiedAt.HasValue)
                 .OrderByDescending(d => d.ModifiedAt)
-                .Take(_batchSize * 2)         // over-fetch, filter in memory
+                .Take(_batchSize * 2)
                 .ToListAsync(ct);
 
             var stale = candidates.Where(d =>
             {
-                if (d.Metadata == null) return true; // never indexed with metadata
+                if (d.Metadata == null) return true;
                 if (!d.Metadata.TryGetValue("last_indexed_at", out var val)) return true;
                 if (!DateTime.TryParse(val?.ToString(), out var lastIndexed)) return true;
                 return d.ModifiedAt!.Value > lastIndexed;
@@ -159,20 +126,11 @@ public class AutoReindexService : BackgroundService
                 return;
             }
 
-            _logger.LogInformation(
-                "🔄 Re-indexing {Count} stale documents", stale.Count);
+            _logger.LogInformation("🔄 Re-indexing {Count} stale documents", stale.Count);
 
             var domainDocs = stale.Select(MapToDomain).ToList();
             await searchService.BulkIndexDocumentsAsync(domainDocs, ct);
 
-            // Stamp last_indexed_at on each document
-            foreach (var entity in stale)
-            {
-                entity.Metadata ??= new Dictionary<string, object>();
-                entity.Metadata["last_indexed_at"] = DateTime.UtcNow.ToString("o");
-            }
-
-            // Update in DB — need a tracked context for this
             using var writeScope = _serviceProvider.CreateScope();
             var writeDb          = writeScope.ServiceProvider.GetRequiredService<GedDbContext>();
 
@@ -194,8 +152,6 @@ public class AutoReindexService : BackgroundService
         }
     }
 
-    // ── Job 2: Index documents that are missing from OpenSearch ──────────────
-
     private async Task ReindexMissingDocumentsAsync(CancellationToken ct)
     {
         using var scope   = _serviceProvider.CreateScope();
@@ -204,7 +160,6 @@ public class AutoReindexService : BackgroundService
 
         try
         {
-            // Pull DB documents that should be indexed
             var candidates = await db.Documents
                 .AsNoTracking()
                 .Where(d => d.Status == DocumentStatus.Indexed)
@@ -214,8 +169,6 @@ public class AutoReindexService : BackgroundService
 
             if (!candidates.Any()) return;
 
-            // Check which ones are actually present in OpenSearch by attempting a
-            // multi-get. Documents missing from OpenSearch get re-indexed.
             var missing = await FindMissingFromOpenSearchAsync(
                 candidates.Select(d => d.Id).ToList(),
                 scope.ServiceProvider,
@@ -227,9 +180,7 @@ public class AutoReindexService : BackgroundService
                 return;
             }
 
-            _logger.LogWarning(
-                "⚠️  {Count} documents missing from OpenSearch — re-indexing",
-                missing.Count);
+            _logger.LogWarning("⚠️  {Count} documents missing from OpenSearch — re-indexing", missing.Count);
 
             var toIndex = candidates
                 .Where(d => missing.Contains(d.Id))
@@ -237,8 +188,7 @@ public class AutoReindexService : BackgroundService
                 .ToList();
 
             await searchService.BulkIndexDocumentsAsync(toIndex, ct);
-            _logger.LogInformation(
-                "✅ Re-indexed {Count} previously missing documents", toIndex.Count);
+            _logger.LogInformation("✅ Re-indexed {Count} previously missing documents", toIndex.Count);
         }
         catch (Exception ex)
         {
@@ -246,14 +196,11 @@ public class AutoReindexService : BackgroundService
         }
     }
 
-    // ── Job 3: Retry documents that previously failed indexing ───────────────
-
     private async Task RetryFailedDocumentsAsync(CancellationToken ct)
     {
         using var scope   = _serviceProvider.CreateScope();
         var db            = scope.ServiceProvider.GetRequiredService<GedDbContext>();
         var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
-        var writeDb       = scope.ServiceProvider.GetRequiredService<GedDbContext>();
 
         try
         {
@@ -270,8 +217,7 @@ public class AutoReindexService : BackgroundService
                 return;
             }
 
-            _logger.LogInformation(
-                "🔄 Retrying indexing for {Count} failed documents", failed.Count);
+            _logger.LogInformation("🔄 Retrying indexing for {Count} failed documents", failed.Count);
 
             int successCount = 0;
 
@@ -284,7 +230,6 @@ public class AutoReindexService : BackgroundService
 
                     if (ok)
                     {
-                        // Update status back to Indexed in DB
                         using var retryScope = _serviceProvider.CreateScope();
                         var retryDb = retryScope.ServiceProvider
                             .GetRequiredService<GedDbContext>();
@@ -295,22 +240,19 @@ public class AutoReindexService : BackgroundService
                         if (tracked != null)
                         {
                             tracked.Status     = DocumentStatus.Indexed;
-                            tracked.ModifiedAt = DateTime.UtcNow;
+                            tracked.ModifiedAt = DateTime.UtcNow;  // explicitly UTC
                             await retryDb.SaveChangesAsync(ct);
                         }
 
                         successCount++;
-                        _logger.LogInformation(
-                            "✅ Retry successful for document {DocumentId}", entity.Id);
+                        _logger.LogInformation("✅ Retry successful for document {DocumentId}", entity.Id);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex,
-                        "Retry failed for document {DocumentId}", entity.Id);
+                    _logger.LogWarning(ex, "Retry failed for document {DocumentId}", entity.Id);
                 }
 
-                // Small delay between retries to avoid hammering OpenSearch
                 await Task.Delay(200, ct);
             }
 
@@ -323,8 +265,6 @@ public class AutoReindexService : BackgroundService
             _logger.LogError(ex, "Error during failed document retry");
         }
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private async Task<HashSet<Guid>> FindMissingFromOpenSearchAsync(
         List<Guid> ids,
@@ -350,15 +290,11 @@ public class AutoReindexService : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "Could not check OpenSearch for missing documents — skipping");
+            _logger.LogWarning(ex, "Could not check OpenSearch for missing documents — skipping");
             return new HashSet<Guid>();
         }
     }
 
-    /// <summary>
-    /// Lightweight domain model mapping (same fields needed for indexing).
-    /// </summary>
     private static Document MapToDomain(DocumentEntity e) => new()
     {
         Id            = e.Id,

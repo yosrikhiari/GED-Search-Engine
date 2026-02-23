@@ -140,7 +140,8 @@ public class DocumentService : IDocumentService
 
                     if (dateInfo?.DocumentDate != null && dateInfo.Confidence > 0.5f)
                     {
-                        documentDate = dateInfo.DocumentDate.Value;
+                        // ── FIX: Ensure DocumentDate is UTC ──────────────────
+                        documentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
                         metadata ??= new Dictionary<string, object>();
                         metadata["extracted_date"] = documentDate.Value.ToString("yyyy-MM-dd");
                         metadata["date_confidence"] = dateInfo.Confidence;
@@ -158,6 +159,7 @@ public class DocumentService : IDocumentService
             }
 
             // ── 5. Build & persist EF entity ─────────────────────────────────
+            // FIX: Explicitly use UTC timestamps throughout
             var uploadTime = DateTime.UtcNow;
 
             var entity = new DocumentEntity
@@ -170,11 +172,11 @@ public class DocumentService : IDocumentService
                 ContentType   = contentType,
                 FileSize      = fileInfo.Length,
                 FileHash      = fileHash,
-                CreatedAt     = uploadTime,
+                CreatedAt     = uploadTime,          // already UTC
                 CreatedBy     = "system",
-                ModifiedAt    = uploadTime,
+                ModifiedAt    = uploadTime,          // already UTC
                 ModifiedBy    = "system",
-                DocumentDate  = documentDate,
+                DocumentDate  = documentDate,        // explicitly UTC above
                 Status        = DocumentStatus.Indexed,
                 IsOcrProcessed = false,
                 ExtractedText = extractedText,
@@ -219,7 +221,7 @@ public class DocumentService : IDocumentService
             entity.Category    = document.Category;
             entity.Tags        = document.Tags;
             entity.Metadata    = document.Metadata;
-            entity.ModifiedAt  = DateTime.UtcNow;
+            entity.ModifiedAt  = DateTime.UtcNow;   // explicitly UTC
             entity.ModifiedBy  = "system";
 
             await _db.SaveChangesAsync(cancellationToken);
@@ -315,7 +317,7 @@ public class DocumentService : IDocumentService
     private static List<DocumentMetadataEntity> BuildMetadataEntities(
         Guid documentId,
         Dictionary<string, object>? metadata,
-        DateTime createdAt)
+        DateTime createdAt)  // already UTC from caller
     {
         if (metadata == null) return new List<DocumentMetadataEntity>();
 
@@ -334,12 +336,12 @@ public class DocumentService : IDocumentService
                     DateTime => MetadataType.Date,
                     _ => MetadataType.String
                 },
-                CreatedAt = createdAt
+                CreatedAt = createdAt  // already UTC
             })
             .ToList();
     }
 
-    // ── Text/tag helpers (unchanged from original) ────────────────────────────
+    // ── Text/tag helpers ──────────────────────────────────────────────────────
 
     private static string GenerateDescription(string? extractedText, string fileName)
     {

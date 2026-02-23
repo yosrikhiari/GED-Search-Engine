@@ -138,6 +138,7 @@ services:
     ports:
       - "5001:8080"
     environment:
+      - OCR__TessDataPath=/usr/share/tesseract-ocr/5/tessdata
       - ASPNETCORE_ENVIRONMENT=Development
       - ASPNETCORE_URLS=http://+:8080
       - OpenSearch__Url=http://opensearch:9200
