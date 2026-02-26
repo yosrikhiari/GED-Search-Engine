@@ -23,10 +23,12 @@ public class OcrTextCleaningService
     private readonly bool _enabled;
 
     // Maximum characters sent to LLM in one call (keep prompt under context window)
-    private const int MaxCharsPerChunk = 2000;
+    private const int MaxCharsPerChunk = 4000;
 
     // Minimum text length worth sending to LLM (very short text = not worth the round-trip)
     private const int MinCharsToClean = 20;
+
+    private const int ChunkTimeoutSeconds = 60;
 
     public OcrTextCleaningService(
         HttpClient httpClient,
@@ -135,7 +137,10 @@ public class OcrTextCleaningService
 
         _logger.LogDebug("Calling Ollama at {Endpoint} for OCR cleaning", _endpoint);
 
-        var response = await _httpClient.PostAsJsonAsync(_endpoint, requestBody, cancellationToken);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(ChunkTimeoutSeconds));
+
+        var response = await _httpClient.PostAsJsonAsync(_endpoint, requestBody, cts.Token);
 
         if (!response.IsSuccessStatusCode)
         {

@@ -29,7 +29,7 @@
     <PackageReference Include="RabbitMQ.Client" Version="6.8.1" />
 
     <!-- OCR & PDF -->
-    <PackageReference Include="Tesseract" Version="5.2.0" />
+    <PackageReference Include="Tesseract" Version="5.*" />
     <PackageReference Include="itext7" Version="8.0.3" />
 
     <!-- Image processing -->
@@ -41,6 +41,12 @@
     <!-- Utilities -->
     <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+
+    <!-- JWT (needed by AuthService) -->
+    <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="7.5.0" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="7.5.0" />
+
+
   </ItemGroup>
 
   <ItemGroup>

@@ -3,6 +3,7 @@ using OpenSearch.Net;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 using CoreSearchRequest = GED.Core.Models.SearchRequest;
 
 namespace GED.Infrastructure.Services;
@@ -158,9 +159,6 @@ public class OpenSearchService : ISearchService
     }
 
 
-// ⭐ IMPROVED BuildPrecisionQuery with better text normalization and matching
-// Replace lines ~145-395 in your OpenSearchService.cs
-
 private QueryContainer BuildPrecisionQuery(
     QueryContainerDescriptor<DocumentIndexModel> q,
     string query,
@@ -241,27 +239,17 @@ private QueryContainer BuildPrecisionQuery(
     }
 
     // Date range filter
-// Date range filter
     if (request.FromDate.HasValue || request.ToDate.HasValue)
     {
         _logger.LogInformation("🔒 Applying date range filter: {From} to {To}", 
             request.FromDate?.ToString("yyyy-MM-dd") ?? "start", 
             request.ToDate?.ToString("yyyy-MM-dd") ?? "end");
         
-        // ⭐ CRITICAL FIX: The previous version didn't work correctly because
-        // OpenSearch's "Should" clause on date ranges doesn't properly handle
-        // nullable fields. We need to explicitly check field existence.
-        
         filterQueries.Add(dq => dq.Bool(b => b
             .Should(
-                // Option 1: DocumentDate EXISTS and is within the date range
-                // This matches documents where the content date (e.g., contract effective date) 
-                // falls within the search range
                 s => s.Bool(b1 => b1
                     .Must(
-                        // MUST have the DocumentDate field
                         m => m.Exists(e => e.Field(doc => doc.DocumentDate)),
-                        // AND the DocumentDate must be in the specified range
                         m => m.DateRange(dr => dr
                             .Field(doc => doc.DocumentDate)
                             .GreaterThanOrEquals(request.FromDate)
@@ -269,16 +257,11 @@ private QueryContainer BuildPrecisionQuery(
                         )
                     )
                 ),
-                // Option 2: DocumentDate does NOT exist, so use CreatedAt (upload date)
-                // This matches documents that don't have an extracted document date,
-                // so we fall back to when they were uploaded to the system
                 s => s.Bool(b2 => b2
                     .Must(
-                        // MUST NOT have the DocumentDate field
                         m => m.Bool(nb => nb
                             .MustNot(mn => mn.Exists(e => e.Field(doc => doc.DocumentDate)))
                         ),
-                        // AND the CreatedAt (upload date) must be in the specified range
                         m => m.DateRange(dr => dr
                             .Field(doc => doc.CreatedAt)
                             .GreaterThanOrEquals(request.FromDate)
@@ -287,16 +270,15 @@ private QueryContainer BuildPrecisionQuery(
                     )
                 )
             )
-            .MinimumShouldMatch(1)  // At least one of the two options must match
+            .MinimumShouldMatch(1)
         ));
     }
+
     // ========== TEXT SEARCH QUERIES (Tiered scoring) ==========
     
     if (!string.IsNullOrWhiteSpace(query))
     {
         var cleanQuery = query.Trim();
-        
-        // ⭐ NEW: Normalize query - handle plurals and common variations
         var normalizedQuery = NormalizeSearchQuery(cleanQuery);
         var queryVariations = GenerateQueryVariations(cleanQuery);
         
@@ -305,9 +287,6 @@ private QueryContainer BuildPrecisionQuery(
 
         var isMultiWord = cleanQuery.Contains(' ');
 
-        // ========== TIER 1: EXACT MATCHES (Highest Priority) ==========
-        
-        // Exact phrase match in title
         if (isMultiWord)
         {
             shouldQueries.Add(sq => sq.MatchPhrase(mp => mp
@@ -317,7 +296,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
         
-        // Exact keyword match in category (try all variations)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.Term(t => t
@@ -328,7 +306,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
         
-        // Exact match in title (keyword field)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.Term(t => t
@@ -339,9 +316,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
 
-        // ========== TIER 2: STRONG MATCHES (High Priority) ==========
-        
-        // Prefix match in title (for each variation)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.Prefix(p => p
@@ -352,7 +326,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
         
-        // Multi-match on key fields with boosting (try all variations)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.MultiMatch(m => m
@@ -369,7 +342,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
         
-        // Match phrase prefix (for partial typing)
         shouldQueries.Add(sq => sq.MatchPhrasePrefix(mpp => mpp
             .Field(doc => doc.Title)
             .Query(cleanQuery)
@@ -377,9 +349,6 @@ private QueryContainer BuildPrecisionQuery(
             .Boost(35.0)
         ));
 
-        // ========== TIER 3: GOOD MATCHES (Medium Priority) ==========
-        
-        // Multi-match with "most fields" (OR matching) - more lenient
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.MultiMatch(m => m
@@ -393,12 +362,11 @@ private QueryContainer BuildPrecisionQuery(
                 )
                 .Type(TextQueryType.MostFields)
                 .Operator(Operator.Or)
-                .MinimumShouldMatch("50%")  // ⭐ LOWERED from 75% for better recall
+                .MinimumShouldMatch("50%")
                 .Boost(25.0)
             ));
         }
         
-        // Wildcard search on title and filename (for all variations)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.Wildcard(w => w
@@ -416,9 +384,6 @@ private QueryContainer BuildPrecisionQuery(
             ));
         }
 
-        // ========== TIER 4: FUZZY MATCHES (Lower Priority - typo tolerance) ==========
-        
-        // Fuzzy matching for each variation (allows typos)
         foreach (var variant in queryVariations)
         {
             shouldQueries.Add(sq => sq.MultiMatch(m => m
@@ -429,23 +394,19 @@ private QueryContainer BuildPrecisionQuery(
                     .Field(doc => doc.FileName, 3.0)
                 )
                 .Fuzziness(Fuzziness.Auto)
-                .Operator(Operator.Or)  // ⭐ CHANGED from And for better recall
+                .Operator(Operator.Or)
                 .Boost(15.0)
             ));
         }
 
-        // ========== TIER 5: CONTENT MATCHES (Lowest Priority) ==========
-        
-        // Search in extracted text (less important)
         shouldQueries.Add(sq => sq.Match(m => m
             .Field(doc => doc.ExtractedText)
             .Query(normalizedQuery)
-            .Operator(Operator.Or)  // ⭐ CHANGED from And
-            .MinimumShouldMatch("40%")  // ⭐ LOWERED from 60%
+            .Operator(Operator.Or)
+            .MinimumShouldMatch("40%")
             .Boost(10.0)
         ));
         
-        // Search in OCR text (least important)
         shouldQueries.Add(sq => sq.Match(m => m
             .Field(doc => doc.OcrText)
             .Query(normalizedQuery)
@@ -454,8 +415,6 @@ private QueryContainer BuildPrecisionQuery(
             .Boost(5.0)
         ));
 
-        // ========== BONUS: NLP KEYWORD MATCHING ==========
-        
         if (nlQuery?.Keywords != null && nlQuery.Keywords.Any())
         {
             foreach (var keyword in nlQuery.Keywords)
@@ -464,7 +423,6 @@ private QueryContainer BuildPrecisionQuery(
                 
                 foreach (var variant in keywordVariations)
                 {
-                    // Exact keyword matches get high boost
                     shouldQueries.Add(sq => sq.Term(t => t
                         .Field("category.keyword")
                         .Value(variant)
@@ -472,7 +430,6 @@ private QueryContainer BuildPrecisionQuery(
                         .Boost(30.0)
                     ));
                     
-                    // Regular keyword matching
                     shouldQueries.Add(sq => sq.MultiMatch(m => m
                         .Query(variant)
                         .Fields(f => f
@@ -480,7 +437,7 @@ private QueryContainer BuildPrecisionQuery(
                             .Field(doc => doc.Category, 6.0)
                             .Field(doc => doc.Description, 3.0)
                         )
-                        .Operator(Operator.Or)  // ⭐ CHANGED from And
+                        .Operator(Operator.Or)
                         .Boost(12.0)
                     ));
                 }
@@ -488,9 +445,6 @@ private QueryContainer BuildPrecisionQuery(
         }
     }
 
-    // ========== BUILD FINAL QUERY ==========
-    
-    // ⭐ IMPROVED: More lenient minimum should match
     var minimumShouldMatch = CalculateMinimumShouldMatch(query, shouldQueries.Count);
     
     _logger.LogInformation("📊 Query structure: {ShouldQueries} scoring queries, {FilterQueries} filters, MinShouldMatch: {MinMatch}",
@@ -500,13 +454,11 @@ private QueryContainer BuildPrecisionQuery(
     {
         var boolQuery = b;
         
-        // Apply hard filters
         if (filterQueries.Any())
         {
             boolQuery = boolQuery.Filter(filterQueries.ToArray());
         }
         
-        // Apply scoring queries
         if (shouldQueries.Any())
         {
             boolQuery = boolQuery.Should(shouldQueries.ToArray());
@@ -514,7 +466,6 @@ private QueryContainer BuildPrecisionQuery(
         }
         else
         {
-            // No search text - match all
             boolQuery = boolQuery.Must(m => m.MatchAll());
         }
         
@@ -522,9 +473,6 @@ private QueryContainer BuildPrecisionQuery(
     });
 }
 
-/// <summary>
-/// ⭐ NEW: Normalize search query - remove plurals, handle common variations
-/// </summary>
 private string NormalizeSearchQuery(string query)
 {
     if (string.IsNullOrWhiteSpace(query))
@@ -532,13 +480,11 @@ private string NormalizeSearchQuery(string query)
     
     var normalized = query.ToLower().Trim();
     
-    // Remove trailing 's' for simple plurals (e.g., "contracts" → "contract")
     if (normalized.EndsWith("s") && normalized.Length > 2 && !normalized.EndsWith("ss"))
     {
         normalized = normalized.TrimEnd('s');
     }
     
-    // Handle "ies" → "y" (e.g., "companies" → "company")
     if (normalized.EndsWith("ies") && normalized.Length > 4)
     {
         normalized = normalized.Substring(0, normalized.Length - 3) + "y";
@@ -547,9 +493,6 @@ private string NormalizeSearchQuery(string query)
     return normalized;
 }
 
-/// <summary>
-/// ⭐ NEW: Generate query variations to improve matching
-/// </summary>
 private List<string> GenerateQueryVariations(string query)
 {
     var variations = new List<string>();
@@ -558,28 +501,25 @@ private List<string> GenerateQueryVariations(string query)
         return variations;
     
     var cleaned = query.Trim();
-    variations.Add(cleaned);  // Original
+    variations.Add(cleaned);
     
     var normalized = NormalizeSearchQuery(cleaned);
     if (normalized != cleaned)
     {
-        variations.Add(normalized);  // Singular form
+        variations.Add(normalized);
     }
     
-    // Add plural if not already plural
     if (!cleaned.EndsWith("s", StringComparison.OrdinalIgnoreCase))
     {
         variations.Add(cleaned + "s");
     }
     
-    // Add lowercase version
     var lower = cleaned.ToLower();
     if (!variations.Contains(lower))
     {
         variations.Add(lower);
     }
     
-    // Add capitalized version
     if (lower.Length > 0)
     {
         var capitalized = char.ToUpper(lower[0]) + lower.Substring(1);
@@ -592,30 +532,24 @@ private List<string> GenerateQueryVariations(string query)
     return variations.Distinct().ToList();
 }
 
-/// <summary>
-/// ⭐ IMPROVED: Calculate minimum should match - more lenient
-/// </summary>
 private string CalculateMinimumShouldMatch(string query, int totalShouldClauses)
 {
     if (string.IsNullOrWhiteSpace(query))
     {
-        return "0";  // No text search
+        return "0";
     }
 
-    // ⭐ CRITICAL: Lower minimums for better recall
-    // With the improved query variations, we have more clauses, so we need lower minimums
-    
     if (totalShouldClauses <= 10)
     {
-        return "1";  // At least 1 strategy must match
+        return "1";
     }
     else if (totalShouldClauses <= 30)
     {
-        return "2";  // At least 2 strategies
+        return "2";
     }
     else
     {
-        return "3";  // At least 3 strategies for complex queries
+        return "3";
     }
 }
 
@@ -636,6 +570,7 @@ private SortDescriptor<DocumentIndexModel> BuildSort(
         _ => sort.Descending(SortSpecialField.Score)
     };
 }
+
     private AggregationContainerDescriptor<DocumentIndexModel> BuildAggregations(
         AggregationContainerDescriptor<DocumentIndexModel> agg)
     {
@@ -670,8 +605,8 @@ private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
         FileName = doc.FileName,
         ContentType = doc.ContentType,
         FileSize = doc.FileSize,
-        CreatedAt = doc.CreatedAt,  // Upload date
-        DocumentDate = doc.DocumentDate,  // ⭐ NEW: Document content date
+        CreatedAt = doc.CreatedAt,
+        DocumentDate = doc.DocumentDate,
         ModifiedAt = doc.ModifiedAt,
         Category = doc.Category,
         Tags = doc.Tags,
@@ -857,6 +792,51 @@ private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
         return response.Found ? response.Source : null;
     }
 
+    /// <summary>
+    /// FIX: Flattens JsonElement values in the Metadata dictionary so OpenSearch
+    /// receives plain primitives (string, double, bool) instead of serialized
+    /// JsonElement objects like {valueKind=3}.
+    ///
+    /// Root cause: when the upload controller deserializes JSON from the HTTP
+    /// request body using System.Text.Json, dictionary values typed as `object`
+    /// become JsonElement instances rather than native .NET primitives.  Those
+    /// JsonElement objects then serialize to {valueKind=N} instead of the actual
+    /// value, causing OpenSearch mapper_parsing_exception on text fields.
+    /// </summary>
+    private static Dictionary<string, object>? SanitizeMetadata(Dictionary<string, object>? metadata)
+    {
+        if (metadata == null) return null;
+
+        var result = new Dictionary<string, object>(metadata.Count);
+        foreach (var (key, value) in metadata)
+        {
+            result[key] = FlattenValue(value);
+        }
+        return result;
+    }
+
+    private static object FlattenValue(object? value)
+    {
+        if (value is null) return string.Empty;
+
+        if (value is JsonElement je)
+        {
+            return je.ValueKind switch
+            {
+                JsonValueKind.String  => je.GetString() ?? string.Empty,
+                JsonValueKind.Number  => je.TryGetInt64(out var l) ? (object)l : je.GetDouble(),
+                JsonValueKind.True    => true,
+                JsonValueKind.False   => false,
+                JsonValueKind.Null    => string.Empty,
+                // For arrays/objects fall back to raw JSON string so the field
+                // at least has a safe text value instead of an unparseable object.
+                _                     => je.GetRawText()
+            };
+        }
+
+        return value;
+    }
+
 private DocumentIndexModel MapToIndexModel(Document document)
 {
     return new DocumentIndexModel
@@ -867,15 +847,18 @@ private DocumentIndexModel MapToIndexModel(Document document)
         FileName = document.FileName,
         ContentType = document.ContentType,
         FileSize = document.FileSize,
-        CreatedAt = document.CreatedAt,  // Upload date
-        DocumentDate = document.DocumentDate,  // ⭐ NEW: Document content date
+        CreatedAt = document.CreatedAt,
+        DocumentDate = document.DocumentDate,
         ModifiedAt = document.ModifiedAt,
         Status = document.Status.ToString(),
         ExtractedText = document.ExtractedText,
         OcrText = document.OcrText,
         Tags = document.Tags,
         Category = document.Category,
-        Metadata = document.Metadata
+        // FIX: sanitize metadata to unwrap JsonElement values before sending
+        // to OpenSearch — prevents mapper_parsing_exception on text fields
+        // (e.g. metadata.category arriving as {valueKind=3} instead of "Contract")
+        Metadata = SanitizeMetadata(document.Metadata)
     };
 }
 
@@ -904,8 +887,8 @@ public class DocumentIndexModel
     public string FileName { get; set; } = string.Empty;
     public string ContentType { get; set; } = string.Empty;
     public long FileSize { get; set; }
-    public DateTime CreatedAt { get; set; }  // Upload date
-    public DateTime? DocumentDate { get; set; }  // ⭐ NEW: Document content date
+    public DateTime CreatedAt { get; set; }
+    public DateTime? DocumentDate { get; set; }
     public DateTime? ModifiedAt { get; set; }
     public string Status { get; set; } = "Indexed";
     public string? ExtractedText { get; set; }

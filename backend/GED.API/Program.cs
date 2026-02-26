@@ -4,15 +4,14 @@ using GED.Infrastructure.Services;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 using OpenSearch.Client;
 using OpenSearch.Net;
 using Serilog;
-using Npgsql;
+using System.Text;
 
-// ── CRITICAL: Must be before WebApplication.CreateBuilder ────────────────────
-// Fix for Npgsql 8.x DateTime UTC requirement.
-// Tells Npgsql to treat DateTime.Kind=Unspecified the same as older versions did,
-// rather than throwing "Cannot write DateTime with Kind=Unspecified".
+// ── CRITICAL: Npgsql 8.x UTC fix ─────────────────────────────────────────────
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,7 +35,27 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title       = "GED Search Engine API",
         Version     = "v1",
-        Description = "Electronic Document Management System with NLP and OCR capabilities"
+        Description = "Electronic Document Management System with OCR, NLP, and RAG capabilities"
+    });
+
+    // Add JWT auth to Swagger UI
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header. Example: \"Bearer {token}\"",
+        Name        = "Authorization",
+        In          = ParameterLocation.Header,
+        Type        = SecuritySchemeType.ApiKey,
+        Scheme      = "Bearer"
+    });
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
+            },
+            Array.Empty<string>()
+        }
     });
 });
 
@@ -51,6 +70,32 @@ builder.Services.AddCors(options =>
               .AllowCredentials();
     });
 });
+
+// ── JWT Authentication ────────────────────────────────────────────────────────
+var jwtSecret = builder.Configuration["Auth:JwtSecret"]
+    ?? "GED-SuperSecretKey-ChangeInProduction-2024!";
+var jwtIssuer = builder.Configuration["Auth:JwtIssuer"] ?? "GED-SearchEngine";
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme    = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey         = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+        ValidateIssuer           = true,
+        ValidIssuer              = jwtIssuer,
+        ValidateAudience         = false,
+        ValidateLifetime         = true,
+        ClockSkew                = TimeSpan.Zero
+    };
+});
+
+builder.Services.AddAuthorization();
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 builder.Services.Configure<RouteOptions>(options =>
@@ -103,9 +148,7 @@ var rabbitMqPass = builder.Configuration["RabbitMQ:Password"] ?? "admin123";
 builder.Services.AddSingleton<IMessageQueueService>(sp =>
     new RabbitMqService(
         sp.GetRequiredService<ILogger<RabbitMqService>>(),
-        rabbitMqHost,
-        rabbitMqUser,
-        rabbitMqPass
+        rabbitMqHost, rabbitMqUser, rabbitMqPass
     ));
 
 // ── Redis distributed cache ───────────────────────────────────────────────────
@@ -127,12 +170,6 @@ else
     Log.Information("⚠️  Redis disabled — using in-memory distributed cache");
 }
 
-// OCR text cleaning via Ollama — cleans up Tesseract artifacts before
-// date extraction and indexing. Uses the same Ollama instance as NLP.
-builder.Services.AddHttpClient<OcrTextCleaningService>();
-builder.Services.AddScoped<OcrTextCleaningService>();
-
-
 // ── Embeddings & vector search ────────────────────────────────────────────────
 builder.Services.AddHttpClient<OllamaEmbeddingService>();
 builder.Services.AddSingleton<IEmbeddingService>(sp =>
@@ -140,13 +177,24 @@ builder.Services.AddSingleton<IEmbeddingService>(sp =>
 
 builder.Services.AddScoped<VectorSearchService>();
 
-// ── Application services ──────────────────────────────────────────────────────
+// ── Text Extraction: Tika (primary) + built-in fallback ──────────────────────
+// Register the built-in extractor first, then wrap it in TikaTextExtractionService.
+// This gives Tika priority while preserving the existing extractor as fallback.
+builder.Services.AddScoped<TextExtractionService>();
 
-// Leaf services (no custom-service dependencies)
-builder.Services.AddScoped<ITextExtractionService, TextExtractionService>();
+builder.Services.AddHttpClient<TikaTextExtractionService>();
+builder.Services.AddScoped<ITextExtractionService>(sp =>
+{
+    var fallback = sp.GetRequiredService<TextExtractionService>();
+    var http     = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(TikaTextExtractionService));
+    var logger   = sp.GetRequiredService<ILogger<TikaTextExtractionService>>();
+    var config   = sp.GetRequiredService<IConfiguration>();
+    return new TikaTextExtractionService(http, logger, fallback, config);
+});
+
+// ── Application services ──────────────────────────────────────────────────────
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
 
-// Services that need a typed HttpClient
 builder.Services.AddHttpClient<NlpService>();
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
@@ -156,11 +204,23 @@ builder.Services.AddScoped<DocumentMetadataService>();
 builder.Services.AddHttpClient<DocumentDateExtractor>();
 builder.Services.AddScoped<DocumentDateExtractor>();
 
-// OCR text cleaning via Ollama (registered ONCE — was duplicated before)
 builder.Services.AddHttpClient<OcrTextCleaningService>();
 builder.Services.AddScoped<OcrTextCleaningService>();
 
-// Search pipeline
+// ── RAG Service ───────────────────────────────────────────────────────────────
+builder.Services.AddHttpClient<RagService>();
+builder.Services.AddScoped<IRagService>(sp =>
+    new RagService(
+        sp.GetRequiredService<ISearchService>(),
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(RagService)),
+        sp.GetRequiredService<ILogger<RagService>>(),
+        sp.GetRequiredService<IConfiguration>()
+    ));
+
+// ── Auth Service ──────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<AuthService>();
+
+// ── Search pipeline ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<OpenSearchService>();
 builder.Services.AddScoped<HybridSearchService>();
 builder.Services.AddScoped<ISearchService>(sp =>
@@ -172,10 +232,7 @@ builder.Services.AddScoped<ISearchService>(sp =>
     return new CachedSearchService(hybrid, cache, logger, config);
 });
 
-// FIX: Registered ONCE with the tessdata path from config.
-// Previously two registrations existed — the second (plain AddScoped<IOcrService, TesseractOcrService>)
-// overwrote the first (factory lambda with explicit tessDataPath), causing Tesseract to look
-// for language files in the default path (/tmp or working dir) instead of the Docker-mounted path.
+// ── OCR Service ───────────────────────────────────────────────────────────────
 builder.Services.AddScoped<IOcrService>(sp => new TesseractOcrService(
     sp.GetRequiredService<ILogger<TesseractOcrService>>(),
     sp.GetRequiredService<IMessageQueueService>(),
@@ -188,17 +245,14 @@ builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddHostedService(sp => new OcrWorkerService(
     sp,
     sp.GetRequiredService<ILogger<OcrWorkerService>>(),
-    rabbitMqHost,
-    rabbitMqUser,
-    rabbitMqPass
+    rabbitMqHost, rabbitMqUser, rabbitMqPass
 ));
 
 builder.Services.AddHostedService<AutoReindexService>();
 
 // =============================================================================
-// ALL builder.Services calls must be ABOVE this line
-// =============================================================================
 var app = builder.Build();
+// =============================================================================
 
 // ── Auto-migrate PostgreSQL ───────────────────────────────────────────────────
 try
@@ -206,14 +260,14 @@ try
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
     await db.Database.MigrateAsync();
-    Log.Information("✅ PostgreSQL migrations applied successfully");
+    Log.Information("✅ PostgreSQL migrations applied");
 }
 catch (Exception ex)
 {
-    Log.Error(ex, "❌ Failed to apply PostgreSQL migrations");
+    Log.Error(ex, "❌ PostgreSQL migration failed");
 }
 
-// ── OpenSearch index initialization ──────────────────────────────────────────
+// ── OpenSearch index init ─────────────────────────────────────────────────────
 try
 {
     var client = app.Services.GetRequiredService<IOpenSearchClient>();
@@ -248,17 +302,13 @@ try
             ? "✅ OpenSearch index 'ged-documents' created"
             : "❌ Failed to create OpenSearch index: {Error}", createIndexResponse.DebugInformation);
     }
-    else
-    {
-        Log.Information("✅ OpenSearch index 'ged-documents' already exists");
-    }
 }
 catch (Exception ex)
 {
     Log.Error(ex, "Error initializing OpenSearch index");
 }
 
-// ── Vector index initialization ───────────────────────────────────────────────
+// ── Vector index init ─────────────────────────────────────────────────────────
 try
 {
     using var scope = app.Services.CreateScope();
@@ -267,7 +317,7 @@ try
 }
 catch (Exception ex)
 {
-    Log.Warning(ex, "Vector index initialization failed — semantic search unavailable");
+    Log.Warning(ex, "Vector index init failed — semantic search unavailable");
 }
 
 // ── Middleware pipeline ───────────────────────────────────────────────────────
@@ -290,6 +340,7 @@ app.Use(async (context, next) =>
 });
 
 app.UseCors();
+app.UseAuthentication();   // ← NEW: must come before UseAuthorization
 app.UseAuthorization();
 app.MapControllers();
 

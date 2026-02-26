@@ -22,14 +22,11 @@ public class TextExtractionService : ITextExtractionService
     {
         "application/pdf",
         "text/plain",
-        // Word
         "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        // Excel
         "application/vnd.ms-excel",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        // OpenDocument
-        "application/vnd.oasis.opendocument.text",
+
     };
 
     public TextExtractionService(ILogger<TextExtractionService> logger)
@@ -58,9 +55,11 @@ public class TextExtractionService : ITextExtractionService
                 "application/msword"
                     => await ExtractFromDocxAsync(fileStream, cancellationToken),
 
+
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" or
                 "application/vnd.ms-excel"
                     => await ExtractFromXlsxAsync(fileStream, cancellationToken),
+   
 
                 _ => string.Empty
             };
@@ -107,6 +106,7 @@ public class TextExtractionService : ITextExtractionService
             return string.Empty;
         }
     }
+
 
     // ── Plain text ────────────────────────────────────────────────────────────
 

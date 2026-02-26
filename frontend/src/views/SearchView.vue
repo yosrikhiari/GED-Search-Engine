@@ -874,13 +874,13 @@ const goToPage = async (page) => {
   }
 }
 
+
 const uploadDocument = async () => {
   if (!selectedFile.value) {
     alert('Please select a file to upload')
     return
   }
 
-  // ⭐ NEW: Validate category is selected
   if (!uploadData.category || uploadData.category.trim() === '') {
     alert('Please select a category for the document')
     return
@@ -908,12 +908,65 @@ const uploadDocument = async () => {
     if (response.ok) {
       const result = await response.json()
       console.log('Upload successful:', result)
-      alert('Document uploaded and indexed successfully!')
       closeUploadModal()
-      
-      if (searchResults.value) {
-        performSearch()
+
+      // ── FIX: Poll for OCR completion if the file is an image or PDF ──────
+      // The upload response has isOcrProcessed: false because OCR runs async.
+      // Poll /ocr-status every 3s until done, then refresh search results.
+      const needsOcr = result.contentType?.startsWith('image/') ||
+                       result.contentType === 'application/pdf'
+
+      if (needsOcr) {
+        console.log(`⏳ OCR queued for ${result.contentType} document ${result.id} — polling for completion...`)
+
+        let pollCount = 0
+        const maxPolls = 20   // 20 × 3s = 60s timeout
+
+        const pollOcr = setInterval(async () => {
+          pollCount++
+          try {
+            const statusRes = await fetch(`/api/documents/${result.id}/ocr-status`)
+
+            if (!statusRes.ok) {
+              console.warn(`OCR status check returned ${statusRes.status}`)
+              if (pollCount >= maxPolls) {
+                clearInterval(pollOcr)
+                console.warn('OCR polling timed out')
+              }
+              return
+            }
+
+            const job = await statusRes.json()
+            console.log(`📊 OCR status poll #${pollCount}:`, job.status, '— isOcrProcessed via DB')
+
+            // OcrStatus enum: 0=Pending, 1=Processing, 2=Completed, 3=Failed
+            if (job.status === 2 /* Completed */) {
+              clearInterval(pollOcr)
+              console.log('✅ OCR complete! Extracted text length:', job.extractedText?.length ?? 0)
+              alert(`Document uploaded and OCR completed! ${job.extractedText ? `Extracted ${job.extractedText.length} characters of text.` : 'No text extracted.'}`)
+              if (searchResults.value) performSearch()
+            } else if (job.status === 3 /* Failed */) {
+              clearInterval(pollOcr)
+              console.warn('❌ OCR failed:', job.errorMessage)
+              alert(`Document uploaded but OCR failed: ${job.errorMessage || 'Unknown error'}`)
+              if (searchResults.value) performSearch()
+            } else if (pollCount >= maxPolls) {
+              clearInterval(pollOcr)
+              console.warn('OCR polling timed out after 60s')
+              alert('Document uploaded! OCR is still processing in the background.')
+              if (searchResults.value) performSearch()
+            }
+          } catch (err) {
+            console.warn('OCR poll error:', err)
+          }
+        }, 3000)
+
+      } else {
+        // Non-OCR file (Word, Excel, plain text): show immediate success
+        alert('Document uploaded and indexed successfully!')
+        if (searchResults.value) performSearch()
       }
+
     } else {
       const error = await response.json()
       console.error('Upload failed:', error)
@@ -926,6 +979,7 @@ const uploadDocument = async () => {
     uploading.value = false
   }
 }
+
 
 const clearFile = () => {
   selectedFile.value = null

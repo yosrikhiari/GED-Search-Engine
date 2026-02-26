@@ -68,10 +68,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── #13: Redis cache ──────────────────────────────────────────────────────────
-  # Single-node Redis for search result caching.
-  # maxmemory-policy allkeys-lru: when Redis is full it evicts the least-recently
-  # used keys — safe for a cache (we never store data that can't be rebuilt).
   redis:
     image: redis:7.2-alpine
     container_name: ged-redis
@@ -92,11 +88,29 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ── Apache Tika Server ────────────────────────────────────────────────────────
+  # Primary text extraction engine. Supports 1000+ formats.
+  # Satisfies: "Apache Tika pour l'extraction et la normalisation du texte"
+  tika:
+    image: apache/tika:latest-full
+    container_name: ged-tika
+    ports:
+      - "9998:9998"
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9998/tika || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ged-ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"
     volumes:
       - ollama-data:/root/.ollama
     networks:
@@ -123,7 +137,7 @@ services:
       /bin/sh -c "
         echo '⏳ Pulling llama3.2...' &&
         ollama pull llama3.2 &&
-        echo '⏳ Pulling nomic-embed-text (for semantic search)...' &&
+        echo '⏳ Pulling nomic-embed-text...' &&
         ollama pull nomic-embed-text &&
         echo '✅ All models ready!'
       "
@@ -150,20 +164,31 @@ services:
       - NLP__Enabled=true
       - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
       - NLP__Model=llama3.2
-      # #13: Redis
+      # Apache Tika
+      - Tika__Enabled=true
+      - Tika__Url=http://tika:9998
+      # Redis
       - Redis__Enabled=true
       - Redis__ConnectionString=redis:6379
       - Redis__SearchCacheTtlSeconds=120
-      # #14: Embeddings (opt-in — set to true once nomic-embed-text is pulled)
+      # Embeddings
       - Embeddings__Enabled=false
       - Embeddings__Model=nomic-embed-text
       - Embeddings__Dimensions=768
-      # #15: Auto-reindex
+      # Auto-reindex
       - Reindex__Enabled=true
       - Reindex__BatchSize=50
       - Reindex__StaleCheckIntervalMinutes=5
       - Reindex__MissingCheckIntervalMinutes=15
       - Reindex__FailedRetryIntervalMinutes=30
+      # RAG
+      - RAG__TopK=5
+      - RAG__MaxContextChars=6000
+      # Auth / JWT
+      - Auth__JwtSecret=GED-SuperSecretKey-ChangeInProduction-2024!
+      - Auth__JwtIssuer=GED-SearchEngine
+      - Auth__JwtExpiryHours=8
+      - Auth__UsersFilePath=/var/lib/ged/users.json
     depends_on:
       opensearch:
         condition: service_healthy
@@ -173,12 +198,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      tika:
+        condition: service_healthy
       ollama:
         condition: service_started
     networks:
       - ged-network
     volumes:
       - ged-documents:/var/lib/ged/documents
+      - ged-users:/var/lib/ged
       - ./backend/logs:/app/logs
     restart: unless-stopped
 
@@ -206,6 +234,8 @@ volumes:
   postgres-data:
     driver: local
   ged-documents:
+    driver: local
+  ged-users:
     driver: local
   ollama-data:
     driver: local
