@@ -171,11 +171,8 @@ else
 }
 
 // ── Embeddings & vector search ────────────────────────────────────────────────
-builder.Services.AddHttpClient<OllamaEmbeddingService>();
-builder.Services.AddSingleton<IEmbeddingService>(sp =>
-    sp.GetRequiredService<OllamaEmbeddingService>());
 
-builder.Services.AddScoped<VectorSearchService>();
+
 
 // ── Text Extraction: Tika (primary) + built-in fallback ──────────────────────
 // Register the built-in extractor first, then wrap it in TikaTextExtractionService.
@@ -198,8 +195,6 @@ builder.Services.AddScoped<IStorageService, LocalStorageService>();
 builder.Services.AddHttpClient<NlpService>();
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
-builder.Services.AddHttpClient<DocumentMetadataService>();
-builder.Services.AddScoped<DocumentMetadataService>();
 
 builder.Services.AddHttpClient<DocumentDateExtractor>();
 builder.Services.AddScoped<DocumentDateExtractor>();
@@ -222,14 +217,13 @@ builder.Services.AddSingleton<AuthService>();
 
 // ── Search pipeline ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<OpenSearchService>();
-builder.Services.AddScoped<HybridSearchService>();
 builder.Services.AddScoped<ISearchService>(sp =>
 {
-    var hybrid = sp.GetRequiredService<HybridSearchService>();
+    var opensearch = sp.GetRequiredService<OpenSearchService>();
     var cache  = sp.GetRequiredService<IDistributedCache>();
     var logger = sp.GetRequiredService<ILogger<CachedSearchService>>();
     var config = sp.GetRequiredService<IConfiguration>();
-    return new CachedSearchService(hybrid, cache, logger, config);
+    return new CachedSearchService(opensearch, cache, logger, config);
 });
 
 // ── OCR Service ───────────────────────────────────────────────────────────────
@@ -254,18 +248,7 @@ builder.Services.AddHostedService<AutoReindexService>();
 var app = builder.Build();
 // =============================================================================
 
-// ── Auto-migrate PostgreSQL ───────────────────────────────────────────────────
-try
-{
-    using var scope = app.Services.CreateScope();
-    var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
-    await db.Database.MigrateAsync();
-    Log.Information("✅ PostgreSQL migrations applied");
-}
-catch (Exception ex)
-{
-    Log.Error(ex, "❌ PostgreSQL migration failed");
-}
+
 
 // ── OpenSearch index init ─────────────────────────────────────────────────────
 try
@@ -308,17 +291,6 @@ catch (Exception ex)
     Log.Error(ex, "Error initializing OpenSearch index");
 }
 
-// ── Vector index init ─────────────────────────────────────────────────────────
-try
-{
-    using var scope = app.Services.CreateScope();
-    var vectorSvc   = scope.ServiceProvider.GetRequiredService<VectorSearchService>();
-    await vectorSvc.EnsureIndexAsync();
-}
-catch (Exception ex)
-{
-    Log.Warning(ex, "Vector index init failed — semantic search unavailable");
-}
 
 // ── Middleware pipeline ───────────────────────────────────────────────────────
 if (app.Environment.IsDevelopment())
