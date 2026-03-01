@@ -202,6 +202,9 @@ builder.Services.AddScoped<DocumentDateExtractor>();
 builder.Services.AddHttpClient<OcrTextCleaningService>();
 builder.Services.AddScoped<OcrTextCleaningService>();
 
+builder.Services.AddHttpClient<OcrMetadataEnrichmentService>();
+builder.Services.AddScoped<OcrMetadataEnrichmentService>();
+
 // ── RAG Service ───────────────────────────────────────────────────────────────
 builder.Services.AddHttpClient<RagService>();
 builder.Services.AddScoped<IRagService>(sp =>

@@ -9,6 +9,7 @@ using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GED.Infrastructure.Services;
 
@@ -21,7 +22,8 @@ namespace GED.Infrastructure.Services;
 ///                               Frontend polling resolves here — no more 60-second waits.
 ///   2. Ollama LLM cleaning    → ocr_stage = "llm_cleaning"
 ///   3. Date extraction        → still ocr_stage = "llm_cleaning"
-///   4. Final save + re-index  → ocr_stage = "completed"
+///   4. AI tag + description   → still ocr_stage = "llm_cleaning"  ← NEW
+///   5. Final save + re-index  → ocr_stage = "completed"
 /// </summary>
 public class OcrWorkerService : BackgroundService
 {
@@ -180,6 +182,7 @@ public class OcrWorkerService : BackgroundService
         var search        = scope.ServiceProvider.GetRequiredService<ISearchService>();
         var textCleaner   = scope.ServiceProvider.GetService<OcrTextCleaningService>();
         var dateExtractor = scope.ServiceProvider.GetService<DocumentDateExtractor>();
+        var enricher      = scope.ServiceProvider.GetService<OcrMetadataEnrichmentService>(); // ← NEW
 
         // ── 1. Load document ─────────────────────────────────────────────────
         var document = await db.Documents
@@ -208,49 +211,23 @@ public class OcrWorkerService : BackgroundService
         if (hasNativeText && document.ContentType == "application/pdf")
         {
             _logger.LogInformation(
-                "📄 PDF {DocId} has {Chars} chars of native text — skipping Tesseract, marking OCR complete",
+                "📄 PDF {DocId} has {Chars} chars of native text — skipping Tesseract",
                 document.Id, document.ExtractedText!.Length);
 
             document.IsOcrProcessed = true;
             document.ModifiedAt     = DateTime.UtcNow;
             document.Metadata     ??= new Dictionary<string, object>();
             document.Metadata["ocr_skipped"]      = "native_text_available";
-            document.Metadata["ocr_stage"]        = "completed";
+            document.Metadata["ocr_stage"]        = "llm_cleaning";
             document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
 
-            // ⭐ Regenerate tags and description from OCR text
-            if (!string.IsNullOrWhiteSpace(document.ExtractedText))
-            {
-                var newTags = new HashSet<string>(document.Tags ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-                var keywords = new[] {
-                    "invoice", "contract", "agreement", "report", "proposal",
-                    "confidential", "draft", "final", "signed", "approved",
-                    "budget", "payment", "license", "legal", "nda", "schedule",
-                    "publishing", "royalt", "author", "copyright", "manuscript"
-                };
-                var lower = document.ExtractedText.ToLower();
-                foreach (var kw in keywords)
-                    if (lower.Contains(kw)) newTags.Add(kw);
-
-                var yearMatch = System.Text.RegularExpressions.Regex.Match(document.ExtractedText, @"\b(20\d{2})\b");
-                if (yearMatch.Success) newTags.Add(yearMatch.Value);
-
-                document.Tags = newTags.Where(t => t.Length > 2).OrderBy(t => t).Take(15).ToList();
-
-                var lines = document.ExtractedText
-                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Where(l => l.Length > 20)
-                    .Take(3)
-                    .ToList();
-                if (lines.Any())
-                {
-                    var desc = string.Join(" ", lines);
-                    document.Description = desc.Length > 200 ? desc[..197] + "..." : desc;
-                }
-            }
-
             await db.SaveChangesAsync(ct);
-            await ReIndexDocumentAsync(document, search, ct);
+
+            // ── AI metadata enrichment for native-text PDFs ──────────────────
+            await EnrichAndSaveAsync(
+                db, document, search, enricher, dateExtractor,
+                document.ExtractedText!, "native_text_llm", ct);
+
             return;
         }
 
@@ -289,17 +266,12 @@ public class OcrWorkerService : BackgroundService
 
         // ── 3. STAGE COMMIT: Tesseract done → IsOcrProcessed = true ─────────
         //
-        // This is the key change. We persist IsOcrProcessed = true NOW,
-        // before Ollama runs. The frontend polling loop checks IsOcrProcessed
-        // and will resolve within the next 4-second poll cycle instead of
-        // waiting 60-90 more seconds for LLM cleaning to finish.
-        //
-        // We store the raw OCR text in OcrText and set ExtractedText to it
-        // as an initial value. LLM cleaning will overwrite ExtractedText later.
+        // Persist IsOcrProcessed = true NOW, before Ollama runs.
+        // The frontend polling loop resolves here instead of waiting for LLM.
         // ────────────────────────────────────────────────────────────────────
-        document.OcrText        = ocrResult.ExtractedText;          // raw Tesseract output, always kept
-        document.ExtractedText  = ocrResult.ExtractedText;          // initial value — LLM will overwrite
-        document.IsOcrProcessed = true;                              // ← frontend poll resolves here
+        document.OcrText        = ocrResult.ExtractedText;
+        document.ExtractedText  = ocrResult.ExtractedText;
+        document.IsOcrProcessed = true;
         document.ModifiedAt     = DateTime.UtcNow;
         document.Metadata     ??= new Dictionary<string, object>();
         document.Metadata["ocr_stage"]          = "text_extracted";
@@ -310,19 +282,17 @@ public class OcrWorkerService : BackgroundService
             document.Metadata["ocr_confidence"] = ocrResult.AverageConfidence;
 
         await db.SaveChangesAsync(ct);
-
-        // Re-index now so searchable text is available immediately after Tesseract
         await ReIndexDocumentAsync(document, search, ct);
 
         _logger.LogInformation(
-            "✅ Stage 'text_extracted' committed for {DocId} — frontend polls will resolve now. " +
-            "Continuing with LLM cleaning in background…",
+            "✅ Stage 'text_extracted' committed for {DocId} — frontend polls will resolve. " +
+            "Continuing with LLM cleaning + enrichment in background…",
             document.Id);
 
-        // ── 4. LLM cleaning (background, after frontend poll resolves) ───────
+        // ── 4. LLM cleaning ──────────────────────────────────────────────────
         await SetStageAsync(db, document, "llm_cleaning", ct);
 
-        string cleanedText = ocrResult.ExtractedText;   // ← declare and initialize HERE
+        string cleanedText = ocrResult.ExtractedText;
 
         if (textCleaner != null)
         {
@@ -342,14 +312,38 @@ public class OcrWorkerService : BackgroundService
                 cleanedText = ocrResult.ExtractedText;
             }
         }
-                
-        // ── 5. Date extraction ───────────────────────────────────────────────
+
+        // ── 5. Date extraction + AI enrichment ───────────────────────────────
+        await EnrichAndSaveAsync(
+            db, document, search, enricher, dateExtractor,
+            cleanedText, "ocr_llm", ct);
+    }
+
+    // ── Core enrichment + final save ──────────────────────────────────────────
+
+    /// <summary>
+    /// Runs date extraction and AI metadata enrichment, then saves and re-indexes.
+    /// Shared between the native-text shortcut and the full OCR pipeline.
+    /// </summary>
+    private async Task EnrichAndSaveAsync(
+        GedDbContext db,
+        DocumentEntity document,
+        ISearchService search,
+        OcrMetadataEnrichmentService? enricher,
+        DocumentDateExtractor? dateExtractor,
+        string textToAnalyze,
+        string enrichmentSource,
+        CancellationToken ct)
+    {
+        document.Metadata ??= new Dictionary<string, object>();
+
+        // ── 5a. Date extraction ───────────────────────────────────────────────
         if (dateExtractor != null && document.DocumentDate == null)
         {
             try
             {
                 var dateInfo = await dateExtractor.ExtractDocumentDateAsync(
-                    cleanedText, document.FileName, document.Category ?? "Other", ct);
+                    textToAnalyze, document.FileName, document.Category ?? "Other", ct);
 
                 if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= DateConfidenceThreshold)
                 {
@@ -358,7 +352,7 @@ public class OcrWorkerService : BackgroundService
                     document.Metadata["extracted_date"]  = document.DocumentDate.Value.ToString("yyyy-MM-dd");
                     document.Metadata["date_confidence"] = dateInfo.Confidence;
                     document.Metadata["date_type"]       = dateInfo.DateType;
-                    document.Metadata["date_source"]     = "ocr_llm_cleaned";
+                    document.Metadata["date_source"]     = enrichmentSource;
 
                     _logger.LogInformation("✅ DocumentDate set: {Date} (conf={Conf:F2})",
                         document.DocumentDate.Value.ToString("yyyy-MM-dd"), dateInfo.Confidence);
@@ -370,32 +364,143 @@ public class OcrWorkerService : BackgroundService
             }
         }
 
-        // ── 6. Final save: store cleaned text and mark pipeline complete ─────
-        // Overwrite ExtractedText with the LLM-cleaned version.
-        // OcrText always retains the original raw Tesseract output.
-        document.ExtractedText = cleanedText;
-        document.ModifiedAt    = DateTime.UtcNow;
-        document.Metadata["ocr_cleaned_length"] = cleanedText.Length;
+        // ── 5b. AI tag + description enrichment ───────────────────────────────
+        if (enricher != null)
+        {
+            try
+            {
+                var enrichResult = await enricher.EnrichAsync(
+                    textToAnalyze,
+                    document.FileName,
+                    document.Category ?? "Other",
+                    ct);
+
+                if (enrichResult != null)
+                {
+                    // Merge AI tags with existing keyword tags (keep best of both)
+                    var mergedTags = new HashSet<string>(
+                        document.Tags ?? new List<string>(),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var tag in enrichResult.Tags)
+                        mergedTags.Add(tag);
+
+                    document.Tags = mergedTags
+                        .Where(t => t.Length > 1)
+                        .OrderBy(t => t)
+                        .Take(15)
+                        .ToList();
+
+                    // Overwrite description only if AI produced something meaningful
+                    if (!string.IsNullOrWhiteSpace(enrichResult.Description))
+                        document.Description = enrichResult.Description;
+
+                    document.Metadata["enrichment_source"] = enrichmentSource;
+
+                    _logger.LogInformation(
+                        "✅ AI enrichment applied: {TagCount} tags, desc={DescLen} chars",
+                        document.Tags.Count, document.Description?.Length ?? 0);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "ℹ️  AI enrichment returned null for {DocId} — keeping keyword tags",
+                        document.Id);
+
+                    // Fallback: regenerate tags from OCR text using keyword matching
+                    ApplyKeywordTagFallback(document, textToAnalyze);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "AI enrichment threw for {DocId} — applying keyword fallback", document.Id);
+                ApplyKeywordTagFallback(document, textToAnalyze);
+            }
+        }
+        else
+        {
+            // No enricher registered — still do keyword tags from OCR text
+            ApplyKeywordTagFallback(document, textToAnalyze);
+        }
+
+        // ── 5c. Description fallback from extracted text ───────────────────────
+        // If description is still generic/empty after enrichment, extract from text
+        if (IsGenericDescription(document.Description, document.FileName) &&
+            !string.IsNullOrWhiteSpace(textToAnalyze))
+        {
+            var lines = textToAnalyze
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(l => l.Length > 20)
+                .Take(3)
+                .ToList();
+
+            if (lines.Any())
+            {
+                var desc = string.Join(" ", lines);
+                document.Description = desc.Length > 200 ? desc[..197] + "..." : desc;
+                _logger.LogInformation("📝 Description set from extracted text ({Len} chars)", document.Description.Length);
+            }
+        }
+
+        // ── 6. Final save ─────────────────────────────────────────────────────
+        document.ExtractedText                  = textToAnalyze;
+        document.ModifiedAt                     = DateTime.UtcNow;
+        document.Metadata["ocr_cleaned_length"] = textToAnalyze.Length;
         document.Metadata["ocr_stage"]          = "completed";
 
         await db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "💾 Full OCR pipeline complete for {DocId}: pages={Pages}, conf={Conf:F2}, date={Date}",
-            message.DocumentId, ocrResult.PageCount, ocrResult.AverageConfidence,
+            "💾 Enrichment complete for {DocId}: tags=[{Tags}], date={Date}",
+            document.Id,
+            string.Join(", ", document.Tags?.Take(5) ?? Array.Empty<string>()),
             document.DocumentDate?.ToString("yyyy-MM-dd") ?? "none");
 
-        // Final re-index with cleaned text and extracted date
         await ReIndexDocumentAsync(document, search, ct);
+    }
+
+    // ── Keyword tag fallback ──────────────────────────────────────────────────
+
+    private static void ApplyKeywordTagFallback(DocumentEntity document, string text)
+    {
+        var tags = new HashSet<string>(
+            document.Tags ?? new List<string>(),
+            StringComparer.OrdinalIgnoreCase);
+
+        var keywords = new[]
+        {
+            "invoice", "contract", "agreement", "report", "proposal",
+            "confidential", "draft", "final", "signed", "approved",
+            "budget", "payment", "license", "legal", "nda", "schedule",
+            "publishing", "royalty", "author", "copyright", "manuscript",
+            "real estate", "property", "sale", "mortgage", "lease",
+            "medical", "patient", "diagnosis", "prescription",
+            "employment", "salary", "benefits", "termination",
+            "project", "timeline", "milestone", "deliverable"
+        };
+
+        var lower = text.ToLower();
+        foreach (var kw in keywords)
+            if (lower.Contains(kw)) tags.Add(kw.Replace(" ", "-"));
+
+        var yearMatch = Regex.Match(text, @"\b(20\d{2})\b");
+        if (yearMatch.Success) tags.Add(yearMatch.Value);
+
+        document.Tags = tags.Where(t => t.Length > 1).OrderBy(t => t).Take(15).ToList();
+    }
+
+    private static bool IsGenericDescription(string? description, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(description)) return true;
+        var d = description.Trim().ToLower();
+        if (d.StartsWith("document:")) return true;
+        var baseName = Path.GetFileNameWithoutExtension(fileName).ToLower();
+        if (!string.IsNullOrEmpty(baseName) && d.Contains(baseName) && d.Length < 80) return true;
+        return false;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Persists a single ocr_stage metadata update to the DB.
-    /// Uses a fresh tracked entity to avoid EF change-tracking conflicts
-    /// with the long-running document entity.
-    /// </summary>
     private async Task SetStageAsync(
         GedDbContext db,
         DocumentEntity document,
@@ -413,7 +518,6 @@ public class OcrWorkerService : BackgroundService
         }
         catch (Exception ex)
         {
-            // Non-fatal — the main pipeline continues even if stage write fails
             _logger.LogWarning(ex, "Could not persist ocr_stage='{Stage}' for {DocId}", stage, document.Id);
         }
     }
