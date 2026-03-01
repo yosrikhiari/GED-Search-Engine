@@ -15,14 +15,13 @@ namespace GED.Infrastructure.Services;
 /// <summary>
 /// Background worker that consumes OCR jobs from RabbitMQ and processes them.
 ///
-/// FIXES vs original:
-///   1. ConnectionFactory.DispatchConsumersAsync = true is required for
-///      AsyncEventingBasicConsumer — without it RabbitMQ.Client v6 throws or
-///      silently drops messages.
-///   2. For PDFs that already have native text (extracted by Tika/iText at
-///      upload time), Tesseract OCR is skipped but IsOcrProcessed is still
-///      set to true so the frontend polling loop can complete.
-///   3. Reconnect loop on consumer-side disconnect.
+/// Pipeline stages (each stage is persisted to DB so the frontend can track):
+///
+///   1. Tesseract OCR          → sets IsOcrProcessed = true, ocr_stage = "text_extracted"
+///                               Frontend polling resolves here — no more 60-second waits.
+///   2. Ollama LLM cleaning    → ocr_stage = "llm_cleaning"
+///   3. Date extraction        → still ocr_stage = "llm_cleaning"
+///   4. Final save + re-index  → ocr_stage = "completed"
 /// </summary>
 public class OcrWorkerService : BackgroundService
 {
@@ -36,10 +35,7 @@ public class OcrWorkerService : BackgroundService
     private const int MaxRetries   = 5;
     private const int RetryDelayMs = 5000;
 
-    // Lower threshold — LLM-cleaned OCR text is noisier than native PDF text
     private const float DateConfidenceThreshold = 0.3f;
-
-    // If a PDF already has this many characters of native text, skip Tesseract
     private const int NativeTextMinChars = 50;
 
     public OcrWorkerService(
@@ -60,7 +56,6 @@ public class OcrWorkerService : BackgroundService
     {
         _logger.LogInformation("🔄 OCR Worker starting…");
 
-        // Outer reconnect loop — if the connection drops, restart the consumer
         while (!stoppingToken.IsCancellationRequested)
         {
             IConnection? connection = null;
@@ -71,37 +66,29 @@ public class OcrWorkerService : BackgroundService
                 {
                     var factory = new ConnectionFactory
                     {
-                        HostName = _rabbitHost,
-                        UserName = _rabbitUser,
-                        Password = _rabbitPass,
-                        // ── FIX: this MUST be true when using AsyncEventingBasicConsumer ──
-                        // Without it RabbitMQ.Client v6 throws InvalidOperationException or
-                        // silently drops messages onto the thread pool in a way that causes
-                        // the async handler to never complete properly.
-                        DispatchConsumersAsync        = true,
-                        AutomaticRecoveryEnabled      = false, // we handle reconnect ourselves
-                        RequestedHeartbeat            = TimeSpan.FromSeconds(60),
-                        RequestedConnectionTimeout    = TimeSpan.FromSeconds(10),
+                        HostName                   = _rabbitHost,
+                        UserName                   = _rabbitUser,
+                        Password                   = _rabbitPass,
+                        DispatchConsumersAsync     = true,
+                        AutomaticRecoveryEnabled   = false,
+                        RequestedHeartbeat         = TimeSpan.FromSeconds(60),
+                        RequestedConnectionTimeout = TimeSpan.FromSeconds(10),
                     };
 
                     connection = factory.CreateConnection();
-                    _logger.LogInformation(
-                        "✅ OCR Worker connected to RabbitMQ at {Host}", _rabbitHost);
+                    _logger.LogInformation("✅ OCR Worker connected to RabbitMQ at {Host}", _rabbitHost);
                     break;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(
-                        "⚠️ RabbitMQ connect attempt {Attempt}/{Max} failed: {Error}",
+                    _logger.LogWarning("⚠️ RabbitMQ connect attempt {Attempt}/{Max} failed: {Error}",
                         attempt, MaxRetries, ex.Message);
 
                     if (attempt == MaxRetries)
                     {
-                        _logger.LogError(
-                            "❌ Could not connect to RabbitMQ after {Max} attempts. " +
-                            "Waiting 30s before retrying…", MaxRetries);
+                        _logger.LogError("❌ Could not connect to RabbitMQ after {Max} attempts. Waiting 30s…", MaxRetries);
                         await Task.Delay(30_000, stoppingToken);
-                        break; // restart outer loop
+                        break;
                     }
 
                     await Task.Delay(RetryDelayMs * attempt, stoppingToken);
@@ -115,17 +102,10 @@ public class OcrWorkerService : BackgroundService
                 using (connection)
                 using (var channel = connection.CreateModel())
                 {
-                    channel.QueueDeclare(
-                        queue:      QueueName,
-                        durable:    true,
-                        exclusive:  false,
-                        autoDelete: false);
-
-                    // Only one job at a time per worker instance
+                    channel.QueueDeclare(queue: QueueName, durable: true, exclusive: false, autoDelete: false);
                     channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
 
-                    _logger.LogInformation(
-                        "📥 OCR Worker listening on queue '{Queue}'", QueueName);
+                    _logger.LogInformation("📥 OCR Worker listening on queue '{Queue}'", QueueName);
 
                     var consumer = new AsyncEventingBasicConsumer(channel);
 
@@ -147,8 +127,7 @@ public class OcrWorkerService : BackgroundService
                                 return;
                             }
 
-                            _logger.LogInformation(
-                                "📄 OCR job received: jobId={JobId}, documentId={DocId}",
+                            _logger.LogInformation("📄 OCR job received: jobId={JobId}, documentId={DocId}",
                                 msg.JobId, msg.DocumentId);
 
                             await ProcessOcrJobAsync(msg, stoppingToken);
@@ -162,8 +141,7 @@ public class OcrWorkerService : BackgroundService
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex,
-                                "❌ OCR job {JobId} failed for document {DocId}",
+                            _logger.LogError(ex, "❌ OCR job {JobId} failed for document {DocId}",
                                 msg?.JobId, msg?.DocumentId);
 
                             channel.BasicNack(deliveryTag, multiple: false, requeue: false);
@@ -173,27 +151,19 @@ public class OcrWorkerService : BackgroundService
                         }
                     };
 
-                    channel.BasicConsume(
-                        queue:    QueueName,
-                        autoAck:  false,
-                        consumer: consumer);
+                    channel.BasicConsume(queue: QueueName, autoAck: false, consumer: consumer);
 
-                    // Wait until cancelled or connection closes
-                    try
-                    {
-                        await Task.Delay(Timeout.Infinite, stoppingToken);
-                    }
+                    try { await Task.Delay(Timeout.Infinite, stoppingToken); }
                     catch (OperationCanceledException)
                     {
                         _logger.LogInformation("🛑 OCR Worker stopping gracefully");
-                        return; // exit the outer loop too
+                        return;
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "❌ OCR Worker consumer loop crashed — will reconnect in 10s");
+                _logger.LogError(ex, "❌ OCR Worker consumer loop crashed — will reconnect in 10s");
                 await Task.Delay(10_000, stoppingToken);
             }
         }
@@ -211,7 +181,7 @@ public class OcrWorkerService : BackgroundService
         var textCleaner   = scope.ServiceProvider.GetService<OcrTextCleaningService>();
         var dateExtractor = scope.ServiceProvider.GetService<DocumentDateExtractor>();
 
-        // 1. Load document
+        // ── 1. Load document ─────────────────────────────────────────────────
         var document = await db.Documents
             .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
 
@@ -222,33 +192,62 @@ public class OcrWorkerService : BackgroundService
         }
 
         _logger.LogInformation(
-            "🖼️  OCR pipeline: docId={DocId}, type={Type}, category={Cat}, " +
-            "hasNativeText={HasText} ({NativeChars} chars)",
+            "🖼️  OCR pipeline: docId={DocId}, type={Type}, category={Cat}, hasNativeText={HasText} ({NativeChars} chars)",
             document.Id, document.ContentType, document.Category,
             !string.IsNullOrWhiteSpace(document.ExtractedText),
             document.ExtractedText?.Length ?? 0);
 
-        // ── FIX: If the document already has sufficient native text (e.g. a
-        // text-layer PDF processed by Tika/iText at upload time), skip
-        // Tesseract and just mark OCR as processed so the polling loop ends. ──
+        // Mark as "processing" so frontend shows correct label immediately
+        await SetStageAsync(db, document, "processing", ct);
+
+        // ── Shortcut: PDF with sufficient native text ────────────────────────
         bool hasNativeText = !string.IsNullOrWhiteSpace(document.ExtractedText)
                              && document.ExtractedText.Trim().Length >= NativeTextMinChars;
-
-        // Also skip if the file is gone (shouldn't happen, but defensive)
         bool fileExists = File.Exists(document.FilePath);
 
         if (hasNativeText && document.ContentType == "application/pdf")
         {
             _logger.LogInformation(
-                "📄 PDF {DocId} has {Chars} chars of native text — skipping Tesseract, " +
-                "marking OCR complete",
+                "📄 PDF {DocId} has {Chars} chars of native text — skipping Tesseract, marking OCR complete",
                 document.Id, document.ExtractedText!.Length);
 
             document.IsOcrProcessed = true;
             document.ModifiedAt     = DateTime.UtcNow;
             document.Metadata     ??= new Dictionary<string, object>();
             document.Metadata["ocr_skipped"]      = "native_text_available";
+            document.Metadata["ocr_stage"]        = "completed";
             document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
+
+            // ⭐ Regenerate tags and description from OCR text
+            if (!string.IsNullOrWhiteSpace(document.ExtractedText))
+            {
+                var newTags = new HashSet<string>(document.Tags ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                var keywords = new[] {
+                    "invoice", "contract", "agreement", "report", "proposal",
+                    "confidential", "draft", "final", "signed", "approved",
+                    "budget", "payment", "license", "legal", "nda", "schedule",
+                    "publishing", "royalt", "author", "copyright", "manuscript"
+                };
+                var lower = document.ExtractedText.ToLower();
+                foreach (var kw in keywords)
+                    if (lower.Contains(kw)) newTags.Add(kw);
+
+                var yearMatch = System.Text.RegularExpressions.Regex.Match(document.ExtractedText, @"\b(20\d{2})\b");
+                if (yearMatch.Success) newTags.Add(yearMatch.Value);
+
+                document.Tags = newTags.Where(t => t.Length > 2).OrderBy(t => t).Take(15).ToList();
+
+                var lines = document.ExtractedText
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(l => l.Length > 20)
+                    .Take(3)
+                    .ToList();
+                if (lines.Any())
+                {
+                    var desc = string.Join(" ", lines);
+                    document.Description = desc.Length > 200 ? desc[..197] + "..." : desc;
+                }
+            }
 
             await db.SaveChangesAsync(ct);
             await ReIndexDocumentAsync(document, search, ct);
@@ -262,11 +261,12 @@ public class OcrWorkerService : BackgroundService
             return;
         }
 
-        // 2. Tesseract OCR
+        // ── 2. Tesseract OCR ─────────────────────────────────────────────────
+        _logger.LogInformation("🔍 Starting Tesseract OCR for {DocId}…", document.Id);
+
         using var fileStream = File.OpenRead(document.FilePath);
         var ocrResult = await ocrService.ProcessDocumentAsync(
-            message.DocumentId, fileStream,
-            message.Language ?? "eng", ct);
+            message.DocumentId, fileStream, message.Language ?? "eng", ct);
 
         _logger.LogInformation(
             "📝 Tesseract result: success={Ok}, chars={Chars}, confidence={Conf:F2}",
@@ -281,66 +281,87 @@ public class OcrWorkerService : BackgroundService
             document.ModifiedAt     = DateTime.UtcNow;
             document.Metadata     ??= new Dictionary<string, object>();
             document.Metadata["ocr_empty"]        = true;
+            document.Metadata["ocr_stage"]        = "completed";
             document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
             await db.SaveChangesAsync(ct);
             return;
         }
 
-        // 3. LLM cleaning (optional)
-        string cleanedText = ocrResult.ExtractedText;
-        if (textCleaner != null)
-        {
-            _logger.LogInformation(
-                "🧹 Sending {Chars} chars to Ollama for cleaning…",
-                ocrResult.ExtractedText.Length);
-
-            cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
-
-            _logger.LogInformation(
-                "✅ Ollama cleaning: {Before} → {After} chars",
-                ocrResult.ExtractedText.Length, cleanedText.Length);
-        }
-
-        // 4. Persist
-        document.OcrText        = ocrResult.ExtractedText;
-        document.IsOcrProcessed = true;
+        // ── 3. STAGE COMMIT: Tesseract done → IsOcrProcessed = true ─────────
+        //
+        // This is the key change. We persist IsOcrProcessed = true NOW,
+        // before Ollama runs. The frontend polling loop checks IsOcrProcessed
+        // and will resolve within the next 4-second poll cycle instead of
+        // waiting 60-90 more seconds for LLM cleaning to finish.
+        //
+        // We store the raw OCR text in OcrText and set ExtractedText to it
+        // as an initial value. LLM cleaning will overwrite ExtractedText later.
+        // ────────────────────────────────────────────────────────────────────
+        document.OcrText        = ocrResult.ExtractedText;          // raw Tesseract output, always kept
+        document.ExtractedText  = ocrResult.ExtractedText;          // initial value — LLM will overwrite
+        document.IsOcrProcessed = true;                              // ← frontend poll resolves here
         document.ModifiedAt     = DateTime.UtcNow;
-
-        if (string.IsNullOrWhiteSpace(document.ExtractedText))
-            document.ExtractedText = cleanedText;
-        else
-            document.ExtractedText += "\n\n[OCR - LLM cleaned]\n" + cleanedText;
-
-        document.Metadata ??= new Dictionary<string, object>();
+        document.Metadata     ??= new Dictionary<string, object>();
+        document.Metadata["ocr_stage"]          = "text_extracted";
         document.Metadata["ocr_raw_length"]     = ocrResult.ExtractedText.Length;
-        document.Metadata["ocr_cleaned_length"] = cleanedText.Length;
-        document.Metadata["ocr_confidence"]     = ocrResult.AverageConfidence;
         document.Metadata["ocr_processed_at"]   = DateTime.UtcNow.ToString("o");
 
-        // 5. Date extraction from cleaned text
+        if (ocrResult.AverageConfidence > 0)
+            document.Metadata["ocr_confidence"] = ocrResult.AverageConfidence;
+
+        await db.SaveChangesAsync(ct);
+
+        // Re-index now so searchable text is available immediately after Tesseract
+        await ReIndexDocumentAsync(document, search, ct);
+
+        _logger.LogInformation(
+            "✅ Stage 'text_extracted' committed for {DocId} — frontend polls will resolve now. " +
+            "Continuing with LLM cleaning in background…",
+            document.Id);
+
+        // ── 4. LLM cleaning (background, after frontend poll resolves) ───────
+        await SetStageAsync(db, document, "llm_cleaning", ct);
+
+        string cleanedText = ocrResult.ExtractedText;   // ← declare and initialize HERE
+
+        if (textCleaner != null)
+        {
+            _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
+                ocrResult.ExtractedText.Length);
+
+            try
+            {
+                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
+
+                _logger.LogInformation("✅ Ollama cleaning: {Before} → {After} chars",
+                    ocrResult.ExtractedText.Length, cleanedText.Length);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "LLM cleaning failed for {DocId} — keeping raw Tesseract text", document.Id);
+                cleanedText = ocrResult.ExtractedText;
+            }
+        }
+                
+        // ── 5. Date extraction ───────────────────────────────────────────────
         if (dateExtractor != null && document.DocumentDate == null)
         {
             try
             {
                 var dateInfo = await dateExtractor.ExtractDocumentDateAsync(
-                    cleanedText, document.FileName,
-                    document.Category ?? "Other", ct);
+                    cleanedText, document.FileName, document.Category ?? "Other", ct);
 
-                if (dateInfo?.DocumentDate != null &&
-                    dateInfo.Confidence >= DateConfidenceThreshold)
+                if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= DateConfidenceThreshold)
                 {
-                    document.DocumentDate = DateTime.SpecifyKind(
-                        dateInfo.DocumentDate.Value, DateTimeKind.Utc);
+                    document.DocumentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
 
                     document.Metadata["extracted_date"]  = document.DocumentDate.Value.ToString("yyyy-MM-dd");
                     document.Metadata["date_confidence"] = dateInfo.Confidence;
                     document.Metadata["date_type"]       = dateInfo.DateType;
                     document.Metadata["date_source"]     = "ocr_llm_cleaned";
 
-                    _logger.LogInformation(
-                        "✅ DocumentDate set: {Date} (conf={Conf:F2})",
-                        document.DocumentDate.Value.ToString("yyyy-MM-dd"),
-                        dateInfo.Confidence);
+                    _logger.LogInformation("✅ DocumentDate set: {Date} (conf={Conf:F2})",
+                        document.DocumentDate.Value.ToString("yyyy-MM-dd"), dateInfo.Confidence);
                 }
             }
             catch (Exception ex)
@@ -349,15 +370,52 @@ public class OcrWorkerService : BackgroundService
             }
         }
 
-        // 6. Save & re-index
+        // ── 6. Final save: store cleaned text and mark pipeline complete ─────
+        // Overwrite ExtractedText with the LLM-cleaned version.
+        // OcrText always retains the original raw Tesseract output.
+        document.ExtractedText = cleanedText;
+        document.ModifiedAt    = DateTime.UtcNow;
+        document.Metadata["ocr_cleaned_length"] = cleanedText.Length;
+        document.Metadata["ocr_stage"]          = "completed";
+
         await db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "💾 OCR results saved for {DocId}: pages={Pages}, conf={Conf:F2}, date={Date}",
+            "💾 Full OCR pipeline complete for {DocId}: pages={Pages}, conf={Conf:F2}, date={Date}",
             message.DocumentId, ocrResult.PageCount, ocrResult.AverageConfidence,
             document.DocumentDate?.ToString("yyyy-MM-dd") ?? "none");
 
+        // Final re-index with cleaned text and extracted date
         await ReIndexDocumentAsync(document, search, ct);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Persists a single ocr_stage metadata update to the DB.
+    /// Uses a fresh tracked entity to avoid EF change-tracking conflicts
+    /// with the long-running document entity.
+    /// </summary>
+    private async Task SetStageAsync(
+        GedDbContext db,
+        DocumentEntity document,
+        string stage,
+        CancellationToken ct)
+    {
+        try
+        {
+            document.Metadata ??= new Dictionary<string, object>();
+            document.Metadata["ocr_stage"] = stage;
+            document.ModifiedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+
+            _logger.LogDebug("📍 OCR stage → '{Stage}' for {DocId}", stage, document.Id);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal — the main pipeline continues even if stage write fails
+            _logger.LogWarning(ex, "Could not persist ocr_stage='{Stage}' for {DocId}", stage, document.Id);
+        }
     }
 
     private async Task ReIndexDocumentAsync(
@@ -389,11 +447,12 @@ public class OcrWorkerService : BackgroundService
             };
 
             await search.UpdateDocumentIndexAsync(domainDoc, ct);
-            _logger.LogInformation("🔍 Re-indexed {DocId} after OCR pipeline", document.Id);
+            _logger.LogInformation("🔍 Re-indexed {DocId} (stage={Stage})",
+                document.Id, document.Metadata?.GetValueOrDefault("ocr_stage") ?? "?");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to re-index {DocId} after OCR", document.Id);
+            _logger.LogWarning(ex, "Failed to re-index {DocId}", document.Id);
         }
     }
 
@@ -411,6 +470,7 @@ public class OcrWorkerService : BackgroundService
                 doc.ModifiedAt     = DateTime.UtcNow;
                 doc.Metadata     ??= new Dictionary<string, object>();
                 doc.Metadata["ocr_error"]     = error;
+                doc.Metadata["ocr_stage"]     = "failed";
                 doc.Metadata["ocr_failed_at"] = DateTime.UtcNow.ToString("o");
                 await db.SaveChangesAsync(ct);
             }

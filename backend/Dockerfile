@@ -19,18 +19,10 @@ RUN dotnet publish "GED.API/GED.API.csproj" \
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
 
-# Install Tesseract OCR with language packs
-# This satisfies the "Gestion des langues (FR / AR)" requirement
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
+    ocrmypdf \
     tesseract-ocr \
-    tesseract-ocr-fra \
     tesseract-ocr-eng \
-    # Arabic OCR support ↓ (was missing in original implementation)
-    tesseract-ocr-ara \
-    tesseract-ocr-spa \
-    tesseract-ocr-deu \
-    libgdiplus \
-    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create document storage directory

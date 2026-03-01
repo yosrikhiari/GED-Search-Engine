@@ -227,10 +227,10 @@ builder.Services.AddScoped<ISearchService>(sp =>
 });
 
 // ── OCR Service ───────────────────────────────────────────────────────────────
-builder.Services.AddScoped<IOcrService>(sp => new TesseractOcrService(
-    sp.GetRequiredService<ILogger<TesseractOcrService>>(),
+builder.Services.AddScoped<IOcrService>(sp => new OcrmyPdfOcrService(
+    sp.GetRequiredService<ILogger<OcrmyPdfOcrService>>(),
     sp.GetRequiredService<IMessageQueueService>(),
-    builder.Configuration["OCR:TessDataPath"] ?? "/usr/share/tesseract-ocr/5/tessdata"
+    builder.Configuration["OCR:OcrmypdfPath"] ?? "ocrmypdf"
 ));
 
 builder.Services.AddScoped<IDocumentService, DocumentService>();

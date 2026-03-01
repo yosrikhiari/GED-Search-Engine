@@ -5,10 +5,12 @@
  * request, and redirects to /login on 401 responses.
  */
 
+import { logger } from './logger.js'
+
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 /**
- * Core fetch wrapper with auth header injection.
+ * Core fetch wrapper with auth header injection and logging.
  */
 async function apiFetch(path, options = {}) {
   const token = localStorage.getItem('ged_token')
@@ -23,10 +25,18 @@ async function apiFetch(path, options = {}) {
     headers['Content-Type'] = 'application/json'
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, { ...options, headers })
+  const method = options.method || 'GET'
+  const url = `${BASE_URL}${path}`
+
+  logger.request(method, url)
+
+  const response = await fetch(url, { ...options, headers })
+
+  logger.response(method, url, response.status)
 
   // Auto-logout on 401
   if (response.status === 401) {
+    logger.error('api', `401 Unauthorized on ${method} ${path} — redirecting to login`)
     localStorage.removeItem('ged_token')
     localStorage.removeItem('ged_user')
     window.location.href = '/login'
@@ -65,6 +75,7 @@ export const auth = {
     apiFetch(`/api/auth/users/${id}`, { method: 'DELETE' }),
 
   logout() {
+    logger.info('Auth logout — clearing tokens')
     localStorage.removeItem('ged_token')
     localStorage.removeItem('ged_user')
     window.location.href = '/login'
@@ -87,7 +98,7 @@ export const auth = {
 
 export const documents = {
   upload: (formData) =>
-    apiFetch('/api/documents', { method: 'POST', body: formData }),
+    apiFetch('/api/documents/upload', { method: 'POST', body: formData }),
 
   list: (params = {}) => {
     const qs = new URLSearchParams(params).toString()

@@ -188,6 +188,7 @@
 <script setup>
 import { ref, nextTick, reactive } from 'vue'
 import { format } from 'date-fns'
+import { logger } from '../logger.js'
 
 const messages     = ref([])
 const userInput    = ref('')
@@ -222,6 +223,7 @@ const scrollToBottom = async () => {
 }
 
 const askQuestion = (q) => {
+  logger.info(`Example question clicked: "${q}"`)
   userInput.value = q
   sendMessage()
 }
@@ -229,6 +231,14 @@ const askQuestion = (q) => {
 const sendMessage = async () => {
   const query = userInput.value.trim()
   if (!query || loading.value) return
+
+  logger.startFlow('rag', `Query: "${query}"`)
+  logger.step('rag', 'Active filters', {
+    language: filters.language,
+    category: filters.category || 'none',
+    fromDate: filters.fromDate || 'none',
+    toDate:   filters.toDate   || 'none'
+  })
 
   // Add user message
   messages.value.push({ role: 'user', content: query })
@@ -256,8 +266,10 @@ const sendMessage = async () => {
       language: filters.language || 'fr'
     }
     if (filters.category) body.categories = [filters.category]
-    if (filters.fromDate) body.fromDate = filters.fromDate
-    if (filters.toDate)   body.toDate   = filters.toDate
+    if (filters.fromDate)  body.fromDate   = filters.fromDate
+    if (filters.toDate)    body.toDate     = filters.toDate
+
+    logger.step('rag', 'Sending request to /api/rag/ask', body)
 
     const response = await fetch('/api/rag/ask', {
       method: 'POST',
@@ -268,21 +280,52 @@ const sendMessage = async () => {
       body: JSON.stringify(body)
     })
 
+    logger.response('POST', '/api/rag/ask', response.status)
+
     if (response.ok) {
       const data = await response.json()
+
+      logger.success('rag', `Answer received (${data.answer?.length ?? 0} chars)`, {
+        model:        data.modelUsed,
+        searchTimeMs: data.searchTimeMs,
+        sourcesCount: data.sources?.length ?? 0,
+        totalDocs:    data.totalDocumentsSearched
+      })
+
+      if (data.sources?.length) {
+        logger.step('rag', `Sources used (${data.sources.length})`,
+          data.sources.map((s, i) => `${i + 1}. ${s.title} [score=${(s.relevanceScore * 100).toFixed(0)}%]`)
+        )
+      } else {
+        logger.warn('rag', 'No source documents were returned with the answer')
+      }
+
       aiMsg.content       = data.answer
       aiMsg.sources       = data.sources || []
       aiMsg.searchTimeMs  = data.searchTimeMs
       aiMsg.totalDocs     = data.totalDocumentsSearched
       aiMsg.loading       = false
-      if (data.modelUsed) modelInfo.value = data.modelUsed
+
+      if (data.modelUsed) {
+        modelInfo.value = data.modelUsed
+        logger.step('rag', `LLM model: ${data.modelUsed}`)
+      }
+
+      logger.endFlow('rag', `Done in ${data.searchTimeMs}ms`)
+
     } else {
+      const errText = await response.text().catch(() => '(no body)')
+      logger.error('rag', `API returned ${response.status}`, errText)
       aiMsg.content = 'Une erreur est survenue. Veuillez réessayer.'
       aiMsg.loading = false
+      logger.endFlow('rag', `Failed (HTTP ${response.status})`)
     }
+
   } catch (err) {
+    logger.error('rag', 'Network error — backend may be down', err)
     aiMsg.content = 'Impossible de contacter le service IA. Vérifiez que le backend est démarré.'
     aiMsg.loading = false
+    logger.endFlow('rag', 'Network error')
   } finally {
     loading.value = false
     await scrollToBottom()

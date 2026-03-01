@@ -18,7 +18,6 @@ public class DocumentsController : ControllerBase
     private readonly ILogger<DocumentsController> _logger;
     private readonly IConfiguration _configuration;
 
-    // Allowed categories — single source of truth
     private static readonly string[] AllowedCategories =
     {
         "Invoice", "Contract", "Report", "Letter",
@@ -202,19 +201,22 @@ public class DocumentsController : ControllerBase
         }
     }
 
-    // ── FIX: Query the database directly instead of the broken in-memory cache ──
-    //
-    // The original bug:
-    //   - TesseractOcrService._jobCache is keyed by job.Id (a new Guid per job)
-    //   - But this endpoint receives the documentId, not the jobId
-    //   - OcrWorkerService runs in its own DI scope → its TesseractOcrService instance
-    //     has a SEPARATE _jobCache that is never visible to the controller
-    //   - Result: always 404, even after OCR completes
-    //
-    // The fix:
-    //   - Inject GedDbContext into the controller (it's already registered in DI)
-    //   - Query documents.is_ocr_processed directly — this is updated by OcrWorkerService
-    //   - Synthesize an OcrJob response from the DB row so the API contract stays the same
+    /// <summary>
+    /// Returns the current OCR pipeline stage for a document.
+    ///
+    /// Stage progression stored in document.Metadata:
+    ///
+    ///   (nothing)                      → Pending        (0)
+    ///   ocr_stage = "processing"       → Processing     (1)
+    ///   ocr_stage = "text_extracted"   → TextExtracted  (2)  ← Tesseract done
+    ///   ocr_stage = "llm_cleaning"     → LlmCleaning    (3)  ← Ollama running
+    ///   IsOcrProcessed = true          → Completed      (4)  ← full pipeline done
+    ///   ocr_error present              → Failed         (5)
+    ///
+    /// IsOcrProcessed is set to true as soon as Tesseract finishes (stage
+    /// text_extracted), so the frontend polling loop resolves quickly even
+    /// while Ollama is still cleaning the text in the background.
+    /// </summary>
     [HttpGet("{id}/ocr-status")]
     public async Task<ActionResult<OcrJob>> GetOcrStatus(Guid id)
     {
@@ -227,52 +229,75 @@ public class DocumentsController : ControllerBase
             if (entity == null)
                 return NotFound(new { error = $"Document {id} not found" });
 
-            // Synthesize an OcrJob from the document's current DB state.
-            // This is always accurate because OcrWorkerService writes IsOcrProcessed
-            // and ExtractedText directly to the documents table.
             var ocrJob = new OcrJob
             {
-                Id           = id,            // reuse documentId as a stable identifier
-                DocumentId   = id,
-                CreatedAt    = entity.CreatedAt,
-                CompletedAt  = entity.ModifiedAt,
+                Id            = id,
+                DocumentId    = id,
+                CreatedAt     = entity.CreatedAt,
+                CompletedAt   = entity.ModifiedAt,
                 ExtractedText = entity.ExtractedText,
+                RawTextLength = entity.OcrText?.Length ?? entity.ExtractedText?.Length ?? 0,
             };
 
-            // Determine status from DB columns
-            if (entity.IsOcrProcessed)
+            // ── Resolve pipeline stage from metadata ─────────────────────────
+            var meta  = entity.Metadata;
+            var stage = GetMetaString(meta, "ocr_stage");
+
+            if (entity.Metadata != null && entity.Metadata.ContainsKey("ocr_error"))
             {
-                ocrJob.Status = OcrStatus.Completed;
-            }
-            else if (entity.Metadata != null &&
-                     entity.Metadata.ContainsKey("ocr_error"))
-            {
+                // Hard failure at any stage
                 ocrJob.Status       = OcrStatus.Failed;
-                ocrJob.ErrorMessage = entity.Metadata["ocr_error"]?.ToString();
+                ocrJob.ErrorMessage = GetMetaString(meta, "ocr_error");
+                ocrJob.StageLabel   = "Failed";
             }
-            else if (entity.Metadata != null &&
-                     entity.Metadata.ContainsKey("ocr_processed_at"))
+            else if (entity.IsOcrProcessed && stage == "completed")
             {
-                // Worker set ocr_empty=true (no text found) but still marked processed
-                ocrJob.Status = OcrStatus.Completed;
+                // Full pipeline done
+                ocrJob.Status     = OcrStatus.Completed;
+                ocrJob.StageLabel = "Complete";
+            }
+            else if (entity.IsOcrProcessed && stage == "llm_cleaning")
+            {
+                // IsOcrProcessed was set after Tesseract, LLM still running
+                ocrJob.Status     = OcrStatus.LlmCleaning;
+                ocrJob.StageLabel = "Enhancing with AI…";
+            }
+            else if (entity.IsOcrProcessed && stage == "text_extracted")
+            {
+                // Tesseract finished, LLM hasn't started yet
+                ocrJob.Status     = OcrStatus.TextExtracted;
+                ocrJob.StageLabel = "Text extracted, queued for AI cleaning";
+            }
+            else if (entity.IsOcrProcessed)
+            {
+                // IsOcrProcessed true but no ocr_stage key — legacy docs or
+                // the native-text shortcut path: treat as completed.
+                ocrJob.Status     = OcrStatus.Completed;
+                ocrJob.StageLabel = "Complete";
+            }
+            else if (stage == "processing")
+            {
+                ocrJob.Status     = OcrStatus.Processing;
+                ocrJob.StageLabel = "Reading document…";
             }
             else
             {
-                // Not yet processed — still pending or in-flight
-                ocrJob.Status = OcrStatus.Pending;
+                // Default: waiting in queue
+                ocrJob.Status     = OcrStatus.Pending;
+                ocrJob.StageLabel = "Queued";
             }
 
-            // Include OCR confidence if available
-            if (entity.Metadata != null &&
-                entity.Metadata.TryGetValue("ocr_confidence", out var conf) &&
+            // Confidence if stored
+            if (meta != null &&
+                meta.TryGetValue("ocr_confidence", out var conf) &&
                 conf is System.Text.Json.JsonElement je)
             {
                 ocrJob.Confidence = (float)je.GetDouble();
             }
 
             _logger.LogInformation(
-                "OCR status for document {DocumentId}: {Status}, IsOcrProcessed={IsOcrProcessed}",
-                id, ocrJob.Status, entity.IsOcrProcessed);
+                "OCR status for {DocumentId}: {Status} ({Stage}), IsOcrProcessed={IsOcrProcessed}, RawLen={RawLen}",
+                id, ocrJob.Status, ocrJob.StageLabel, entity.IsOcrProcessed, ocrJob.RawTextLength);
 
             return Ok(ocrJob);
         }
@@ -281,5 +306,20 @@ public class DocumentsController : ControllerBase
             _logger.LogError(ex, "Error getting OCR status for document {DocumentId}", id);
             return StatusCode(500, new { error = "Failed to get OCR status", message = ex.Message });
         }
+    }
+
+    // ── Helper ────────────────────────────────────────────────────────────────
+
+    private static string? GetMetaString(Dictionary<string, object>? meta, string key)
+    {
+        if (meta == null || !meta.TryGetValue(key, out var val)) return null;
+
+        return val switch
+        {
+            string s => s,
+            System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.String
+                => je.GetString(),
+            _ => val?.ToString()
+        };
     }
 }

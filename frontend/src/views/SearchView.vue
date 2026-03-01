@@ -398,11 +398,17 @@
           <div class="viewer-details-pane" :class="{ 'tab-hidden': activeTab !== 'details' }">
 
             <!-- OCR / Processing status -->
-            <div v-if="ocrStatus" class="ocr-status-bar" :class="ocrStatus.status === 2 ? 'ocr-done' : ocrStatus.status === 3 ? 'ocr-fail' : 'ocr-pending'">
+            <div v-if="ocrStatus" class="ocr-status-bar"
+              :class="ocrStatus.status === 4 ? 'ocr-done'
+                    : ocrStatus.status === 5 ? 'ocr-fail'
+                    : ocrStatus.status === 2 ? 'ocr-partial'
+                    : 'ocr-pending'">
               <span class="ocr-dot"></span>
-              <span v-if="ocrStatus.status === 2">OCR Complete · {{ ocrStatus.extractedText?.length?.toLocaleString() }} chars extracted</span>
-              <span v-else-if="ocrStatus.status === 3">OCR Failed: {{ ocrStatus.errorMessage }}</span>
-              <span v-else>OCR Processing…</span>
+              <span v-if="ocrStatus.status === 4">OCR Complete · {{ (ocrStatus.rawTextLength || ocrStatus.extractedText?.length || 0).toLocaleString() }} chars</span>
+              <span v-else-if="ocrStatus.status === 5">OCR Failed: {{ ocrStatus.errorMessage }}</span>
+              <span v-else-if="ocrStatus.status === 2">Text ready · AI enhancing in background…</span>
+              <span v-else-if="ocrStatus.status === 3">{{ ocrStatus.stageLabel ?? 'AI enhancing…' }}</span>
+              <span v-else>{{ ocrStatus.stageLabel ?? 'OCR Processing…' }}</span>
             </div>
 
             <!-- ── Document Info ── -->
@@ -611,8 +617,10 @@
 </template>
 
 <script setup>
+
 import { ref, reactive, computed, onMounted } from 'vue'
 import { format } from 'date-fns'
+import { logger } from '../logger.js'
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const searchQuery    = ref('')
@@ -631,15 +639,16 @@ const documentUrl        = ref(null)
 const documentContent    = ref(null)
 const documentLoading    = ref(false)
 const imageLoaded        = ref(false)
-const activeTab          = ref('preview')      // 'preview' | 'details'
-const officeViewMode     = ref('text')          // 'text' | 'embed'
+const activeTab          = ref('preview')
+const officeViewMode     = ref('text')
 const officePublicUrl    = ref('')
 const ocrStatus          = ref(null)
+const ocrPollInterval    = ref(null)
 const suggestions        = ref([])
 const suggestionsLoading = ref(false)
-const suggestionsCache   = new Map()           // cache by documentId
+const suggestionsCache   = new Map()
 
-const filters = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '' })
+const filters    = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '' })
 const uploadData = reactive({ title: '', category: '' })
 
 const quickSearches = ['all documents', 'invoices', 'PDFs from last month', 'contracts from 2024']
@@ -657,11 +666,11 @@ const paginationPages = computed(() => {
 })
 
 // ── Type helpers ──────────────────────────────────────────────────────────────
-const isPDF   = (t) => t === 'application/pdf'
-const isImage = (t) => !!t?.startsWith('image/')
-const isText  = (t) => t === 'text/plain'
-const isAudio = (t) => !!t?.startsWith('audio/')
-const isVideo = (t) => !!t?.startsWith('video/')
+const isPDF    = (t) => t === 'application/pdf'
+const isImage  = (t) => !!t?.startsWith('image/')
+const isText   = (t) => t === 'text/plain'
+const isAudio  = (t) => !!t?.startsWith('audio/')
+const isVideo  = (t) => !!t?.startsWith('video/')
 const isOffice = (t) => [
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -670,6 +679,15 @@ const isOffice = (t) => [
   'application/vnd.ms-powerpoint',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ].includes(t)
+
+const isGenericDescription = (desc) => {
+  if (!desc || desc.trim().length < 15) return true
+  const d = desc.trim().toLowerCase()
+  if (d.startsWith('document:')) return true
+  const fileName = currentDocument.value?.fileName?.replace(/\.[^/.]+$/, '').toLowerCase()
+  if (fileName && d.includes(fileName)) return true
+  return false
+}
 
 const getFileIcon = (contentType) => {
   if (!contentType) return '📎'
@@ -684,7 +702,7 @@ const getFileIcon = (contentType) => {
   return '📎'
 }
 
-const getFileIconById = (sug) => '📄'   // suggestions don't carry contentType — default
+const getFileIconById = () => '📄'
 
 const getFileExtension = (fileName) => {
   if (!fileName) return ''
@@ -693,12 +711,8 @@ const getFileExtension = (fileName) => {
 }
 
 // ── Format helpers ────────────────────────────────────────────────────────────
-const formatDate = (d) => {
-  try { return format(new Date(d), 'MMM d, yyyy') } catch { return d }
-}
-const formatDateLong = (d) => {
-  try { return format(new Date(d), 'MMM d, yyyy · HH:mm') } catch { return d }
-}
+const formatDate     = (d) => { try { return format(new Date(d), 'MMM d, yyyy') } catch { return d } }
+const formatDateLong = (d) => { try { return format(new Date(d), 'MMM d, yyyy · HH:mm') } catch { return d } }
 const formatFileSize = (bytes) => {
   if (!bytes) return '—'
   if (bytes < 1024)        return bytes + ' B'
@@ -706,44 +720,181 @@ const formatFileSize = (bytes) => {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-// ── Auth helper — adds JWT Bearer header to every API call ───────────────────
+// ── Auth helper ───────────────────────────────────────────────────────────────
 const authHeaders = () => {
   const token = localStorage.getItem('ged_token')
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-// Keep track of blob URLs so we can revoke them when the viewer closes
+// ── Blob URL helpers ──────────────────────────────────────────────────────────
 let _currentBlobUrl = null
 const revokeBlobUrl = () => {
   if (_currentBlobUrl) { URL.revokeObjectURL(_currentBlobUrl); _currentBlobUrl = null }
 }
 
-/**
- * Fetch a file from the API with auth headers and return a blob: URL.
- *
- * Why blob URLs instead of direct fetch URLs?
- * 1. iframe/img/audio/video elements send NO custom headers — auth fails
- * 2. Content-Disposition: attachment prevents iframe display
- * Wrapping bytes in a blob: URL bypasses both issues entirely.
- *
- * @param {string} apiPath
- * @param {string} [forceMime]  Override the MIME type (e.g. 'application/pdf')
- */
 const fetchBlobUrl = async (apiPath, forceMime) => {
+  logger.step('view', `Fetching file bytes via authenticated request`, { path: apiPath, mime: forceMime })
   const res  = await fetch(apiPath, { headers: authHeaders() })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const buf  = await res.arrayBuffer()
-  // Force the MIME type so the browser knows how to render the blob
   const mime = forceMime || res.headers.get('content-type')?.split(';')[0].trim() || 'application/octet-stream'
   const blob = new Blob([buf], { type: mime })
   const url  = URL.createObjectURL(blob)
   _currentBlobUrl = url
+  logger.success('view', `Blob URL created (${(buf.byteLength / 1024).toFixed(1)} KB, mime=${mime})`)
   return url
+}
+
+// ── OCR polling ───────────────────────────────────────────────────────────────
+const stopOcrPolling = () => {
+  if (ocrPollInterval.value) {
+    clearInterval(ocrPollInterval.value)
+    ocrPollInterval.value = null
+    logger.info('OCR polling stopped')
+  }
+}
+
+const OcrStatus = {
+  Pending:       0,
+  Processing:    1,
+  TextExtracted: 2,
+  LlmCleaning:   3,
+  Completed:     4,
+  Failed:        5,
+}
+const OCR_POLL_INTERVAL_MS = 4000
+const OCR_MAX_POLLS        = 50    // 200s — covers 90s LLM jobs with headroom
+const OCR_USABLE_AT_STAGE  = 2     // TextExtracted — doc is usable here
+
+const startOcrPolling = (docId) => {
+  stopOcrPolling()
+  let attempts = 0
+
+  logger.startFlow('ocr', `Polling OCR status for document ${docId}`)
+
+  ocrPollInterval.value = setInterval(async () => {
+    attempts++
+    logger.step('ocr', `Poll attempt #${attempts}/${OCR_MAX_POLLS}`)
+
+    try {
+      const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeaders() })
+      logger.response('GET', `/api/documents/${docId}/ocr-status`, res.status)
+
+      if (!res.ok) {
+        logger.error('ocr', `Status endpoint returned ${res.status}`)
+        if (attempts >= OCR_MAX_POLLS) { stopOcrPolling() }
+        return
+      }
+
+      const data       = await res.json()
+      const status     = data.status
+      const stageLabel = data.stageLabel
+      const rawLen     = data.rawTextLength ?? data.extractedText?.length ?? 0
+
+      ocrStatus.value = data
+
+      logger.step('ocr', `Stage: ${stageLabel ?? status}`, {
+        status, rawLen, isOcrProcessed: data.isOcrProcessed
+      })
+
+      // ── TextExtracted: Tesseract done, unblock the user now ──────────────
+      if (status === OcrStatus.TextExtracted) {
+        logger.success('ocr', `Tesseract done (${rawLen} chars) — document usable. Continuing for LLM cleaning…`)
+
+        // Show raw text immediately so user isn't waiting
+        if (data.extractedText && !documentContent.value) {
+          documentContent.value = data.extractedText
+        }
+
+        // Refresh the document metadata row (date, category etc may not be set yet)
+        try {
+          const docRes = await fetch(`/api/documents/${docId}`, { headers: authHeaders() })
+          if (docRes.ok) {
+            const updatedDoc = await docRes.json()
+            currentDocument.value = {
+              ...currentDocument.value,
+              ...updatedDoc,
+              score:      currentDocument.value?.score,
+              highlights: currentDocument.value?.highlights,
+            }
+          }
+        } catch (e) { logger.warn('ocr', 'Could not refresh doc after TextExtracted', e) }
+
+        // Keep polling — don't clearInterval yet
+      }
+
+      // ── Completed: full pipeline done ────────────────────────────────────
+      if (status === OcrStatus.Completed) {
+        stopOcrPolling()
+        logger.success('ocr', `Full pipeline complete — ${rawLen} chars`)
+
+        if (data.extractedText) documentContent.value = data.extractedText
+
+        try {
+          const docRes = await fetch(`/api/documents/${docId}`, { headers: authHeaders() })
+          if (docRes.ok) {
+            const updatedDoc = await docRes.json()
+            currentDocument.value = {
+              ...currentDocument.value,
+              ...updatedDoc,
+              score:       currentDocument.value?.score,
+              highlights:  currentDocument.value?.highlights,
+              description: (!isGenericDescription(updatedDoc.description))
+                ? updatedDoc.description
+                : (data.extractedText ? data.extractedText.slice(0, 200) + '…' : currentDocument.value?.description)
+            }
+            logger.success('ocr', 'Document metadata refreshed after full completion', {
+              documentDate: updatedDoc.documentDate,
+              category:     updatedDoc.category,
+            })
+          }
+        } catch (e) { logger.warn('ocr', 'Could not refresh doc after Completed', e) }
+
+        suggestionsCache.delete(docId)
+        fetchSuggestions(docId)
+        logger.endFlow('ocr', 'Completed')
+        return
+      }
+
+      // ── Failed ────────────────────────────────────────────────────────────
+      if (status === OcrStatus.Failed) {
+        stopOcrPolling()
+        logger.error('ocr', `OCR failed: ${data.errorMessage}`)
+        logger.endFlow('ocr', 'Failed')
+        return
+      }
+
+      // ── Timeout guard ─────────────────────────────────────────────────────
+      if (attempts >= OCR_MAX_POLLS) {
+        stopOcrPolling()
+        logger.warn('ocr', `Max polls (${OCR_MAX_POLLS}) reached at stage ${status}`)
+
+        if (status >= OCR_USABLE_AT_STAGE) {
+          // We have raw text at minimum — treat as usable
+          if (data.extractedText) documentContent.value = data.extractedText
+          logger.endFlow('ocr', 'Partial — raw text available, LLM timed out')
+        } else {
+          logger.endFlow('ocr', 'Timed out — no text extracted')
+        }
+      }
+
+    } catch (e) {
+      logger.error('ocr', 'Poll request threw an exception', e)
+      if (attempts >= OCR_MAX_POLLS) stopOcrPolling()
+    }
+  }, OCR_POLL_INTERVAL_MS)
 }
 
 // ── Document Viewer ───────────────────────────────────────────────────────────
 const viewDocument = async (doc) => {
-  revokeBlobUrl()                          // clean up any previous blob URL
+  logger.startFlow('view', `Opening document "${doc.title}" (${doc.id})`)
+  logger.step('view', 'Initializing viewer state', {
+    id: doc.id,
+    contentType: doc.contentType,
+    fileSize: formatFileSize(doc.fileSize)
+  })
+
+  revokeBlobUrl()
   currentDocument.value    = doc
   showDocumentViewer.value = true
   documentLoading.value    = true
@@ -755,97 +906,183 @@ const viewDocument = async (doc) => {
   officeViewMode.value     = 'text'
   imageLoaded.value        = false
 
+  // ⭐ Always fetch fresh doc from API — search results may be stale (Redis cache)
+  try {
+    const freshRes = await fetch(`/api/documents/${doc.id}`, { headers: authHeaders() })
+    if (freshRes.ok) {
+      const freshDoc = await freshRes.json()
+      currentDocument.value = {
+        ...freshDoc,
+        score: doc.score,
+        highlights: doc.highlights,
+      }
+    }
+  } catch (e) {
+    logger.warn('view', 'Could not fetch fresh document on open', e)
+  }
+  
   const downloadPath = `/api/documents/${doc.id}/download`
   const ocrPath      = `/api/documents/${doc.id}/ocr-status`
 
+
   try {
-    // ── PDF, Image, Audio, Video → authenticated blob URL ──────────────────
-    // We MUST fetch with auth headers first and turn the response into a
-    // blob: URL; otherwise the browser's iframe/img/audio/video element
-    // will request the URL without the Authorization header and get a 401.
+    // ── PDF, Image, Audio, Video → blob URL ──────────────────────────────
     if (isPDF(doc.contentType) || isImage(doc.contentType) ||
         isAudio(doc.contentType) || isVideo(doc.contentType)) {
+
+      const category = isPDF(doc.contentType) ? 'PDF'
+        : isImage(doc.contentType) ? 'Image'
+        : isAudio(doc.contentType) ? 'Audio' : 'Video'
+
+      logger.step('view', `${category} detected — fetching as authenticated blob URL`)
+
       try {
-        // Force the correct MIME so the browser renders inline (not downloads)
-        const forcedMime = doc.contentType || undefined
-        documentUrl.value = await fetchBlobUrl(downloadPath, forcedMime)
+        documentUrl.value = await fetchBlobUrl(downloadPath, doc.contentType || undefined)
       } catch (e) {
-        console.warn('Blob fetch failed, falling back to direct URL:', e)
-        documentUrl.value = downloadPath   // fallback (works when auth is disabled)
+        logger.warn('view', 'Blob fetch failed, falling back to direct URL', e)
+        documentUrl.value = downloadPath
+      }
+      documentLoading.value = false
+      logger.success('view', `${category} ready for rendering`)
+
+    // ── Plain text ──────────────────────────────────────────────────────
+    } else if (isText(doc.contentType)) {
+      logger.step('view', 'Plain text — fetching content with auth headers')
+      try {
+        const res = await fetch(downloadPath, { headers: authHeaders() })
+        logger.response('GET', downloadPath, res.status)
+        documentContent.value = res.ok ? await res.text() : '(could not load file)'
+        if (res.ok) {
+          logger.success('view', `Text loaded: ${documentContent.value.length.toLocaleString()} chars, ${documentContent.value.split('\n').length} lines`)
+        }
+      } catch (e) {
+        logger.error('view', 'Failed to load text file', e)
+        documentContent.value = '(could not load file)'
       }
       documentLoading.value = false
 
-    // ── Plain text → fetch text with auth ──────────────────────────────────
-    } else if (isText(doc.contentType)) {
-      try {
-        const res = await fetch(downloadPath, { headers: authHeaders() })
-        documentContent.value = res.ok ? await res.text() : '(could not load file)'
-      } catch { documentContent.value = '(could not load file)' }
-      documentLoading.value = false
-
-    // ── Office docs → show extracted text pulled from OCR endpoint ─────────
+    // ── Office documents ────────────────────────────────────────────────
     } else if (isOffice(doc.contentType)) {
-      // Pre-fill with any highlights / description we already have
-      documentContent.value = doc.highlights?.join('\n\n') || doc.description || null
+      logger.step('view', 'Office document — will show extracted text from OCR endpoint')
+      documentContent.value = doc.description || null
+
+      if (doc.description) {
+        logger.step('view', 'Pre-filling content from search result description', {
+          descriptionLength: doc.description.length
+        })
+      }
 
       try {
+        logger.step('view', 'Fetching extracted text from OCR status endpoint')
         const ocrRes = await fetch(ocrPath, { headers: authHeaders() })
+        logger.response('GET', ocrPath, ocrRes.status)
+
         if (ocrRes.ok) {
           const ocr = await ocrRes.json()
           ocrStatus.value = ocr
-          if (ocr.extractedText) documentContent.value = ocr.extractedText
+          logger.success('view', `OCR status fetched: ${['Pending','Processing','TextExtracted','LlmCleaning','Completed','Failed'][ocr.status] ?? ocr.status}`, {
+            hasText: !!ocr.extractedText,
+            textLength: ocr.extractedText?.length ?? 0
+          })
+          if (ocr.extractedText) {
+            documentContent.value = ocr.extractedText
+            logger.success('view', `Extracted text ready: ${ocr.extractedText.length.toLocaleString()} chars`)
+          } else {
+            logger.warn('view', 'No extracted text available yet in OCR response')
+          }
         }
-      } catch { /* non-fatal */ }
-
+      } catch (e) {
+        logger.warn('view', 'Could not fetch OCR text (non-fatal)', e)
+      }
       documentLoading.value = false
 
     } else {
+      logger.step('view', `Unsupported content type: ${doc.contentType} — showing fallback`)
       documentLoading.value = false
     }
 
-    // ── OCR status for images & PDFs (background, non-blocking) ───────────
-    if ((isPDF(doc.contentType) || isImage(doc.contentType)) && !ocrStatus.value) {
-      fetch(ocrPath, { headers: authHeaders() })
-        .then(r => r.ok ? r.json() : null)
-        .then(data => { if (data) ocrStatus.value = data })
-        .catch(() => { /* non-fatal */ })
+    // ── OCR status for images & PDFs ─────────────────────────────────
+    if (isPDF(doc.contentType) || isImage(doc.contentType)) {
+      logger.step('view', 'Checking OCR status for PDF/Image')
+      try {
+        const ocrRes = await fetch(ocrPath, { headers: authHeaders() })
+        logger.response('GET', ocrPath, ocrRes.status)
+
+        if (ocrRes.ok) {
+          const data = await ocrRes.json()
+          ocrStatus.value = data
+          const statusLabel = ['Pending', 'Processing', 'TextExtracted', 'LlmCleaning', 'Completed', 'Failed'][data.status] ?? `Unknown(${data.status})`
+          logger.success('view', `OCR status: ${statusLabel}`, {
+            isOcrProcessed: data.isOcrProcessed,
+            textLength: data.extractedText?.length ?? 0,
+            confidence: data.confidence
+          })
+
+          const isPending = data.status === OcrStatus.Pending
+              || data.status === OcrStatus.Processing
+              || data.status === OcrStatus.TextExtracted
+              || data.status === OcrStatus.LlmCleaning
+          if (isPending) {
+            logger.step('view', 'OCR is pending/processing — starting live polling (every 4s)')
+            startOcrPolling(doc.id)
+          } else {
+            logger.step('view', 'OCR already in terminal state — no polling needed')
+          }
+        }
+      } catch (e) {
+        logger.warn('view', 'Could not check OCR status (non-fatal)', e)
+      }
     }
 
-    // ── Similar document suggestions ───────────────────────────────────────
+    // ── Suggestions ──────────────────────────────────────────────────
+    logger.step('view', 'Fetching similar document suggestions')
     fetchSuggestions(doc.id)
 
+    logger.endFlow('view', 'Viewer fully initialized')
+
   } catch (err) {
-    console.error('Viewer error:', err)
+    logger.error('view', 'Unexpected error during viewer initialization', err)
     documentLoading.value = false
+    logger.endFlow('view', 'Failed')
   }
 }
 
 const fetchSuggestions = async (docId) => {
   if (suggestionsCache.has(docId)) {
+    logger.step('view', `Suggestions cache HIT for ${docId}`)
     suggestions.value = suggestionsCache.get(docId)
     return
   }
+
+  logger.step('view', `Fetching suggestions for ${docId} (cache miss)`)
   suggestionsLoading.value = true
+
   try {
     const res = await fetch(`/api/search/suggestions/${docId}?count=5`, { headers: authHeaders() })
+    logger.response('GET', `/api/search/suggestions/${docId}`, res.status)
+
     if (res.ok) {
-      const data = await res.json()
-      suggestions.value = data
-      suggestionsCache.set(docId, data)
+      const raw      = await res.json()
+      const filtered = raw.filter(s => s.documentId !== docId)
+      suggestions.value = filtered
+      suggestionsCache.set(docId, filtered)
+      logger.success('view', `${filtered.length} similar documents found`, filtered.map(s => s.title))
     }
-  } catch { /* non-fatal */ } finally {
+  } catch (e) {
+    logger.warn('view', 'Could not fetch suggestions', e)
+    suggestionsCache.delete(docId)
+  } finally {
     suggestionsLoading.value = false
   }
 }
 
 const openSuggestion = (sug) => {
-  // Navigate to the suggestion: open it in viewer if we have enough data,
-  // otherwise use its ID to fetch details then open
+  logger.info(`Opening suggestion: "${sug.title}" (${sug.documentId})`)
   const syntheticDoc = {
     id:          sug.documentId,
     title:       sug.title,
     fileName:    sug.title,
-    contentType: 'application/pdf', // best guess; real type will come from server
+    contentType: 'application/pdf',
     score:       sug.similarityScore,
   }
   closeDocumentViewer()
@@ -853,7 +1090,9 @@ const openSuggestion = (sug) => {
 }
 
 const closeDocumentViewer = () => {
-  revokeBlobUrl()                        // free blob memory
+  logger.info('Closing document viewer — revoking blob URL and stopping OCR poll')
+  revokeBlobUrl()
+  stopOcrPolling()
   showDocumentViewer.value = false
   currentDocument.value    = null
   documentUrl.value        = null
@@ -863,9 +1102,13 @@ const closeDocumentViewer = () => {
   suggestions.value        = []
 }
 
-const downloadDocument = (id) => window.open(`/api/documents/${id}/download`, '_blank')
+const downloadDocument = (id) => {
+  logger.info(`Triggering download for document ${id}`)
+  window.open(`/api/documents/${id}/download`, '_blank')
+}
 
 const searchByTag = (tag) => {
+  logger.info(`Tag click — searching for: "${tag}"`)
   closeDocumentViewer()
   searchQuery.value = tag
   performSearch()
@@ -881,48 +1124,130 @@ const mapFileTypeToContentType = (fileType) => ({
 }[fileType?.toLowerCase()] || null)
 
 const buildSearchBody = async (page = 1) => {
+  logger.step('search', 'Calling NLP /understand endpoint to extract filters')
+
   let nlpFilters = null
   try {
     const r = await fetch('/api/search/nlp/understand', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(searchQuery.value)
     })
-    if (r.ok) nlpFilters = (await r.json()).extractedFilters
-  } catch { /* non-fatal */ }
+    logger.response('POST', '/api/search/nlp/understand', r.status)
+
+    if (r.ok) {
+      const nlpResult = await r.json()
+      nlpFilters = nlpResult.extractedFilters
+      logger.success('search', 'NLP filters extracted', {
+        keywords: nlpResult.keywords,
+        intent:   nlpResult.intent,
+        filters:  nlpFilters
+      })
+    }
+  } catch (e) {
+    logger.warn('search', 'NLP /understand call failed (non-fatal)', e)
+  }
 
   const contentTypeFilter = nlpFilters?.filetype
     ? mapFileTypeToContentType(nlpFilters.filetype)
     : filters.contentType || null
 
-  return {
+  if (contentTypeFilter) {
+    logger.step('search', `Content-type filter applied: ${contentTypeFilter}`)
+  }
+
+  const fromDate = nlpFilters?.fromDate || filters.dateFrom || null
+  const toDate   = nlpFilters?.toDate   || filters.dateTo   || null
+  if (fromDate || toDate) {
+    logger.step('search', `Date range filter applied`, { fromDate, toDate })
+  }
+
+  const body = {
     query: searchQuery.value, searchType: 0, page, pageSize: 20,
-    categories: filters.category ? [filters.category] : null,
+    categories:   filters.category ? [filters.category] : null,
     contentTypes: contentTypeFilter ? [contentTypeFilter] : null,
-    fromDate: nlpFilters?.fromDate || filters.dateFrom || null,
-    toDate:   nlpFilters?.toDate   || filters.dateTo   || null,
+    fromDate,
+    toDate,
     includeOcrContent: true
   }
+
+  logger.step('search', 'Search request body built', body)
+  return body
 }
 
 const performSearch = async () => {
   if (!searchQuery.value.trim()) return
-  loading.value = true; searched.value = true
+
+  logger.startFlow('search', `Query: "${searchQuery.value}"`)
+  logger.step('search', 'Applying manual filters', {
+    category:    filters.category    || 'none',
+    contentType: filters.contentType || 'none',
+    dateFrom:    filters.dateFrom    || 'none',
+    dateTo:      filters.dateTo      || 'none'
+  })
+
+  loading.value  = true
+  searched.value = true
+
   try {
     const body = await buildSearchBody(1)
-    const res  = await fetch('/api/search/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (res.ok) searchResults.value = await res.json()
-    else alert(`Search failed: ${res.status}`)
-  } catch { alert('Search error. Make sure the backend is running.') } finally { loading.value = false }
+
+    logger.step('search', 'Sending search request to OpenSearch via backend')
+    const res = await fetch('/api/search/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    logger.response('POST', '/api/search/query', res.status)
+
+    if (res.ok) {
+      const data = await res.json()
+      searchResults.value = data
+      logger.success('search', `${data.totalResults} results (page ${data.page}/${data.totalPages}) in ${data.searchTimeMs}ms`, {
+        topResult: data.documents[0]?.title ?? 'none',
+        processedQuery: data.processedQuery
+      })
+      logger.endFlow('search', `Found ${data.totalResults} results`)
+    } else {
+      const errText = await res.text()
+      logger.error('search', `Search API returned ${res.status}`, errText)
+      alert(`Search failed: ${res.status}`)
+      logger.endFlow('search', 'Failed')
+    }
+  } catch (e) {
+    logger.error('search', 'Network error during search', e)
+    alert('Search error. Make sure the backend is running.')
+    logger.endFlow('search', 'Network error')
+  } finally {
+    loading.value = false
+  }
 }
 
 const goToPage = async (page) => {
   if (!searchQuery.value.trim()) return
+  logger.startFlow('search', `Navigating to page ${page} for query "${searchQuery.value}"`)
   loading.value = true
   try {
     const body = await buildSearchBody(page)
-    const res  = await fetch('/api/search/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (res.ok) { searchResults.value = await res.json(); window.scrollTo({ top: 0, behavior: 'smooth' }) }
-  } catch { /* silent */ } finally { loading.value = false }
+    const res  = await fetch('/api/search/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    logger.response('POST', '/api/search/query', res.status)
+
+    if (res.ok) {
+      const data = await res.json()
+      searchResults.value = data
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      logger.endFlow('search', `Page ${page} loaded — ${data.documents.length} results`)
+    }
+  } catch (e) {
+    logger.error('search', 'Pagination request failed', e)
+    logger.endFlow('search', 'Failed')
+  } finally {
+    loading.value = false
+  }
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
@@ -932,53 +1257,138 @@ const handleFileSelect = (e) => {
   selectedFile.value  = file
   uploadData.title    = file.name.replace(/\.[^/.]+$/, '')
   uploadData.category = ''
+  logger.info('File selected', {
+    name:     file.name,
+    size:     formatFileSize(file.size),
+    type:     file.type,
+    lastMod:  new Date(file.lastModified).toLocaleString()
+  })
 }
 
 const uploadDocument = async () => {
   if (!selectedFile.value || !uploadData.category) return
+
+  logger.startFlow('upload', `Uploading "${selectedFile.value.name}"`)
+  logger.step('upload', 'Pre-upload validation passed', {
+    file:     selectedFile.value.name,
+    size:     formatFileSize(selectedFile.value.size),
+    type:     selectedFile.value.type,
+    title:    uploadData.title,
+    category: uploadData.category
+  })
+
   uploading.value = true
+
   try {
     const form = new FormData()
-    form.append('file', selectedFile.value)
-    form.append('title', uploadData.title || selectedFile.value.name)
+    form.append('file',     selectedFile.value)
+    form.append('title',    uploadData.title || selectedFile.value.name)
     form.append('category', uploadData.category)
+
+    logger.step('upload', 'Sending multipart POST to /api/documents/upload')
     const res = await fetch('/api/documents/upload', { method: 'POST', body: form })
+    logger.response('POST', '/api/documents/upload', res.status)
+
     if (res.ok) {
       const result = await res.json()
+      logger.success('upload', `Document created with ID: ${result.id}`, {
+        id:          result.id,
+        title:       result.title,
+        category:    result.category,
+        contentType: result.contentType,
+        status:      result.status
+      })
+
       closeUploadModal()
+
       const needsOcr = result.contentType?.startsWith('image/') || result.contentType === 'application/pdf'
+
       if (needsOcr) {
+        logger.step('upload', `${result.contentType} detected — starting post-upload OCR status poll`)
+
         let pollCount = 0
         const poll = setInterval(async () => {
           pollCount++
+          logger.step('upload', `Post-upload OCR poll #${pollCount} for ${result.id}`)
+
           try {
             const sr = await fetch(`/api/documents/${result.id}/ocr-status`)
-            if (!sr.ok) { if (pollCount >= 20) clearInterval(poll); return }
+            logger.response('GET', `/api/documents/${result.id}/ocr-status`, sr.status)
+
+            if (!sr.ok) {
+              if (pollCount >= 20) {
+                logger.warn('upload', 'Max OCR poll attempts reached (20), giving up')
+                clearInterval(poll)
+              }
+              return
+            }
+
             const job = await sr.json()
-            if (job.status === 2 || job.status === 3 || pollCount >= 20) {
+            const statusLabel = ['Pending', 'Processing', 'TextExtracted', 'LlmCleaning', 'Completed', 'Failed'][job.status] ?? `Unknown(${job.status})`
+            logger.step('upload', `OCR status: ${statusLabel}`, { textLength: job.extractedText?.length ?? 0 })
+
+            const isUsable   = job.status >= OcrStatus.TextExtracted  // raw text ready
+
+            const isComplete = job.status === OcrStatus.Completed
+            const isFailed   = job.status === OcrStatus.Failed
+            const timedOut   = pollCount >= OCR_MAX_POLLS
+
+            if (isComplete || isFailed || timedOut) {
               clearInterval(poll)
-              alert(job.status === 2 ? `Document uploaded! OCR complete — ${job.extractedText?.length || 0} chars extracted.` : 'Document uploaded! (OCR processing in background)')
+              if (isComplete) {
+                logger.success('upload', `OCR fully complete — ${job.rawTextLength || 0} chars`)
+                alert(`Document uploaded! OCR complete — ${job.rawTextLength || 0} chars extracted.`)
+              } else if (isUsable) {
+                logger.success('upload', 'Raw text ready, LLM cleaning still running')
+                alert('Document uploaded! Text extracted and searchable. AI enhancement running in background.')
+              } else {
+                logger.warn('upload', 'OCR did not complete in time')
+                alert('Document uploaded! (OCR processing in background)')
+              }
+              logger.endFlow('upload', isComplete ? 'Complete' : 'Partial/Pending')
               if (searchResults.value) performSearch()
             }
-          } catch { /* silent */ }
-        }, 3000)
+          } catch (e) {
+            logger.error('upload', 'OCR poll threw an exception', e)
+          }
+        }, OCR_POLL_INTERVAL_MS)
+
       } else {
+        logger.success('upload', 'Non-OCR document — no OCR polling needed')
+        logger.endFlow('upload', 'Complete')
         alert('Document uploaded and indexed!')
         if (searchResults.value) performSearch()
       }
+
     } else {
-      const err = await res.json()
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      logger.error('upload', `Upload rejected by server`, err)
+      logger.endFlow('upload', 'Server rejection')
       alert(`Upload failed: ${err.error || 'Unknown error'}`)
     }
-  } catch { alert('Upload error.') } finally { uploading.value = false }
+  } catch (e) {
+    logger.error('upload', 'Network error during upload', e)
+    logger.endFlow('upload', 'Network error')
+    alert('Upload error.')
+  } finally {
+    uploading.value = false
+  }
 }
 
 const clearFile = () => {
-  selectedFile.value = null; uploadData.title = ''; uploadData.category = ''
+  logger.info('File selection cleared')
+  selectedFile.value  = null
+  uploadData.title    = ''
+  uploadData.category = ''
   const inp = document.querySelector('.file-input')
   if (inp) inp.value = ''
 }
-const closeUploadModal = () => { showUploadModal.value = false; clearFile() }
+
+const closeUploadModal = () => {
+  showUploadModal.value = false
+  clearFile()
+}
+
 </script>
 
 <style scoped>
@@ -1112,6 +1522,12 @@ const closeUploadModal = () => { showUploadModal.value = false; clearFile() }
   position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(6px);
   z-index: 200; display: flex; align-items: center; justify-content: center; padding: 1rem;
 }
+
+.ocr-partial { background: #eff6ff; color: #1d4ed8; border-bottom: 1px solid #bfdbfe; }
+.ocr-partial .ocr-dot { background: #3b82f6; animation: blink 1.2s ease infinite; }
+
+.ocr-cleaning { background: #faf5ff; color: #6d28d9; border-bottom: 1px solid #ddd6fe; }
+.ocr-cleaning .ocr-dot { background: #7c3aed; animation: blink 0.8s ease infinite; }
 
 .viewer-modal {
   background: #fff; border-radius: 20px;
@@ -1270,6 +1686,10 @@ const closeUploadModal = () => { showUploadModal.value = false; clearFile() }
 .ocr-fail    .ocr-dot { background: #ef4444; }
 .ocr-pending { background: #fef3c7; color: #92400e; border-bottom: 1px solid #fde68a; }
 .ocr-pending .ocr-dot { background: #f59e0b; animation: blink 1s ease infinite; }
+.ocr-partial { background: #eff6ff; color: #1d4ed8; border-bottom: 1px solid #bfdbfe; }
+.ocr-partial .ocr-dot { background: #3b82f6; animation: blink 1.2s ease infinite; }
+.ocr-cleaning { background: #faf5ff; color: #6d28d9; border-bottom: 1px solid #ddd6fe; }
+.ocr-cleaning .ocr-dot { background: #7c3aed; animation: blink 0.8s ease infinite; }
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 /* Detail sections */
@@ -1372,7 +1792,7 @@ const closeUploadModal = () => { showUploadModal.value = false; clearFile() }
 .modal-close  { background: none; border: none; color: #9ca3af; cursor: pointer; }
 .modal-close .icon { width: 22px; height: 22px; }
 .modal-body { display: flex; flex-direction: column; gap: 1.25rem; }
-.upload-area { border: 2px dashed #d1d5db; border-radius: 12px; padding: 2rem; text-align: center; transition: border-color 0.2s; }
+.upload-area { border: 2px dashed #d1d5db; border-radius: 12px; padding: 2rem; text-align: center; transition: border-color 0.2s; max-height: 160px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
 .upload-area:hover { border-color: #60a5fa; }
 .file-input { display: none; }
 .upload-prompt { cursor: pointer; }
