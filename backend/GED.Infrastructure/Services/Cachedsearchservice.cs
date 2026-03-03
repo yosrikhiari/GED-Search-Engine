@@ -39,8 +39,10 @@ public class CachedSearchService : ISearchService
         _cache   = cache;
         _logger  = logger;
         _enabled = configuration.GetValue<bool>("Redis:Enabled", true);
-        _ttl     = TimeSpan.FromSeconds(
-                       configuration.GetValue<int>("Redis:SearchCacheTtlSeconds", 120));
+        _ttl = TimeSpan.FromSeconds(
+    configuration.GetValue<int>("Redis:SearchCacheTtlSeconds", 120)
+    + Random.Shared.Next(-20, 20)  // ±20s jitter
+);
     }
 
     // ── ISearchService ────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ public class CachedSearchService : ISearchService
         if (!_enabled)
             return await _inner.SearchAsync(request, cancellationToken);
 
-        var key = BuildCacheKey(request);
+        var key = await BuildCacheKeyAsync(request, cancellationToken);
 
         // Try cache first
         try
@@ -150,12 +152,22 @@ public class CachedSearchService : ISearchService
     /// Uses SHA256 so keys are a fixed length regardless of query complexity.
     /// Prefix "ged:search:" lets us namespace keys in a shared Redis instance.
     /// </summary>
-    private static string BuildCacheKey(SearchRequest request)
+    private async Task<string> BuildCacheKeyAsync(
+        SearchRequest request, CancellationToken ct)
     {
-        // Serialize request deterministically
-        var json  = JsonSerializer.Serialize(request, _json);
-        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
-        var hash  = System.Security.Cryptography.SHA256.HashData(bytes);
+        // Read current generation — this is what actually makes invalidation work
+        string generation = "0";
+        try
+        {
+            var gen = await _cache.GetStringAsync("ged:cache:generation", ct);
+            generation = gen ?? "0";
+        }
+        catch { /* Redis down — use generation 0, degrade gracefully */ }
+
+        var json    = JsonSerializer.Serialize(request, _json);
+        var payload = generation + ":" + json;
+        var bytes   = System.Text.Encoding.UTF8.GetBytes(payload);
+        var hash    = System.Security.Cryptography.SHA256.HashData(bytes);
         return "ged:search:" + Convert.ToHexString(hash).ToLower();
     }
 

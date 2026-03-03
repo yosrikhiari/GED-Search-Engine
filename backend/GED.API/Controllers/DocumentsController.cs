@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 
 namespace GED.API.Controllers;
@@ -16,6 +17,7 @@ public class DocumentsController : ControllerBase
     private readonly IOcrService _ocrService;
     private readonly GedDbContext _db;
     private readonly ILogger<DocumentsController> _logger;
+    private readonly IDistributedCache _cache;
     private readonly IConfiguration _configuration;
 
     private static readonly string[] AllowedCategories =
@@ -30,7 +32,8 @@ public class DocumentsController : ControllerBase
         IOcrService ocrService,
         GedDbContext db,
         ILogger<DocumentsController> logger,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IDistributedCache cache)
     {
         _documentService = documentService;
         _searchService   = searchService;
@@ -38,14 +41,29 @@ public class DocumentsController : ControllerBase
         _db              = db;
         _logger          = logger;
         _configuration   = configuration;
+        _cache           = cache;
     }
 
-    [HttpPost("upload")]
-    public async Task<ActionResult<Document>> UploadDocument(
-        IFormFile file,
-        [FromForm] string? title    = null,
-        [FromForm] string? category = null)
+[HttpPost("upload")]
+public async Task<ActionResult<Document>> UploadDocument(
+    IFormFile file,
+    [FromForm] string? title    = null,
+    [FromForm] string? category = null,
+    [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey = null)
     {
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+    {
+        var cacheKey = $"ged:upload:idem:{idempotencyKey}";
+        var existing = await _cache.GetStringAsync(cacheKey);
+        if (existing != null)
+        {
+            _logger.LogInformation(
+                "Duplicate upload rejected — idempotency key {Key} already used", 
+                idempotencyKey);
+            return Ok(System.Text.Json.JsonSerializer
+                .Deserialize<Document>(existing));
+        }
+    }
         try
         {
             if (file == null || file.Length == 0)
@@ -122,7 +140,18 @@ public class DocumentsController : ControllerBase
                 _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
             }
 
-            return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
+                if (!string.IsNullOrWhiteSpace(idempotencyKey))
+                {
+                    var cacheKey = $"ged:upload:idem:{idempotencyKey}";
+                    await _cache.SetStringAsync(
+                        cacheKey,
+                        System.Text.Json.JsonSerializer.Serialize(document),
+                        new DistributedCacheEntryOptions
+                        {
+                            AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
+                        });
+                }
+                return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
         }
         catch (Exception ex)
         {
