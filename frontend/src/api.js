@@ -97,8 +97,14 @@ export const auth = {
 // ── Documents ─────────────────────────────────────────────────────────────────
 
 export const documents = {
-  upload: (formData) =>
-    apiFetch('/api/documents/upload', { method: 'POST', body: formData }),
+  upload: (formData) => {
+  const idempotencyKey = crypto.randomUUID()   // one key per button click
+  return apiFetch('/api/documents/upload', {
+    method: 'POST',
+    body: formData,
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+  },
 
   list: (params = {}) => {
     const qs = new URLSearchParams(params).toString()

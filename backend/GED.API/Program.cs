@@ -315,7 +315,27 @@ app.Use(async (context, next) =>
 });
 
 app.UseCors();
-app.UseAuthentication();   // ← NEW: must come before UseAuthorization
+
+
+
+app.UseAuthentication();  
+
+// ── Correlation ID middleware ─────────────────────────────────────────────────
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Request.Headers["X-Correlation-Id"]
+        .FirstOrDefault() ?? Guid.NewGuid().ToString("N")[..12];
+
+    context.Items["CorrelationId"] = correlationId;
+    context.Response.Headers["X-Correlation-Id"] = correlationId;
+
+    using (Serilog.Context.LogContext.PushProperty("CorrelationId", correlationId))
+    {
+        await next();
+    }
+});
+
+
 app.UseAuthorization();
 app.MapControllers();
 

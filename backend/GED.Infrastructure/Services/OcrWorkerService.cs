@@ -184,7 +184,7 @@ public class OcrWorkerService : BackgroundService
         var dateExtractor = scope.ServiceProvider.GetService<DocumentDateExtractor>();
         var enricher      = scope.ServiceProvider.GetService<OcrMetadataEnrichmentService>(); // ← NEW
 
-        // ── 1. Load document ─────────────────────────────────────────────────
+        // ── 1. Load document and pipleline ─────────────────────────────────────────────────
         var document = await db.Documents
             .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
 
@@ -199,6 +199,13 @@ public class OcrWorkerService : BackgroundService
             document.Id, document.ContentType, document.Category,
             !string.IsNullOrWhiteSpace(document.ExtractedText),
             document.ExtractedText?.Length ?? 0);
+
+        var pipelineId = $"ocr-{message.DocumentId.ToString()[..8]}";
+
+
+
+
+
 
         // Mark as "processing" so frontend shows correct label immediately
         await SetStageAsync(db, document, "processing", ct);
@@ -244,6 +251,15 @@ public class OcrWorkerService : BackgroundService
         using var fileStream = File.OpenRead(document.FilePath);
         var ocrResult = await ocrService.ProcessDocumentAsync(
             message.DocumentId, fileStream, message.Language ?? "eng", ct);
+
+        _logger.LogInformation(
+            "[{PipelineId}] OCR pipeline started for {DocId}", 
+            pipelineId, message.DocumentId);
+
+        // Pass it as a structured log property throughout:
+        _logger.LogInformation(
+            "[{PipelineId}] Stage text_extracted: {Chars} chars", 
+            pipelineId, ocrResult.ExtractedText?.Length);
 
         _logger.LogInformation(
             "📝 Tesseract result: success={Ok}, chars={Chars}, confidence={Conf:F2}",
