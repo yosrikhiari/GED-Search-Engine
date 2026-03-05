@@ -18,6 +18,8 @@ public class DocumentService : IDocumentService
     private readonly IStorageService _storageService;
     private readonly ITextExtractionService _textExtractionService;
     private readonly DocumentDateExtractor? _dateExtractor;
+    private readonly DocumentIngestionPipeline _ingestionPipeline;  // ✅ Already injected
+
     private readonly GedDbContext _db;
     private readonly string _basePath;
 
@@ -26,11 +28,13 @@ public class DocumentService : IDocumentService
         IStorageService storageService,
         ITextExtractionService textExtractionService,
         GedDbContext db,
+        DocumentIngestionPipeline ingestionPipeline,  // ✅ Already in constructor
         DocumentDateExtractor? dateExtractor = null)
     {
         _logger = logger;
         _storageService = storageService;
         _textExtractionService = textExtractionService;
+        _ingestionPipeline = ingestionPipeline;  // ✅ Already assigned
         _db = db;
         _dateExtractor = dateExtractor;
         _basePath = "/var/lib/ged/documents";
@@ -108,44 +112,36 @@ public class DocumentService : IDocumentService
             var fileInfo = new FileInfo(filePath);
             var fileHash = Convert.ToHexString(SHA256.HashData(fileBytes)).ToLower();
 
-            // ── 2. Extract text ──────────────────────────────────────────────
-            string? extractedText = null;
-            try
-            {
-                using var textStream = new MemoryStream(fileBytes);
-                extractedText = await _textExtractionService.ExtractTextAsync(
-                    textStream, contentType, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Could not extract text from document");
-            }
+            // ── 2. RUN ALL ENRICHMENT STEPS VIA PIPELINE ─────────────────────
+            // This replaces lines 90-160+ of mixed concerns (text extraction,
+            // description generation, tags, date extraction)
+            var category = metadata?.GetValueOrDefault("category")?.ToString();
+            var ingestion = await _ingestionPipeline.RunAsync(
+                fileBytes, fileName, contentType, category, cancellationToken);
 
-            // ── 3. Generate description & tags ───────────────────────────────
-            var description = GenerateDescription(extractedText, fileName);
-            var category = metadata?.ContainsKey("category") == true
-                ? metadata["category"]?.ToString()
-                : null;
-            var tags = GenerateTags(fileName, category, extractedText);
+            // ── 3. MERGE PIPELINE METADATA WITH CALLER-SUPPLIED METADATA ─────
+            var mergedMetadata = metadata ?? new Dictionary<string, object>();
+            foreach (var kv in ingestion.Metadata)
+                mergedMetadata[kv.Key] = kv.Value;
 
-            // ── 4. Extract document date via LLM ─────────────────────────────
-            DateTime? documentDate = null;
-            if (_dateExtractor != null && !string.IsNullOrWhiteSpace(extractedText))
+            // ── 4. EXTRACT DOCUMENT DATE (optional fallback if pipeline doesn't do it) ──
+            DateTime? documentDate = ingestion.DocumentDate;
+            
+            // Optional: If pipeline doesn't extract date, try legacy extractor
+            if (documentDate == null && _dateExtractor != null && !string.IsNullOrWhiteSpace(ingestion.ExtractedText))
             {
                 try
                 {
-                    _logger.LogInformation("🗓️ Attempting to extract document date...");
+                    _logger.LogInformation("🗓️ Attempting to extract document date via legacy extractor...");
                     var dateInfo = await _dateExtractor.ExtractDocumentDateAsync(
-                        extractedText, fileName, category ?? "Other", cancellationToken);
+                        ingestion.ExtractedText, fileName, category ?? "Other", cancellationToken);
 
                     if (dateInfo?.DocumentDate != null && dateInfo.Confidence > 0.5f)
                     {
-                        // ── FIX: Ensure DocumentDate is UTC ──────────────────
                         documentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
-                        metadata ??= new Dictionary<string, object>();
-                        metadata["extracted_date"] = documentDate.Value.ToString("yyyy-MM-dd");
-                        metadata["date_confidence"] = dateInfo.Confidence;
-                        metadata["date_type"] = dateInfo.DateType;
+                        mergedMetadata["extracted_date"] = documentDate.Value.ToString("yyyy-MM-dd");
+                        mergedMetadata["date_confidence"] = dateInfo.Confidence;
+                        mergedMetadata["date_type"] = dateInfo.DateType;
 
                         _logger.LogInformation(
                             "✅ Document date extracted: {Date} (confidence: {Confidence:F2}, type: {Type})",
@@ -154,40 +150,61 @@ public class DocumentService : IDocumentService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to extract document date");
+                    _logger.LogWarning(ex, "Failed to extract document date via legacy extractor");
                 }
             }
 
             // ── 5. Build & persist EF entity ─────────────────────────────────
-            // FIX: Explicitly use UTC timestamps throughout
             var uploadTime = DateTime.UtcNow;
 
             var entity = new DocumentEntity
             {
                 Id            = documentId,
                 Title         = title ?? Path.GetFileNameWithoutExtension(fileName),
-                Description   = description,
+                Description   = ingestion.Description ?? GenerateDescription(ingestion.ExtractedText, fileName),
                 FileName      = fileName,
                 FilePath      = filePath,
                 ContentType   = contentType,
                 FileSize      = fileInfo.Length,
                 FileHash      = fileHash,
-                CreatedAt     = uploadTime,          // already UTC
+                CreatedAt     = uploadTime,
                 CreatedBy     = "system",
-                ModifiedAt    = uploadTime,          // already UTC
+                ModifiedAt    = uploadTime,
                 ModifiedBy    = "system",
-                DocumentDate  = documentDate,        // explicitly UTC above
+                DocumentDate  = documentDate,
                 Status        = DocumentStatus.Indexed,
-                IsOcrProcessed = false,
-                ExtractedText = extractedText,
-                Metadata      = metadata,
-                Tags          = tags,
+                IsOcrProcessed = !string.IsNullOrWhiteSpace(ingestion.ExtractedText),
+                ExtractedText = ingestion.ExtractedText,
+                Metadata      = mergedMetadata,
+                Tags          = ingestion.Tags ?? GenerateTags(fileName, category, ingestion.ExtractedText),
                 Category      = category,
                 Version       = 1,
-                DocumentMetadata = BuildMetadataEntities(documentId, metadata, uploadTime)
+                DocumentMetadata = BuildMetadataEntities(documentId, mergedMetadata, uploadTime)
             };
 
             _db.Documents.Add(entity);
+
+            // Queue OCR job via outbox pattern (same transaction = atomic)
+            bool needsOcr = contentType.StartsWith("image/") || contentType == "application/pdf";
+            if (needsOcr)
+            {
+                var outboxMessage = new OutboxMessage
+                {
+                    Id        = Guid.NewGuid(),
+                    Type      = "OcrJob",
+                    Payload   = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        JobId      = Guid.NewGuid(),
+                        DocumentId = documentId,
+                        Language   = "eng+fra+ara"
+                    }),
+                    CreatedAt  = uploadTime,
+                    RetryCount = 0
+                };
+                _db.OutboxMessages.Add(outboxMessage);
+                _logger.LogInformation("📬 Outbox OCR job queued for document {Id}", documentId);
+            }
+
             await _db.SaveChangesAsync(cancellationToken);
 
             _logger.LogInformation(
@@ -221,7 +238,7 @@ public class DocumentService : IDocumentService
             entity.Category    = document.Category;
             entity.Tags        = document.Tags;
             entity.Metadata    = document.Metadata;
-            entity.ModifiedAt  = DateTime.UtcNow;   // explicitly UTC
+            entity.ModifiedAt  = DateTime.UtcNow;
             entity.ModifiedBy  = "system";
 
             await _db.SaveChangesAsync(cancellationToken);
@@ -317,7 +334,7 @@ public class DocumentService : IDocumentService
     private static List<DocumentMetadataEntity> BuildMetadataEntities(
         Guid documentId,
         Dictionary<string, object>? metadata,
-        DateTime createdAt)  // already UTC from caller
+        DateTime createdAt)
     {
         if (metadata == null) return new List<DocumentMetadataEntity>();
 
@@ -336,12 +353,12 @@ public class DocumentService : IDocumentService
                     DateTime => MetadataType.Date,
                     _ => MetadataType.String
                 },
-                CreatedAt = createdAt  // already UTC
+                CreatedAt = createdAt
             })
             .ToList();
     }
 
-    // ── Text/tag helpers ──────────────────────────────────────────────────────
+    // ── Text/tag helpers (fallbacks if pipeline doesn't provide them) ─────────
 
     private static string GenerateDescription(string? extractedText, string fileName)
     {

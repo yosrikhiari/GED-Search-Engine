@@ -12,6 +12,7 @@ public class GedDbContext : DbContext
     public GedDbContext(DbContextOptions<GedDbContext> options) : base(options) { }
 
     public DbSet<DocumentEntity> Documents => Set<DocumentEntity>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<DocumentMetadataEntity> DocumentMetadata => Set<DocumentMetadataEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -90,6 +91,21 @@ public class GedDbContext : DbContext
 
             e.HasIndex(m => m.DocumentId).HasDatabaseName("ix_document_metadata_document_id");
             e.HasIndex(m => new { m.DocumentId, m.Key }).HasDatabaseName("ix_document_metadata_doc_key");
+        });
+
+        // ── OutboxMessages table (for reliable RabbitMQ integration) ─────────
+        modelBuilder.Entity<OutboxMessage>(e =>
+        {
+            e.ToTable("outbox_messages");
+            e.HasKey(m => m.Id);
+            e.Property(m => m.Id).HasColumnName("id");
+            e.Property(m => m.Type).HasColumnName("type").HasMaxLength(100).IsRequired();
+            e.Property(m => m.Payload).HasColumnName("payload").IsRequired();
+            e.Property(m => m.CreatedAt).HasColumnName("created_at");
+            e.Property(m => m.ProcessedAt).HasColumnName("processed_at");
+            e.Property(m => m.Error).HasColumnName("error");
+            e.Property(m => m.RetryCount).HasColumnName("retry_count");
+            e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");
         });
     }
 }

@@ -237,7 +237,19 @@ RÉPONSE :";
 
         _logger.LogDebug("Calling Ollama for RAG generation at {Endpoint}", _llmEndpoint);
 
-        var response = await _httpClient.PostAsJsonAsync(_llmEndpoint, requestBody, cancellationToken);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(120));   // RAG max 2 minutes
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.PostAsJsonAsync(_llmEndpoint, requestBody, cts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogError("RAG generation timed out after 120s");
+            throw new TimeoutException("LLM generation timed out. Please try a simpler query.");
+        }
 
         if (!response.IsSuccessStatusCode)
         {

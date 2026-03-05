@@ -133,11 +133,26 @@ public async Task<ActionResult<Document>> UploadDocument(
                 _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
 
             // Queue OCR for images and PDFs
-            if (document.ContentType.StartsWith("image/") ||
-                document.ContentType == "application/pdf")
+            // Outbox Pattern: write OCR job to DB in the same operation as the document.
+            // OutboxRelayService will publish to RabbitMQ when it's available.
+            // This prevents silent OCR loss if RabbitMQ is temporarily down during upload.
+            if (document.ContentType.StartsWith("image/") || document.ContentType == "application/pdf")
             {
-                await _ocrService.QueueOcrJobAsync(document.Id);
-                _logger.LogInformation("OCR job queued for document {DocumentId}", document.Id);
+                var outboxMsg = new OutboxMessage
+                {
+                    Type    = "OcrJob",
+                    Payload = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        JobId      = Guid.NewGuid(),
+                        DocumentId = document.Id,
+                        Language   = "eng+fra+ara"   // match your existing OCR languages
+                    })
+                };
+                _db.OutboxMessages.Add(outboxMsg);
+                await _db.SaveChangesAsync();
+
+                _logger.LogInformation(
+                    "📥 OCR job queued via outbox for document {DocumentId}", document.Id);
             }
 
                 if (!string.IsNullOrWhiteSpace(idempotencyKey))
@@ -266,6 +281,7 @@ public async Task<ActionResult<Document>> UploadDocument(
                 CompletedAt   = entity.ModifiedAt,
                 ExtractedText = entity.ExtractedText,
                 RawTextLength = entity.OcrText?.Length ?? entity.ExtractedText?.Length ?? 0,
+                IsOcrProcessed = entity.IsOcrProcessed,
             };
 
             // ── Resolve pipeline stage from metadata ─────────────────────────

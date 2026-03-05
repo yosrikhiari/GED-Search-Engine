@@ -1,3 +1,8 @@
+using AspNetCoreRateLimit;
+using GED.Infrastructure.Resilience;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using HealthChecks.UI.Client;
+using RabbitMQ.Client;
 using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
@@ -28,6 +33,28 @@ builder.Host.UseSerilog();
 
 // ── Controllers & Swagger ─────────────────────────────────────────────────────
 builder.Services.AddControllers();
+// ── Rate Limiting (ByteByteGo: Token Bucket) ──────────────────────────────────
+builder.Services.AddMemoryCache();
+builder.Services.Configure<IpRateLimitOptions>(options =>
+{
+    options.EnableEndpointRateLimiting = true;
+    options.StackBlockedRequests       = false;
+    options.HttpStatusCode             = 429;
+    options.RealIpHeader               = "X-Real-IP";
+    options.GeneralRules = new List<RateLimitRule>
+    {
+        new() { Endpoint = "POST:/api/auth/login",       Period = "1m", Limit = 10  },
+        new() { Endpoint = "POST:/api/rag/ask",          Period = "1m", Limit = 20  },
+        new() { Endpoint = "POST:/api/documents/upload", Period = "1m", Limit = 30  },
+        new() { Endpoint = "*",                          Period = "1s", Limit = 100 },
+    };
+});
+builder.Services.AddSingleton<IIpPolicyStore, MemoryCacheIpPolicyStore>();
+builder.Services.AddSingleton<IRateLimitCounterStore, MemoryCacheRateLimitCounterStore>();
+builder.Services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
+builder.Services.AddSingleton<IProcessingStrategy, AsyncKeyLockProcessingStrategy>();
+builder.Services.AddInMemoryRateLimiting();
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -72,8 +99,21 @@ builder.Services.AddCors(options =>
 });
 
 // ── JWT Authentication ────────────────────────────────────────────────────────
-var jwtSecret = builder.Configuration["Auth:JwtSecret"]
-    ?? "GED-SuperSecretKey-ChangeInProduction-2024!";
+var jwtSecret = builder.Configuration["Auth:JwtSecret"];
+if (string.IsNullOrWhiteSpace(jwtSecret))
+{
+    if (builder.Environment.IsDevelopment())
+    {
+        jwtSecret = "GED-Dev-Only-Secret-Not-For-Production!";
+        Console.WriteLine("⚠️  WARNING: Auth:JwtSecret not configured. Using dev default. DO NOT deploy this.");
+    }
+    else
+    {
+        throw new InvalidOperationException(
+            "Auth:JwtSecret must be set in production. " +
+            "Use environment variable: Auth__JwtSecret");
+    }
+}
 var jwtIssuer = builder.Configuration["Auth:JwtIssuer"] ?? "GED-SearchEngine";
 
 builder.Services.AddAuthentication(options =>
@@ -145,11 +185,13 @@ var rabbitMqHost = builder.Configuration["RabbitMQ:Host"] ?? "localhost";
 var rabbitMqUser = builder.Configuration["RabbitMQ:Username"] ?? "admin";
 var rabbitMqPass = builder.Configuration["RabbitMQ:Password"] ?? "admin123";
 
-builder.Services.AddSingleton<IMessageQueueService>(sp =>
+builder.Services.AddSingleton<RabbitMqService>(sp =>
     new RabbitMqService(
         sp.GetRequiredService<ILogger<RabbitMqService>>(),
         rabbitMqHost, rabbitMqUser, rabbitMqPass
     ));
+builder.Services.AddSingleton<IMessageQueueService>(sp =>
+    sp.GetRequiredService<RabbitMqService>());
 
 // ── Redis distributed cache ───────────────────────────────────────────────────
 var redisEnabled       = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
@@ -190,23 +232,29 @@ builder.Services.AddScoped<ITextExtractionService>(sp =>
 });
 
 // ── Application services ──────────────────────────────────────────────────────
+var ollamaPolicy = OllamaResiliencePolicies.Combined(timeoutSeconds: 90);
+
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
 
-builder.Services.AddHttpClient<NlpService>();
+builder.Services.AddHttpClient<NlpService>()
+    .AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
-
-builder.Services.AddHttpClient<DocumentDateExtractor>();
+builder.Services.AddHttpClient<DocumentDateExtractor>()
+    .AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<DocumentDateExtractor>();
 
-builder.Services.AddHttpClient<OcrTextCleaningService>();
+builder.Services.AddHttpClient<OcrTextCleaningService>()
+    .AddPolicyHandler(OllamaResiliencePolicies.ForOcrCleaning()); 
 builder.Services.AddScoped<OcrTextCleaningService>();
 
-builder.Services.AddHttpClient<OcrMetadataEnrichmentService>();
+builder.Services.AddHttpClient<OcrMetadataEnrichmentService>()
+    .AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<OcrMetadataEnrichmentService>();
 
 // ── RAG Service ───────────────────────────────────────────────────────────────
-builder.Services.AddHttpClient<RagService>();
+builder.Services.AddHttpClient<RagService>()
+    .AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<IRagService>(sp =>
     new RagService(
         sp.GetRequiredService<ISearchService>(),
@@ -247,6 +295,44 @@ builder.Services.AddHostedService(sp => new OcrWorkerService(
 
 builder.Services.AddHostedService<AutoReindexService>();
 
+// Outbox relay — publishes persisted OCR jobs to RabbitMQ
+builder.Services.AddHostedService<OutboxRelayService>();
+
+// Document ingestion pipeline (text extraction, tags, date, description)
+builder.Services.AddScoped<DocumentIngestionPipeline>();
+
+
+// ── Health Checks ──────────────────────────────────────────────────────────────
+// Replace the fake HealthController with real dependency checks.
+var pgConnection    = builder.Configuration.GetConnectionString("DefaultConnection") ?? "";
+var redisConnection = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
+var rabbitHost      = builder.Configuration["RabbitMQ:Host"] ?? "localhost";
+var rabbitUser      = builder.Configuration["RabbitMQ:Username"] ?? "guest";
+var rabbitPass      = builder.Configuration["RabbitMQ:Password"] ?? "guest";
+
+builder.Services.AddHealthChecks()
+    .AddNpgSql(
+        pgConnection,
+        name: "postgresql",
+        tags: new[] { "db", "critical" },
+        timeout: TimeSpan.FromSeconds(3))
+    .AddRedis(
+        redisConnection,
+        name: "redis",
+        tags: new[] { "cache" },
+        timeout: TimeSpan.FromSeconds(2))
+    .AddRabbitMQ(
+        sp =>
+        {
+            var factory = new RabbitMQ.Client.ConnectionFactory
+            {
+                Uri = new Uri($"amqp://{rabbitUser}:{rabbitPass}@{rabbitHost}")
+            };
+            return factory.CreateConnectionAsync().GetAwaiter().GetResult();
+        },
+        name: "rabbitmq",
+        tags: new[] { "messaging", "critical" },
+        timeout: TimeSpan.FromSeconds(3));
 // =============================================================================
 var app = builder.Build();
 // =============================================================================
@@ -314,6 +400,7 @@ app.Use(async (context, next) =>
         context.Request.Method, context.Request.Path, context.Response.StatusCode);
 });
 
+app.UseIpRateLimiting();   // ← must be before UseCors and UseAuthentication
 app.UseCors();
 
 
@@ -337,6 +424,27 @@ app.Use(async (context, next) =>
 
 
 app.UseAuthorization();
+
+// Liveness probe: is the process alive? (use for k8s livenessProbe)
+app.MapHealthChecks("/health/live", new HealthCheckOptions
+{
+    Predicate      = _ => false,   // always healthy if process is running
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+
+// Readiness probe: are critical dependencies up? (use for k8s readinessProbe)
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate      = check => check.Tags.Contains("critical"),
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+
+// Full report: all dependencies
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+
 app.MapControllers();
 
 Log.Information("GED Search Engine API starting...");

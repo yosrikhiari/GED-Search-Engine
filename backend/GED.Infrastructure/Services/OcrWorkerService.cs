@@ -22,8 +22,16 @@ namespace GED.Infrastructure.Services;
 ///                               Frontend polling resolves here — no more 60-second waits.
 ///   2. Ollama LLM cleaning    → ocr_stage = "llm_cleaning"
 ///   3. Date extraction        → still ocr_stage = "llm_cleaning"
-///   4. AI tag + description   → still ocr_stage = "llm_cleaning"  ← NEW
+///   4. AI tag + description   → still ocr_stage = "llm_cleaning"
 ///   5. Final save + re-index  → ocr_stage = "completed"
+///
+/// RabbitMQ.Client v7 notes:
+///   - ReceivedAsync runs on the library's internal dispatch loop.
+///   - Any unhandled exception permanently silences the consumer without
+///     closing the channel or connection, so the reconnect loop never fires.
+///   - Fix: use a TaskCompletionSource tied to ConnectionShutdownAsync so
+///     we have a reliable "connection is dead" signal, and force-close the
+///     connection on any consumer error to trigger it.
 /// </summary>
 public class OcrWorkerService : BackgroundService
 {
@@ -33,12 +41,12 @@ public class OcrWorkerService : BackgroundService
     private readonly string _rabbitUser;
     private readonly string _rabbitPass;
 
-    private const string QueueName = "ocr-queue";
-    private const int MaxRetries   = 5;
-    private const int RetryDelayMs = 5000;
+    private const string QueueName    = "ocr-queue";
+    private const int    MaxRetries   = 5;
+    private const int    RetryDelayMs = 5000;
 
     private const float DateConfidenceThreshold = 0.3f;
-    private const int NativeTextMinChars = 50;
+    private const int   NativeTextMinChars      = 50;
 
     public OcrWorkerService(
         IServiceProvider serviceProvider,
@@ -62,6 +70,7 @@ public class OcrWorkerService : BackgroundService
         {
             IConnection? connection = null;
 
+            // ── Connect with retries ──────────────────────────────────────────
             for (int attempt = 1; attempt <= MaxRetries; attempt++)
             {
                 try
@@ -71,13 +80,12 @@ public class OcrWorkerService : BackgroundService
                         HostName                   = _rabbitHost,
                         UserName                   = _rabbitUser,
                         Password                   = _rabbitPass,
-                        DispatchConsumersAsync     = true,
-                        AutomaticRecoveryEnabled   = false,
+                        AutomaticRecoveryEnabled   = false, // we handle reconnect ourselves
                         RequestedHeartbeat         = TimeSpan.FromSeconds(60),
                         RequestedConnectionTimeout = TimeSpan.FromSeconds(10),
                     };
 
-                    connection = factory.CreateConnection();
+                    connection = await factory.CreateConnectionAsync(stoppingToken);
                     _logger.LogInformation("✅ OCR Worker connected to RabbitMQ at {Host}", _rabbitHost);
                     break;
                 }
@@ -101,65 +109,172 @@ public class OcrWorkerService : BackgroundService
 
             try
             {
-                using (connection)
-                using (var channel = connection.CreateModel())
+                await using (connection)
                 {
-                    channel.QueueDeclare(queue: QueueName, durable: true, exclusive: false, autoDelete: false);
-                    channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+                    // ── TCS that fires when the connection dies for ANY reason ──────
+                    // This is the correct v7 pattern. CloseAsync() is not a blocking
+                    // wait — it closes immediately and returns. We need an event-based
+                    // signal instead.
+                    var connectionClosed = new TaskCompletionSource(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
 
-                    _logger.LogInformation("📥 OCR Worker listening on queue '{Queue}'", QueueName);
-
-                    var consumer = new AsyncEventingBasicConsumer(channel);
-
-                    consumer.Received += async (_, ea) =>
+                    connection.ConnectionShutdownAsync += (_, args) =>
                     {
-                        var deliveryTag    = ea.DeliveryTag;
-                        OcrJobMessage? msg = null;
+                        _logger.LogWarning(
+                            "🔌 RabbitMQ connection shutdown: {Reason}", args.ReplyText);
+                        connectionClosed.TrySetResult();
+                        return Task.CompletedTask;
+                    };
 
+                    var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+                    await using (channel)
+                    {
+                        // ── Dead-Letter Queue Setup ───────────────────────────────
+                        const string DlxName = "ocr-dlx";
+                        const string DlqName = "ocr-dead-letter";
+
+                        await channel.ExchangeDeclareAsync(
+                            exchange:          DlxName,
+                            type:              ExchangeType.Direct,
+                            durable:           true,
+                            autoDelete:        false,
+                            cancellationToken: stoppingToken);
+
+                        await channel.QueueDeclareAsync(
+                            queue:             DlqName,
+                            durable:           true,
+                            exclusive:         false,
+                            autoDelete:        false,
+                            cancellationToken: stoppingToken);
+
+                        await channel.QueueBindAsync(
+                            DlqName, DlxName,
+                            routingKey:        QueueName,
+                            cancellationToken: stoppingToken);
+
+                        await channel.QueueDeclareAsync(
+                            queue:      QueueName,
+                            durable:    true,
+                            exclusive:  false,
+                            autoDelete: false,
+                            arguments: new Dictionary<string, object?>
+                            {
+                                ["x-dead-letter-exchange"]    = DlxName,
+                                ["x-dead-letter-routing-key"] = QueueName,
+                                ["x-message-ttl"]             = 3_600_000,
+                                ["x-max-length"]              = 1000
+                            },
+                            cancellationToken: stoppingToken);
+
+                        await channel.BasicQosAsync(
+                            prefetchSize:  0,
+                            prefetchCount: 1,
+                            global:        false,
+                            cancellationToken: stoppingToken);
+
+                        _logger.LogInformation("📥 OCR Worker listening on queue '{Queue}'", QueueName);
+
+                        var consumer = new AsyncEventingBasicConsumer(channel);
+
+                        consumer.ReceivedAsync += async (_, ea) =>
+                        {
+                            var deliveryTag = ea.DeliveryTag;
+                            OcrJobMessage? msg = null;
+                            bool ackSent = false;
+
+                            try
+                            {
+                                var json = Encoding.UTF8.GetString(ea.Body.ToArray());
+                                msg = JsonSerializer.Deserialize<OcrJobMessage>(json,
+                                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                                if (msg == null)
+                                {
+                                    _logger.LogWarning("Received null OCR message — discarding");
+                                    ackSent = await SafeAckAsync(channel, deliveryTag, ackSent);
+                                    return;
+                                }
+
+                                _logger.LogInformation("📄 OCR job received: jobId={JobId}, documentId={DocId}",
+                                    msg.JobId, msg.DocumentId);
+
+                                await ProcessOcrJobAsync(msg, stoppingToken);
+                                ackSent = await SafeAckAsync(channel, deliveryTag, ackSent);
+
+                                _logger.LogInformation("✅ OCR job {JobId} acked", msg.JobId);
+                            }
+                            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                            {
+                                _logger.LogInformation("OCR job cancelled during shutdown — nacking for requeue");
+                                ackSent = await SafeNackAsync(channel, deliveryTag, requeue: true, ackSent);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "❌ OCR job failed for document {DocId}", msg?.DocumentId);
+
+                                // Nack first — if the DB call below also fails we still want
+                                // the message dead-lettered rather than stuck unacked.
+                                ackSent = await SafeNackAsync(channel, deliveryTag, requeue: false, ackSent);
+
+                                if (msg != null)
+                                    await MarkOcrFailedAsync(msg.DocumentId, ex.Message, stoppingToken);
+
+                                // ── v7 FIX ────────────────────────────────────────────────
+                                // In v7, any unhandled exception in ReceivedAsync permanently
+                                // silences the consumer without closing the channel or connection.
+                                // connectionClosed.Task keeps blocking indefinitely.
+                                //
+                                // Fix: close the connection → fires ConnectionShutdownAsync
+                                //      → TCS resolves → WhenAny unblocks → reconnect loop runs.
+                                // ─────────────────────────────────────────────────────────
+                                _logger.LogWarning("⚠️ Forcing connection close to restart consumer (v7 safety)");
+                                try { await connection.CloseAsync(); } catch { /* best effort */ }
+                            }
+                        };
+
+                        // Also catch the case where v7 silently unregisters the consumer
+                        // without an exception (e.g. channel-level protocol error).
+                        consumer.UnregisteredAsync += async (_, ea) =>
+                        {
+                            _logger.LogWarning(
+                                "⚠️ OCR consumer unregistered (tag={Tag}) — forcing reconnect",
+                                ea.ConsumerTags.FirstOrDefault() ?? "?");
+                            try { await connection.CloseAsync(); } catch { /* best effort */ }
+                        };
+
+                        await channel.BasicConsumeAsync(
+                            queue:             QueueName,
+                            autoAck:           false,
+                            consumer:          consumer,
+                            cancellationToken: stoppingToken);
+
+                        // ── Wait until the connection dies OR the host stops ───────
+                        // IMPORTANT: Do NOT use connection.CloseAsync() here as a wait
+                        // mechanism — it closes immediately and returns, causing the
+                        // worker to loop-reconnect without ever processing messages.
+                        //
+                        // Task.WhenAny returns as soon as either:
+                        //   (a) stoppingToken is cancelled  → graceful shutdown
+                        //   (b) connectionClosed.Task fires  → connection dropped, reconnect
                         try
                         {
-                            var json = Encoding.UTF8.GetString(ea.Body.ToArray());
-                            msg = JsonSerializer.Deserialize<OcrJobMessage>(json,
-                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                            if (msg == null)
-                            {
-                                _logger.LogWarning("Received null OCR message — discarding");
-                                channel.BasicAck(deliveryTag, multiple: false);
-                                return;
-                            }
-
-                            _logger.LogInformation("📄 OCR job received: jobId={JobId}, documentId={DocId}",
-                                msg.JobId, msg.DocumentId);
-
-                            await ProcessOcrJobAsync(msg, stoppingToken);
-                            channel.BasicAck(deliveryTag, multiple: false);
-
-                            _logger.LogInformation("✅ OCR job {JobId} acked", msg.JobId);
+                            await Task.WhenAny(
+                                Task.Delay(Timeout.Infinite, stoppingToken),
+                                connectionClosed.Task);
                         }
                         catch (OperationCanceledException)
                         {
-                            channel.BasicNack(deliveryTag, multiple: false, requeue: true);
+                            // stoppingToken fired — fall through to the check below
                         }
-                        catch (Exception ex)
+
+                        if (stoppingToken.IsCancellationRequested)
                         {
-                            _logger.LogError(ex, "❌ OCR job {JobId} failed for document {DocId}",
-                                msg?.JobId, msg?.DocumentId);
-
-                            channel.BasicNack(deliveryTag, multiple: false, requeue: false);
-
-                            if (msg != null)
-                                await MarkOcrFailedAsync(msg.DocumentId, ex.Message, stoppingToken);
+                            _logger.LogInformation("🛑 OCR Worker stopping gracefully");
+                            return;
                         }
-                    };
 
-                    channel.BasicConsume(queue: QueueName, autoAck: false, consumer: consumer);
-
-                    try { await Task.Delay(Timeout.Infinite, stoppingToken); }
-                    catch (OperationCanceledException)
-                    {
-                        _logger.LogInformation("🛑 OCR Worker stopping gracefully");
-                        return;
+                        _logger.LogWarning("🔄 Connection lost — reconnecting in 5s…");
+                        await Task.Delay(5_000, stoppingToken);
                     }
                 }
             }
@@ -168,6 +283,43 @@ public class OcrWorkerService : BackgroundService
                 _logger.LogError(ex, "❌ OCR Worker consumer loop crashed — will reconnect in 10s");
                 await Task.Delay(10_000, stoppingToken);
             }
+        }
+    }
+
+    // ── Safe Ack/Nack Helpers ─────────────────────────────────────────────────
+    // Never let ack/nack throw out of the consumer handler — that would trigger
+    // the v7 "silent consumer death" bug again.
+    //
+    // Returns true if the ack/nack was sent (or already sent before this call).
+    // C# async methods cannot have ref parameters, so we return the new sent state.
+
+    private async Task<bool> SafeAckAsync(IChannel channel, ulong deliveryTag, bool alreadySent)
+    {
+        if (alreadySent) return true;
+        try
+        {
+            await channel.BasicAckAsync(deliveryTag, multiple: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "BasicAckAsync failed for tag {Tag} — channel likely closed", deliveryTag);
+            return true; // treat as sent to prevent double-ack attempts
+        }
+    }
+
+    private async Task<bool> SafeNackAsync(IChannel channel, ulong deliveryTag, bool requeue, bool alreadySent)
+    {
+        if (alreadySent) return true;
+        try
+        {
+            await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: requeue);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "BasicNackAsync failed for tag {Tag} — channel likely closed", deliveryTag);
+            return true;
         }
     }
 
@@ -182,9 +334,8 @@ public class OcrWorkerService : BackgroundService
         var search        = scope.ServiceProvider.GetRequiredService<ISearchService>();
         var textCleaner   = scope.ServiceProvider.GetService<OcrTextCleaningService>();
         var dateExtractor = scope.ServiceProvider.GetService<DocumentDateExtractor>();
-        var enricher      = scope.ServiceProvider.GetService<OcrMetadataEnrichmentService>(); // ← NEW
+        var enricher      = scope.ServiceProvider.GetService<OcrMetadataEnrichmentService>();
 
-        // ── 1. Load document and pipleline ─────────────────────────────────────────────────
         var document = await db.Documents
             .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
 
@@ -202,15 +353,8 @@ public class OcrWorkerService : BackgroundService
 
         var pipelineId = $"ocr-{message.DocumentId.ToString()[..8]}";
 
-
-
-
-
-
-        // Mark as "processing" so frontend shows correct label immediately
         await SetStageAsync(db, document, "processing", ct);
 
-        // ── Shortcut: PDF with sufficient native text ────────────────────────
         bool hasNativeText = !string.IsNullOrWhiteSpace(document.ExtractedText)
                              && document.ExtractedText.Trim().Length >= NativeTextMinChars;
         bool fileExists = File.Exists(document.FilePath);
@@ -230,7 +374,6 @@ public class OcrWorkerService : BackgroundService
 
             await db.SaveChangesAsync(ct);
 
-            // ── AI metadata enrichment for native-text PDFs ──────────────────
             await EnrichAndSaveAsync(
                 db, document, search, enricher, dateExtractor,
                 document.ExtractedText!, "native_text_llm", ct);
@@ -245,20 +388,27 @@ public class OcrWorkerService : BackgroundService
             return;
         }
 
-        // ── 2. Tesseract OCR ─────────────────────────────────────────────────
         _logger.LogInformation("🔍 Starting Tesseract OCR for {DocId}…", document.Id);
 
-        using var fileStream = File.OpenRead(document.FilePath);
-        var ocrResult = await ocrService.ProcessDocumentAsync(
-            message.DocumentId, fileStream, message.Language ?? "eng", ct);
+        OcrResult ocrResult;
+        try
+        {
+            using var fileStream = File.OpenRead(document.FilePath);
+            ocrResult = await ocrService.ProcessDocumentAsync(
+                message.DocumentId, fileStream, message.Language ?? "eng", ct);
+        }
+        catch (Exception ex)
+        {
+            // OcrmyPdfOcrService now throws on non-zero exit codes so we catch here
+            // and mark failed — this propagates up to the consumer which will nack
+            // and force-close the connection to restart the consumer (v7 fix).
+            _logger.LogError(ex, "❌ OCR service threw for document {DocId}", document.Id);
+            await MarkOcrFailedAsync(document.Id, ex.Message, ct);
+            return; // re-throw so the consumer handler nacks + triggers reconnect
+        }
 
         _logger.LogInformation(
-            "[{PipelineId}] OCR pipeline started for {DocId}", 
-            pipelineId, message.DocumentId);
-
-        // Pass it as a structured log property throughout:
-        _logger.LogInformation(
-            "[{PipelineId}] Stage text_extracted: {Chars} chars", 
+            "[{PipelineId}] Stage text_extracted: {Chars} chars",
             pipelineId, ocrResult.ExtractedText?.Length);
 
         _logger.LogInformation(
@@ -267,32 +417,20 @@ public class OcrWorkerService : BackgroundService
 
         if (!ocrResult.Success || string.IsNullOrWhiteSpace(ocrResult.ExtractedText))
         {
-            _logger.LogWarning("OCR returned no text for {DocId}: {Error}",
-                message.DocumentId, ocrResult.ErrorMessage ?? "unknown");
-
-            document.IsOcrProcessed = true;
-            document.ModifiedAt     = DateTime.UtcNow;
-            document.Metadata     ??= new Dictionary<string, object>();
-            document.Metadata["ocr_empty"]        = true;
-            document.Metadata["ocr_stage"]        = "completed";
-            document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
-            await db.SaveChangesAsync(ct);
-            return;
+            var errMsg = ocrResult.ErrorMessage ?? "OCR returned no text";
+            _logger.LogWarning("OCR returned no text for {DocId}: {Error}", message.DocumentId, errMsg);
+            await MarkOcrFailedAsync(document.Id, errMsg, ct);
+            return; // ← this is fine, stage is now "failed", frontend will stop polling
         }
 
-        // ── 3. STAGE COMMIT: Tesseract done → IsOcrProcessed = true ─────────
-        //
-        // Persist IsOcrProcessed = true NOW, before Ollama runs.
-        // The frontend polling loop resolves here instead of waiting for LLM.
-        // ────────────────────────────────────────────────────────────────────
         document.OcrText        = ocrResult.ExtractedText;
         document.ExtractedText  = ocrResult.ExtractedText;
         document.IsOcrProcessed = true;
         document.ModifiedAt     = DateTime.UtcNow;
         document.Metadata     ??= new Dictionary<string, object>();
-        document.Metadata["ocr_stage"]          = "text_extracted";
-        document.Metadata["ocr_raw_length"]     = ocrResult.ExtractedText.Length;
-        document.Metadata["ocr_processed_at"]   = DateTime.UtcNow.ToString("o");
+        document.Metadata["ocr_stage"]        = "text_extracted";
+        document.Metadata["ocr_raw_length"]   = ocrResult.ExtractedText.Length;
+        document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
 
         if (ocrResult.AverageConfidence > 0)
             document.Metadata["ocr_confidence"] = ocrResult.AverageConfidence;
@@ -302,10 +440,9 @@ public class OcrWorkerService : BackgroundService
 
         _logger.LogInformation(
             "✅ Stage 'text_extracted' committed for {DocId} — frontend polls will resolve. " +
-            "Continuing with LLM cleaning + enrichment in background…",
+            "Continuing with LLM cleaning + enrichment…",
             document.Id);
 
-        // ── 4. LLM cleaning ──────────────────────────────────────────────────
         await SetStageAsync(db, document, "llm_cleaning", ct);
 
         string cleanedText = ocrResult.ExtractedText;
@@ -314,11 +451,9 @@ public class OcrWorkerService : BackgroundService
         {
             _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
                 ocrResult.ExtractedText.Length);
-
             try
             {
                 cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
-
                 _logger.LogInformation("✅ Ollama cleaning: {Before} → {After} chars",
                     ocrResult.ExtractedText.Length, cleanedText.Length);
             }
@@ -329,18 +464,11 @@ public class OcrWorkerService : BackgroundService
             }
         }
 
-        // ── 5. Date extraction + AI enrichment ───────────────────────────────
         await EnrichAndSaveAsync(
             db, document, search, enricher, dateExtractor,
             cleanedText, "ocr_llm", ct);
     }
 
-    // ── Core enrichment + final save ──────────────────────────────────────────
-
-    /// <summary>
-    /// Runs date extraction and AI metadata enrichment, then saves and re-indexes.
-    /// Shared between the native-text shortcut and the full OCR pipeline.
-    /// </summary>
     private async Task EnrichAndSaveAsync(
         GedDbContext db,
         DocumentEntity document,
@@ -353,7 +481,6 @@ public class OcrWorkerService : BackgroundService
     {
         document.Metadata ??= new Dictionary<string, object>();
 
-        // ── 5a. Date extraction ───────────────────────────────────────────────
         if (dateExtractor != null && document.DocumentDate == null)
         {
             try
@@ -364,7 +491,6 @@ public class OcrWorkerService : BackgroundService
                 if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= DateConfidenceThreshold)
                 {
                     document.DocumentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
-
                     document.Metadata["extracted_date"]  = document.DocumentDate.Value.ToString("yyyy-MM-dd");
                     document.Metadata["date_confidence"] = dateInfo.Confidence;
                     document.Metadata["date_type"]       = dateInfo.DateType;
@@ -380,20 +506,15 @@ public class OcrWorkerService : BackgroundService
             }
         }
 
-        // ── 5b. AI tag + description enrichment ───────────────────────────────
         if (enricher != null)
         {
             try
             {
                 var enrichResult = await enricher.EnrichAsync(
-                    textToAnalyze,
-                    document.FileName,
-                    document.Category ?? "Other",
-                    ct);
+                    textToAnalyze, document.FileName, document.Category ?? "Other", ct);
 
                 if (enrichResult != null)
                 {
-                    // Merge AI tags with existing keyword tags (keep best of both)
                     var mergedTags = new HashSet<string>(
                         document.Tags ?? new List<string>(),
                         StringComparer.OrdinalIgnoreCase);
@@ -407,7 +528,6 @@ public class OcrWorkerService : BackgroundService
                         .Take(15)
                         .ToList();
 
-                    // Overwrite description only if AI produced something meaningful
                     if (!string.IsNullOrWhiteSpace(enrichResult.Description))
                         document.Description = enrichResult.Description;
 
@@ -420,10 +540,7 @@ public class OcrWorkerService : BackgroundService
                 else
                 {
                     _logger.LogInformation(
-                        "ℹ️  AI enrichment returned null for {DocId} — keeping keyword tags",
-                        document.Id);
-
-                    // Fallback: regenerate tags from OCR text using keyword matching
+                        "ℹ️  AI enrichment returned null for {DocId} — keeping keyword tags", document.Id);
                     ApplyKeywordTagFallback(document, textToAnalyze);
                 }
             }
@@ -435,12 +552,9 @@ public class OcrWorkerService : BackgroundService
         }
         else
         {
-            // No enricher registered — still do keyword tags from OCR text
             ApplyKeywordTagFallback(document, textToAnalyze);
         }
 
-        // ── 5c. Description fallback from extracted text ───────────────────────
-        // If description is still generic/empty after enrichment, extract from text
         if (IsGenericDescription(document.Description, document.FileName) &&
             !string.IsNullOrWhiteSpace(textToAnalyze))
         {
@@ -458,7 +572,6 @@ public class OcrWorkerService : BackgroundService
             }
         }
 
-        // ── 6. Final save ─────────────────────────────────────────────────────
         document.ExtractedText                  = textToAnalyze;
         document.ModifiedAt                     = DateTime.UtcNow;
         document.Metadata["ocr_cleaned_length"] = textToAnalyze.Length;
@@ -474,8 +587,6 @@ public class OcrWorkerService : BackgroundService
 
         await ReIndexDocumentAsync(document, search, ct);
     }
-
-    // ── Keyword tag fallback ──────────────────────────────────────────────────
 
     private static void ApplyKeywordTagFallback(DocumentEntity document, string text)
     {
@@ -515,13 +626,8 @@ public class OcrWorkerService : BackgroundService
         return false;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
     private async Task SetStageAsync(
-        GedDbContext db,
-        DocumentEntity document,
-        string stage,
-        CancellationToken ct)
+        GedDbContext db, DocumentEntity document, string stage, CancellationToken ct)
     {
         try
         {
@@ -529,7 +635,6 @@ public class OcrWorkerService : BackgroundService
             document.Metadata["ocr_stage"] = stage;
             document.ModifiedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
-
             _logger.LogDebug("📍 OCR stage → '{Stage}' for {DocId}", stage, document.Id);
         }
         catch (Exception ex)
@@ -539,9 +644,7 @@ public class OcrWorkerService : BackgroundService
     }
 
     private async Task ReIndexDocumentAsync(
-        DocumentEntity document,
-        ISearchService search,
-        CancellationToken ct)
+        DocumentEntity document, ISearchService search, CancellationToken ct)
     {
         try
         {
@@ -576,13 +679,12 @@ public class OcrWorkerService : BackgroundService
         }
     }
 
-    private async Task MarkOcrFailedAsync(
-        Guid documentId, string error, CancellationToken ct)
+    private async Task MarkOcrFailedAsync(Guid documentId, string error, CancellationToken ct)
     {
         try
         {
             using var scope = _serviceProvider.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
+            var db  = scope.ServiceProvider.GetRequiredService<GedDbContext>();
             var doc = await db.Documents.FindAsync(new object[] { documentId }, ct);
             if (doc != null)
             {

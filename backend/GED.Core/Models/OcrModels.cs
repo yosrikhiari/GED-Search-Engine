@@ -13,6 +13,7 @@ public class OcrJob
     public int PageCount { get; set; }
     public float Confidence { get; set; }
     public string? ErrorMessage { get; set; }
+    public bool    IsOcrProcessed { get; set; } 
 
     // ── NEW: populated when status >= OcrStatus.TextExtracted ────────────────
     /// <summary>

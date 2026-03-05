@@ -38,8 +38,10 @@ public class AuthService
     public AuthService(ILogger<AuthService> logger, IConfiguration configuration)
     {
         _logger         = logger;
-        _jwtSecret      = configuration["Auth:JwtSecret"]
-            ?? "GED-SuperSecretKey-ChangeInProduction-2024!";
+        _jwtSecret = configuration["Auth:JwtSecret"]
+            ?? throw new InvalidOperationException(
+                "Auth:JwtSecret is not configured. " +
+                "Set via environment variable Auth__JwtSecret.");
         _jwtIssuer      = configuration["Auth:JwtIssuer"] ?? "GED-SearchEngine";
         _jwtExpiryHours = configuration.GetValue<int>("Auth:JwtExpiryHours", 8);
         _usersFilePath  = configuration["Auth:UsersFilePath"] ?? "/var/lib/ged/users.json";

@@ -10,18 +10,9 @@ namespace GED.Infrastructure.Services;
 
 /// <summary>
 /// Resilient RabbitMQ service with lazy connection and automatic reconnection.
-///
-/// KEY FIXES vs original:
-///   1. Lazy connection — does NOT connect at construction time.
-///      The original singleton connected in the constructor, so if RabbitMQ
-///      wasn't ready yet (race condition at startup), the singleton was
-///      permanently broken and all PublishAsync calls silently failed.
-///   2. Per-call channel — channels are cheap; reusing one channel across
-///      threads is not thread-safe with RabbitMQ.Client v6.
-///   3. Automatic reconnect on publish failure with exponential backoff.
-///   4. Proper disposal order (channel → connection).
+/// Updated for RabbitMQ.Client v7 async API.
 /// </summary>
-public class RabbitMqService : IMessageQueueService, IDisposable
+public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposable
 {
     private readonly ILogger<RabbitMqService> _logger;
     private readonly ConnectionFactory _factory;
@@ -43,17 +34,13 @@ public class RabbitMqService : IMessageQueueService, IDisposable
 
         _factory = new ConnectionFactory
         {
-            HostName               = hostname,
-            UserName               = username,
-            Password               = password,
-            // Auto-recover the connection if it drops
-            AutomaticRecoveryEnabled      = true,
-            NetworkRecoveryInterval       = TimeSpan.FromSeconds(5),
-            // Async consumers used by OcrWorkerService — keep this false here
-            // since this class only publishes.
-            DispatchConsumersAsync        = false,
-            RequestedHeartbeat            = TimeSpan.FromSeconds(60),
-            RequestedConnectionTimeout    = TimeSpan.FromSeconds(10),
+            HostName                   = hostname,
+            UserName                   = username,
+            Password                   = password,
+            AutomaticRecoveryEnabled   = true,
+            NetworkRecoveryInterval    = TimeSpan.FromSeconds(5),
+            RequestedHeartbeat         = TimeSpan.FromSeconds(60),
+            RequestedConnectionTimeout = TimeSpan.FromSeconds(10),
         };
 
         _logger.LogInformation(
@@ -75,29 +62,28 @@ public class RabbitMqService : IMessageQueueService, IDisposable
         {
             try
             {
-                var conn    = await GetConnectionAsync(cancellationToken);
-                using var ch = conn.CreateModel();
+                var conn = await GetConnectionAsync(cancellationToken);
+                var ch   = await conn.CreateChannelAsync(cancellationToken: cancellationToken);
+                await using (ch)
+                {
+                    var props = new BasicProperties
+                    {
+                        Persistent  = true,
+                        ContentType = "application/json"
+                    };
 
-                ch.QueueDeclare(
-                    queue:      queueName,
-                    durable:    true,
-                    exclusive:  false,
-                    autoDelete: false,
-                    arguments:  null);
+                    await ch.BasicPublishAsync(
+                        exchange:         string.Empty,
+                        routingKey:       queueName,
+                        mandatory:        false,
+                        basicProperties:  props,
+                        body:             body,
+                        cancellationToken: cancellationToken);
 
-                var props = ch.CreateBasicProperties();
-                props.Persistent  = true;
-                props.ContentType = "application/json";
-
-                ch.BasicPublish(
-                    exchange:         string.Empty,
-                    routingKey:       queueName,
-                    basicProperties:  props,
-                    body:             body);
-
-                _logger.LogInformation(
-                    "✅ Published message to queue '{Queue}' ({Bytes} bytes)",
-                    queueName, body.Length);
+                    _logger.LogInformation(
+                        "✅ Published message to queue '{Queue}' ({Bytes} bytes)",
+                        queueName, body.Length);
+                }
 
                 return; // success
             }
@@ -107,7 +93,6 @@ public class RabbitMqService : IMessageQueueService, IDisposable
                       OperationInterruptedException or
                       IOException)
             {
-                // Connection is broken — reset it so the next attempt re-connects
                 await ResetConnectionAsync();
 
                 if (attempt == MaxConnectRetries)
@@ -120,8 +105,7 @@ public class RabbitMqService : IMessageQueueService, IDisposable
 
                 var delay = BaseRetryMs * attempt;
                 _logger.LogWarning(
-                    "⚠️ Publish attempt {Attempt}/{Max} failed for '{Queue}': {Error}. " +
-                    "Retrying in {Delay}ms…",
+                    "⚠️ Publish attempt {Attempt}/{Max} failed for '{Queue}': {Error}. Retrying in {Delay}ms…",
                     attempt, MaxConnectRetries, queueName, ex.Message, delay);
 
                 await Task.Delay(delay, cancellationToken);
@@ -134,9 +118,6 @@ public class RabbitMqService : IMessageQueueService, IDisposable
         Func<T, Task> handler,
         CancellationToken cancellationToken = default)
     {
-        // NOTE: OcrWorkerService manages its own consumer connection.
-        // This method is here only to satisfy the interface.
-        // For production use, migrate callers to OcrWorkerService's pattern.
         _logger.LogWarning(
             "SubscribeAsync called on RabbitMqService — use OcrWorkerService for consuming");
 
@@ -147,19 +128,20 @@ public class RabbitMqService : IMessageQueueService, IDisposable
 
     private async Task<IConnection> GetConnectionAsync(CancellationToken ct)
     {
-        // Fast path — connection exists and is open
         if (_connection is { IsOpen: true })
             return _connection;
 
         await _lock.WaitAsync(ct);
         try
         {
-            // Double-check after acquiring the lock
             if (_connection is { IsOpen: true })
                 return _connection;
 
-            _connection?.Dispose();
-            _connection = null;
+            if (_connection != null)
+            {
+                await _connection.DisposeAsync();
+                _connection = null;
+            }
 
             _logger.LogInformation("🔌 Connecting to RabbitMQ at {Host}…", _factory.HostName);
 
@@ -167,7 +149,7 @@ public class RabbitMqService : IMessageQueueService, IDisposable
             {
                 try
                 {
-                    _connection = _factory.CreateConnection();
+                    _connection = await _factory.CreateConnectionAsync(ct);
                     _logger.LogInformation("✅ RabbitMQ connection established");
                     return _connection;
                 }
@@ -202,8 +184,11 @@ public class RabbitMqService : IMessageQueueService, IDisposable
         await _lock.WaitAsync();
         try
         {
-            try { _connection?.Dispose(); } catch { /* best effort */ }
-            _connection = null;
+            if (_connection != null)
+            {
+                try { await _connection.DisposeAsync(); } catch { /* best effort */ }
+                _connection = null;
+            }
             _logger.LogInformation("🔄 RabbitMQ connection reset — will reconnect on next use");
         }
         finally
@@ -212,15 +197,28 @@ public class RabbitMqService : IMessageQueueService, IDisposable
         }
     }
 
-    // ── IDisposable ───────────────────────────────────────────────────────────
+    // ── IAsyncDisposable / IDisposable ────────────────────────────────────────
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (_connection != null)
+        {
+            try { await _connection.CloseAsync(); } catch { /* best effort */ }
+            try { await _connection.DisposeAsync(); } catch { /* best effort */ }
+        }
+        _lock.Dispose();
+    }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        try { _connection?.Close(); } catch { /* best effort */ }
-        try { _connection?.Dispose(); } catch { /* best effort */ }
+        try { _connection?.CloseAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
+        try { _connection?.DisposeAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
         _lock.Dispose();
     }
 }

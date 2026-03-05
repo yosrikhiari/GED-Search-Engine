@@ -650,6 +650,20 @@ const uploadData = reactive({ title: '', category: '' })
 
 const quickSearches = ['all documents', 'invoices', 'PDFs from last month', 'contracts from 2024']
 
+// Authenticated fetch that auto-redirects on 401 (same as apiFetch in api.js)
+const authedFetch = async (url, options = {}) => {
+  const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } })
+  if (res.status === 401) {
+    logger.error('view', `401 on ${url} — token expired, redirecting to login`)
+    stopOcrPolling()
+    localStorage.removeItem('ged_token')
+    localStorage.removeItem('ged_user')
+    window.location.href = '/login'
+    throw new Error('Unauthorized')
+  }
+  return res
+}
+
 // ── Computed ──────────────────────────────────────────────────────────────────
 const paginationPages = computed(() => {
   if (!searchResults.value) return []
@@ -764,6 +778,13 @@ const OCR_MAX_POLLS        = 50    // 200s — covers 90s LLM jobs with headroom
 const OCR_USABLE_AT_STAGE  = 2     // TextExtracted — doc is usable here
 
 const startOcrPolling = (docId) => {
+  if (isTokenExpired()) {
+    logger.error('ocr', 'Token already expired — redirecting before starting poll')
+    localStorage.removeItem('ged_token')
+    localStorage.removeItem('ged_user')
+    window.location.href = '/login'
+    return
+  }
   stopOcrPolling()
   let attempts = 0
 
@@ -776,6 +797,16 @@ const startOcrPolling = (docId) => {
     try {
       const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeaders() })
       logger.response('GET', `/api/documents/${docId}/ocr-status`, res.status)
+
+      // stop polling and redirect on expired token
+      if (res.status === 401) {
+        logger.error('ocr', '401 Unauthorized — token expired, stopping poll and redirecting')
+        stopOcrPolling()
+        localStorage.removeItem('ged_token')
+        localStorage.removeItem('ged_user')
+        window.location.href = '/login'
+        return
+      }
 
       if (!res.ok) {
         logger.error('ocr', `Status endpoint returned ${res.status}`)
@@ -902,7 +933,7 @@ const viewDocument = async (doc) => {
 
   // ⭐ Always fetch fresh doc from API — search results may be stale (Redis cache)
   try {
-  const freshRes = await fetch(`/api/documents/${doc.id}`, { headers: authHeaders() })
+  const freshRes = await authedFetch(`/api/documents/${doc.id}`)
   if (freshRes.ok) {
     const freshDoc = await freshRes.json()
     currentDocument.value = {
@@ -1057,7 +1088,7 @@ const fetchSuggestions = async (docId) => {
   suggestionsLoading.value = true
 
   try {
-    const res = await fetch(`/api/search/suggestions/${docId}?count=5`, { headers: authHeaders() })
+    const res = await authedFetch(`/api/search/suggestions/${docId}?count=5`)
     logger.response('GET', `/api/search/suggestions/${docId}`, res.status)
 
     if (res.ok) {
@@ -1381,6 +1412,18 @@ const clearFile = () => {
   uploadData.category = ''
   const inp = document.querySelector('.file-input')
   if (inp) inp.value = ''
+}
+
+const isTokenExpired = () => {
+  const token = localStorage.getItem('ged_token')
+  if (!token) return true
+  try {
+    // JWT payload is the middle segment, base64-encoded
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return payload.exp * 1000 < Date.now()
+  } catch {
+    return true
+  }
 }
 
 const closeUploadModal = () => {

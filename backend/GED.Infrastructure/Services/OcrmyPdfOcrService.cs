@@ -95,13 +95,17 @@ public class OcrmyPdfOcrService : IOcrService
             string args;
             if (isPdf)
             {
-                args = $"-l {lang} --skip-text --output-type pdf \"{inputPath}\" \"{outputPath}\"";
+                // --force-ocr: OCR every page, even if a text layer exists.
+                // --skip-text caused silent failures on scanned/image-only PDFs.
+                // --rotate-pages: auto-correct page orientation (common in scans)
+                // --deskew: straighten skewed pages
+                args = $"-l {lang} --force-ocr --rotate-pages --deskew " +
+                    $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
             }
             else
             {
-                // --image-dpi 300 : treat source image as 300 DPI scan (common for documents)
-                // --force-ocr     : redundant for images but harmless; ensures text layer creation
-                args = $"-l {lang} --image-dpi 300 --force-ocr --output-type pdf \"{inputPath}\" \"{outputPath}\"";
+                args = $"-l {lang} --image-dpi 300 --force-ocr --rotate-pages --deskew " +
+                    $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
             }
 
             _logger.LogInformation("Running: {Exe} {Args}", _ocrmypdfPath, args);
@@ -118,18 +122,30 @@ public class OcrmyPdfOcrService : IOcrService
             //   0  = success
             //   6  = skipped (PDF already has text, only with --skip-text)
             //   10 = missing input file (should not happen)
-            if (exitCode != 0 && exitCode != 6 && exitCode != 10)
+            // Replace the current exit code check block:
+            if (exitCode != 0 && exitCode != 6)
             {
-                _logger.LogError("ocrmypdf exited {Code}: {Stderr}", exitCode, stderr);
-
-                return new OcrResult
+                // Map common ocrmypdf exit codes to readable messages
+                var reason = exitCode switch
                 {
-                    JobId = jobId,
-                    DocumentId = documentId,
-                    Success = false,
-                    ErrorMessage = $"ocrmypdf exit {exitCode}: {stderr}",
-                    ProcessingTime = DateTime.UtcNow - startTime
+                    1  => "invalid input file or arguments",
+                    2  => "input file not found",
+                    3  => "output file already exists",
+                    4  => "missing dependency (ghostscript/tesseract not installed?)",
+                    5  => "input PDF is encrypted",
+                    8  => "input PDF is damaged or invalid",
+                    9  => "output file already has OCR and --skip-text was used",
+                    15 => "tesseract failed (language pack missing?)",
+                    _ => "unknown error"
                 };
+                
+                _logger.LogError(
+                    "ocrmypdf exited {Code} ({Reason}) for document {DocId}. stderr: {Stderr}",
+                    exitCode, reason, documentId, stderr);
+
+                // THROW so OcrWorkerService.MarkOcrFailedAsync gets called
+                throw new InvalidOperationException(
+                    $"ocrmypdf exit {exitCode} ({reason}): {(stderr.Length > 300 ? stderr[..300] : stderr)}");
             }
 
             // Extract text from the output PDF using iText
@@ -170,17 +186,12 @@ public class OcrmyPdfOcrService : IOcrService
                 ProcessingTime = DateTime.UtcNow - startTime
             };
         }
+        // In ProcessDocumentAsync, replace the outer catch block:
         catch (Exception ex)
         {
             _logger.LogError(ex, "OCR failed for document {DocumentId}", documentId);
-            return new OcrResult
-            {
-                JobId = jobId,
-                DocumentId = documentId,
-                Success = false,
-                ErrorMessage = ex.Message,
-                ProcessingTime = DateTime.UtcNow - startTime
-            };
+            // Don't swallow — rethrow so OcrWorkerService.MarkOcrFailedAsync is called
+            throw;
         }
         finally
         {

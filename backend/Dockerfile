@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y \
     ocrmypdf \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-fra \
+    tesseract-ocr-ara \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Create document storage directory
