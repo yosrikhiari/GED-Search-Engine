@@ -615,7 +615,7 @@
 
 <script setup>
 
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { format } from 'date-fns'
 import { logger } from '../logger.js'
 
@@ -777,6 +777,18 @@ const OCR_POLL_INTERVAL_MS = 4000
 const OCR_MAX_POLLS        = 50    // 200s — covers 90s LLM jobs with headroom
 const OCR_USABLE_AT_STAGE  = 2     // TextExtracted — doc is usable here
 
+const refreshFromPollData = (data) => {
+  if (!currentDocument.value) return
+  currentDocument.value = {
+    ...currentDocument.value,
+    tags:         data.tags         ?? currentDocument.value.tags,
+    description:  data.description  ?? currentDocument.value.description,
+    documentDate: data.documentDate ?? currentDocument.value.documentDate,
+    category:     data.category     ?? currentDocument.value.category,
+    modifiedAt:   data.modifiedAt   ?? currentDocument.value.modifiedAt,
+  }
+}
+
 const startOcrPolling = (docId) => {
   if (isTokenExpired()) {
     logger.error('ocr', 'Token already expired — redirecting before starting poll')
@@ -827,54 +839,22 @@ const startOcrPolling = (docId) => {
 
       // ── TextExtracted: Tesseract done, unblock the user now ──────────────
       if (status === OcrStatus.TextExtracted) {
-        logger.success('ocr', `Tesseract done (${rawLen} chars) — document usable. Continuing for LLM cleaning…`)
-
-        // Show raw text immediately so user isn't waiting
         if (data.extractedText && !documentContent.value) {
           documentContent.value = data.extractedText
         }
-
-        // Refresh the document metadata row (date, category etc may not be set yet)
-        try {
-          const docRes = await fetch(`/api/documents/${docId}`, { headers: authHeaders() })
-          if (docRes.ok) {
-            const updatedDoc = await docRes.json()
-            currentDocument.value = {
-              ...currentDocument.value,
-              ...updatedDoc,
-              score:      currentDocument.value?.score,
-              highlights: currentDocument.value?.highlights,
-            }
-          }
-        } catch (e) { logger.warn('ocr', 'Could not refresh doc after TextExtracted', e) }
-
-        // Keep polling — don't clearInterval yet
+        refreshFromPollData(data)
+        await nextTick()
       }
 
       // ── Completed: full pipeline done ────────────────────────────────────
       if (status === OcrStatus.Completed) {
         stopOcrPolling()
-        logger.success('ocr', `Full pipeline complete — ${rawLen} chars`)
-
         if (data.extractedText) documentContent.value = data.extractedText
-
-        try {
-          const docRes = await fetch(`/api/documents/${docId}`, { headers: authHeaders() })
-          if (docRes.ok) {
-            const updatedDoc = await docRes.json()
-            currentDocument.value = {
-              ...currentDocument.value,
-              ...updatedDoc,
-              score:       currentDocument.value?.score,
-              highlights:  currentDocument.value?.highlights,
-            }
-            logger.success('ocr', 'Document metadata refreshed after full completion', {
-              documentDate: updatedDoc.documentDate,
-              category:     updatedDoc.category,
-            })
-          }
-        } catch (e) { logger.warn('ocr', 'Could not refresh doc after Completed', e) }
-
+        refreshFromPollData(data)
+        await nextTick()
+        logger.success('ocr', 'Viewer metadata updated from poll', {
+          tags: data.tags, description: data.description, documentDate: data.documentDate
+        })
         suggestionsCache.delete(docId)
         fetchSuggestions(docId)
         logger.endFlow('ocr', 'Completed')

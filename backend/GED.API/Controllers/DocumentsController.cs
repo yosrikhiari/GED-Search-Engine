@@ -344,6 +344,12 @@ public async Task<ActionResult<Document>> UploadDocument(
                 "OCR status for {DocumentId}: {Status} ({Stage}), IsOcrProcessed={IsOcrProcessed}, RawLen={RawLen}",
                 id, ocrJob.Status, ocrJob.StageLabel, entity.IsOcrProcessed, ocrJob.RawTextLength);
 
+            ocrJob.Tags         = entity.Tags;
+            ocrJob.Description  = entity.Description;
+            ocrJob.DocumentDate = entity.DocumentDate;
+            ocrJob.Category     = entity.Category;
+            ocrJob.ModifiedAt   = entity.ModifiedAt;
+
             return Ok(ocrJob);
         }
         catch (Exception ex)

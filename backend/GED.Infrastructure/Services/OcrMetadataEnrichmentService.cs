@@ -118,31 +118,34 @@ public class OcrMetadataEnrichmentService
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private static string BuildPrompt(string text, string fileName, string category)
-    {
-        return $@"You are a document analysis assistant. Analyze this {category} document and return metadata.
+private static string BuildPrompt(string text, string fileName, string category)
+{
+    return $@"You are a document analysis assistant. Analyze this {category} document and return metadata.
 
 DOCUMENT FILE: {fileName}
 DOCUMENT TEXT:
 {text}
 
+PREDEFINED TAG VOCABULARY — prefer tags from this list when they apply:
+Document types: invoice, contract, report, letter, memo, presentation, spreadsheet, receipt, order, quote, agreement, minutes, notice, certificate, permit, visa, passport, id-card, bank-statement, payslip, tax-return, insurance, medical, legal
+Status/action: signed, draft, pending, approved, rejected, cancelled, expired, urgent, confidential, archived
+Time: 2020, 2021, 2022, 2023, 2024, 2025, q1, q2, q3, q4
+Topics: finance, accounting, hr, legal, procurement, logistics, it, marketing, operations, real-estate, construction, healthcare, education
+Languages: french, english, arabic
+
 Return ONLY a JSON object (no markdown, no explanation) with exactly these two fields:
 
-1. ""tags"": array of 4-12 lowercase tags describing:
-   - Document type (e.g. ""contract"", ""invoice"", ""report"")
-   - Key topics or subjects
-   - Parties, organizations, or people mentioned
-   - Year or time period if found (e.g. ""2024"")
-   - Important keywords
+1. ""tags"": array of 4-12 lowercase tags. Use predefined tags when they fit. You MAY add free-form tags for specific names, organizations, project names, or amounts not covered above.
    Do NOT include generic tags like ""document"", ""text"", ""file"", ""content""
 
-2. ""description"": a single plain-text sentence (max 250 characters) summarizing what this document is about. Be specific. No JSON, no markdown.
+2. ""description"": a single plain-text sentence (max 250 characters) summarizing what this document is about.
 
 Example output:
-{{""tags"":[""real-estate"",""property-sale"",""listing"",""residential"",""2024""],""description"":""For-sale-by-owner listing for a residential property at 123 Main St, including price, features, and contact information.""}}
+{{""tags"":[""invoice"",""finance"",""2024"",""acme-corp"",""approved""],""description"":""Invoice #1042 from Acme Corp for consulting services rendered in Q3 2024, total amount 12,500 EUR.""}}
 
 Now analyze the document above and return JSON:";
-    }
+}
+
 
     private EnrichmentResult? ParseResult(string raw)
     {
