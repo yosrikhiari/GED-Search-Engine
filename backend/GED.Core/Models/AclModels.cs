@@ -108,6 +108,7 @@ public class UserDto
 /// <summary>
 /// Per-document access control entry.
 /// When no entries exist for a document, it inherits the user's role-level access.
+/// Supports both permanent access (ExpiresAt = null) and time-limited access.
 /// </summary>
 public class DocumentAcl
 {
@@ -117,6 +118,16 @@ public class DocumentAcl
     public AclPermission Permission { get; set; }
     public DateTime GrantedAt { get; set; }
     public Guid GrantedBy { get; set; }
+
+    /// <summary>
+    /// Optional expiry date for time-limited access.
+    /// null = permanent access.
+    /// If set and in the past, the ACL entry is treated as revoked.
+    /// </summary>
+    public DateTime? ExpiresAt { get; set; }
+
+    /// <summary>Computed: whether this ACL entry is currently active.</summary>
+    public bool IsActive => ExpiresAt == null || ExpiresAt > DateTime.UtcNow;
 }
 
 public enum AclPermission
@@ -125,4 +136,36 @@ public enum AclPermission
     Write,
     Delete,
     FullControl
+}
+
+// ── ACL Request DTOs ──────────────────────────────────────────────────────────
+
+/// <summary>Request to grant document access to a user.</summary>
+public class GrantAccessRequest
+{
+    [Required]
+    public Guid UserId { get; set; }
+
+    public AclPermission Permission { get; set; } = AclPermission.Read;
+
+    /// <summary>
+    /// Optional: how long to grant access for.
+    /// null = permanent. Set a future date for time-limited access.
+    /// </summary>
+    public DateTime? ExpiresAt { get; set; }
+}
+
+/// <summary>Response DTO showing a user's access to a document.</summary>
+public class DocumentAclDto
+{
+    public Guid Id { get; set; }
+    public Guid DocumentId { get; set; }
+    public Guid UserId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string? FullName { get; set; }
+    public AclPermission Permission { get; set; }
+    public DateTime GrantedAt { get; set; }
+    public DateTime? ExpiresAt { get; set; }
+    public bool IsActive { get; set; }
+    public bool IsPermanent => ExpiresAt == null;
 }

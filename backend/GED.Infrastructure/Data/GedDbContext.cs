@@ -13,10 +13,25 @@ public class GedDbContext : DbContext
 
     public DbSet<DocumentEntity> Documents => Set<DocumentEntity>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<DocumentAcl> DocumentAcls { get; set; }
     public DbSet<DocumentMetadataEntity> DocumentMetadata => Set<DocumentMetadataEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // ── DocumentAcl table ────────────────────────────────────────────────
+        modelBuilder.Entity<DocumentAcl>(e => {
+            e.ToTable("document_acls");
+            e.HasKey(a => a.Id);
+            e.Property(a => a.Id).HasColumnName("id");
+            e.Property(a => a.DocumentId).HasColumnName("document_id");
+            e.Property(a => a.UserId).HasColumnName("user_id");
+            e.Property(a => a.Permission).HasColumnName("permission");
+            e.Property(a => a.GrantedAt).HasColumnName("granted_at");
+            e.Property(a => a.GrantedBy).HasColumnName("granted_by");
+            e.Property(a => a.ExpiresAt).HasColumnName("expires_at");  // ← NEW
+            e.HasIndex(a => new { a.DocumentId, a.UserId }).HasDatabaseName("ix_acl_doc_user");
+        });
+    
         // ── Documents table ──────────────────────────────────────────────────
         modelBuilder.Entity<DocumentEntity>(e =>
         {
@@ -107,6 +122,9 @@ public class GedDbContext : DbContext
             e.Property(m => m.RetryCount).HasColumnName("retry_count");
             e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");
         });
+    
+    
+    
     }
 }
 

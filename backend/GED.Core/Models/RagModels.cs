@@ -21,6 +21,9 @@ public class RagRequest
 
     /// <summary>Response language: "fr" (default), "en", "ar".</summary>
     public string Language { get; set; } = "fr";
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? Username { get; set; }
 }
 
 // ── Response ──────────────────────────────────────────────────────────────────
@@ -75,4 +78,9 @@ public class RagSource
 
     /// <summary>OpenSearch highlights for this document.</summary>
     public List<string> Highlights { get; set; } = new();
+
+    // Set by the controller from the JWT — never comes from the request body
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? Username { get; set; }
+
 }

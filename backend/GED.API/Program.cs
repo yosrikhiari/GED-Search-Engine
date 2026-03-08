@@ -38,6 +38,8 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNamingPolicy =
             System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+        options.JsonSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
 // ── Rate Limiting (ByteByteGo: Token Bucket) ──────────────────────────────────
 builder.Services.AddMemoryCache();
@@ -242,8 +244,11 @@ var ollamaPolicy = OllamaResiliencePolicies.Combined(timeoutSeconds: 90);
 
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
 
-builder.Services.AddHttpClient<NlpService>()
-    .AddPolicyHandler(ollamaPolicy);
+builder.Services.AddHttpClient<NlpService>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+})
+.AddPolicyHandler(OllamaResiliencePolicies.Combined(timeoutSeconds: 30));
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
 builder.Services.AddHttpClient<DocumentDateExtractor>()
@@ -264,11 +269,11 @@ builder.Services.AddHttpClient<RagService>()
 builder.Services.AddScoped<IRagService>(sp =>
     new RagService(
         sp.GetRequiredService<ISearchService>(),
+        sp.GetRequiredService<AuthService>(),
         sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(RagService)),
         sp.GetRequiredService<ILogger<RagService>>(),
         sp.GetRequiredService<IConfiguration>()
     ));
-
 // ── Auth Service ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<AuthService>();
 
@@ -349,14 +354,29 @@ var app = builder.Build();
 try
 {
     var client = app.Services.GetRequiredService<IOpenSearchClient>();
+
+    // Enable kNN plugin setting (required before creating a knn_vector index)
+    // This is a no-op if the plugin is already enabled.
+    await client.LowLevel.DoRequestAsync<StringResponse>(
+        OpenSearch.Net.HttpMethod.PUT,
+        "/_cluster/settings",
+        CancellationToken.None,
+        PostData.String("{\"persistent\":{\"knn.algo_param.ef_search\":100}}")
+    );
     var indexExists = await client.Indices.ExistsAsync("ged-documents");
 
     if (!indexExists.Exists)
     {
         var createIndexResponse = await client.Indices.CreateAsync("ged-documents", c => c
-            .Settings(s => s.NumberOfShards(1).NumberOfReplicas(0))
+            .Settings(s => s
+                .NumberOfShards(1)
+                .NumberOfReplicas(0)
+                // Enable the kNN plugin for approximate nearest-neighbor search
+                .Setting("index.knn", true)
+            )
             .Map<DocumentIndexModel>(m => m
                 .Properties(p => p
+                    // ── Text fields ────────────────────────────────────────────
                     .Text(t => t.Name(n => n.Title).Analyzer("standard")
                         .Fields(f => f.Keyword(k => k.Name("keyword"))))
                     .Text(t => t.Name(n => n.Description).Analyzer("standard"))
@@ -364,27 +384,79 @@ try
                     .Text(t => t.Name(n => n.OcrText).Analyzer("standard"))
                     .Text(t => t.Name(n => n.Category).Analyzer("standard")
                         .Fields(f => f.Keyword(k => k.Name("keyword"))))
+                    // ── Keyword / structured fields ────────────────────────────
                     .Keyword(k => k.Name(n => n.Tags))
                     .Keyword(k => k.Name(n => n.ContentType))
                     .Keyword(k => k.Name(n => n.FileName))
+                    .Keyword(k => k.Name(n => n.Status))
+                    // ── Numeric / date fields ──────────────────────────────────
                     .Number(n => n.Name(nn => nn.FileSize).Type(NumberType.Long))
                     .Date(d => d.Name(n => n.CreatedAt))
                     .Date(d => d.Name(n => n.DocumentDate))
                     .Date(d => d.Name(n => n.ModifiedAt))
-                    .Keyword(k => k.Name(n => n.Status))
+                    // ── Semantic embedding vector field ────────────────────────
+                    // 768 dimensions = nomic-embed-text output size.
+                    // HNSW with cosine similarity: best for text embeddings.
+                    // Engine "lucene" works without extra plugins on OpenSearch 2.x.
+                    .KnnVector(k => k
+                        .Name("embedding")
+                        .Dimension(768)
+                        .Method(mm => mm
+                            .Name("hnsw")
+                            .SpaceType("cosinesimil")
+                            .Engine("lucene")
+                            .Parameters(p => p
+                                .Parameter("ef_construction", 128)
+                                .Parameter("m", 16)
+                            )
+                        )
+                    )
                 )
             )
         );
 
         Log.Information(createIndexResponse.IsValid
-            ? "✅ OpenSearch index 'ged-documents' created"
-            : "❌ Failed to create OpenSearch index: {Error}", createIndexResponse.DebugInformation);
+            ? "✅ OpenSearch index 'ged-documents' created with kNN vector field"
+            : "❌ Failed to create index: {Error}", createIndexResponse.DebugInformation);
+    }
+    else
+    {
+        Log.Information("OpenSearch index 'ged-documents' already exists — skipping creation");
+
+        // ── Migration: check if embedding field exists ────────────────────────
+        // If the index was created before this change, the embedding field is missing.
+        // Uncomment the block below to add it to an existing index.
+        // You only need to run this ONCE. After adding the field, re-index all documents
+        // by calling POST /api/admin/reindex (or restart the AutoReindexService).
+        //
+        // var mappingResponse = await client.Indices.PutMappingAsync<DocumentIndexModel>(m => m
+        //     .Index("ged-documents")
+        //     .Properties(p => p
+        //         .KnnVector(k => k
+        //             .Name("embedding")
+        //             .Dimension(768)
+        //             .Method(mm => mm
+        //                 .Name("hnsw")
+        //                 .SpaceType("cosinesimil")
+        //                 .Engine("lucene")
+        //                 .Parameters(p => p
+        //                     .Parameter("ef_construction", 128)
+        //                     .Parameter("m", 16)
+        //                 )
+        //             )
+        //         )
+        //     )
+        // );
+        // Log.Information(mappingResponse.IsValid
+        //     ? "✅ Added embedding field to existing index"
+        //     : "⚠️ Could not add embedding field: {Error}", mappingResponse.DebugInformation);
     }
 }
 catch (Exception ex)
 {
     Log.Error(ex, "Error initializing OpenSearch index");
 }
+
 
 
 // ── Middleware pipeline ───────────────────────────────────────────────────────

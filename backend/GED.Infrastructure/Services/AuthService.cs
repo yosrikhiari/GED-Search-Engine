@@ -281,30 +281,61 @@ public class AuthService
         }
     }
 
-    private void EnsureDefaultAdmin()
+private void EnsureDefaultAdmin()
+{
+    lock (_lock)
     {
-        lock (_lock)
+        var changed = false;
+
+        if (!_users.Any(u => u.Role == UserRole.Admin))
         {
-            if (!_users.Any(u => u.Role == UserRole.Admin))
+            _logger.LogWarning("⚠️  No admin user found — creating default admin (username: admin, password: Admin@1234)");
+            _users.Add(new AppUser
             {
-                _logger.LogWarning(
-                    "⚠️  No admin user found — creating default admin (username: admin, password: Admin@1234)");
-
-                _users.Add(new AppUser
-                {
-                    Id           = Guid.NewGuid(),
-                    Username     = "admin",
-                    PasswordHash = HashPassword("Admin@1234"),
-                    FullName     = "System Administrator",
-                    Role         = UserRole.Admin,
-                    IsActive     = true,
-                    CreatedAt    = DateTime.UtcNow
-                });
-                SaveUsers();
-            }
+                Id           = Guid.NewGuid(),
+                Username     = "admin",
+                PasswordHash = HashPassword("Admin@1234"),
+                FullName     = "System Administrator",
+                Role         = UserRole.Admin,
+                IsActive     = true,
+                CreatedAt    = DateTime.UtcNow
+            });
+            changed = true;
         }
-    }
 
+        if (!_users.Any(u => u.Username == "manager"))
+        {
+            _users.Add(new AppUser
+            {
+                Id           = Guid.NewGuid(),
+                Username     = "manager",
+                PasswordHash = HashPassword("Manager@1234"),
+                FullName     = "Test Manager",
+                Role         = UserRole.Manager,
+                IsActive     = true,
+                CreatedAt    = DateTime.UtcNow
+            });
+            changed = true;
+        }
+
+        if (!_users.Any(u => u.Username == "user"))
+        {
+            _users.Add(new AppUser
+            {
+                Id           = Guid.NewGuid(),
+                Username     = "user",
+                PasswordHash = HashPassword("User@1234"),
+                FullName     = "Test User",
+                Role         = UserRole.User,
+                IsActive     = true,
+                CreatedAt    = DateTime.UtcNow
+            });
+            changed = true;
+        }
+
+        if (changed) SaveUsers();
+    }
+}
     private void LoadUsers()
     {
         try

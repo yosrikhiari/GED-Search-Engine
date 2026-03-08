@@ -139,10 +139,7 @@ export const search = {
     }),
 
   suggestions: (q) =>
-    apiFetch(`/api/search/suggestions?q=${encodeURIComponent(q)}`),
-
-  understand: (q) =>
-    apiFetch(`/api/search/understand?q=${encodeURIComponent(q)}`)
+    apiFetch(`/api/search/suggestions?q=${encodeURIComponent(q)}`)
 }
 
 // ── RAG ───────────────────────────────────────────────────────────────────────

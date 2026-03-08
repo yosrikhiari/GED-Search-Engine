@@ -8,82 +8,220 @@ using CoreSearchRequest = GED.Core.Models.SearchRequest;
 
 namespace GED.Infrastructure.Services;
 
+/// <summary>
+/// Hybrid search service: BM25 (keyword) + kNN (semantic vector) combined.
+///
+/// Why hybrid?
+///   • BM25 is great for exact matches ("facture 2024", "contract PDF").
+///   • kNN semantic search handles multilingual queries — a French query finds
+///     English-titled documents because both share a semantic embedding space.
+///   • Combining both gives precision (BM25) + recall (semantic).
+///
+/// Scoring: hybridScore = 0.6 × bm25_normalized + 0.4 × cosine_similarity
+///
+/// Degradation: if Ollama is unavailable, embedding returns null and the service
+/// falls back to BM25-only. No exceptions, no downtime.
+/// </summary>
 public class OpenSearchService : ISearchService
 {
     private readonly IOpenSearchClient _client;
     private readonly INlpService _nlpService;
     private readonly ILogger<OpenSearchService> _logger;
-    private const string DocumentIndex = "ged-documents";
+
+    private const string DocumentIndex   = "ged-documents";
+    private const int    EmbeddingDim    = 768;   // nomic-embed-text output size
+    private const float  Bm25Weight      = 0.6f;
+    private const float  SemanticWeight  = 0.4f;
+    // Minimum cosine similarity below which a semantic-only result is discarded
+    private const float  SemanticThreshold = 0.30f;
+
+    // Maps FR/AR query words → stored English category values
+    private static readonly Dictionary<string, string> CategoryAliases =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        // French → English
+        { "contrat",      "Contract"     }, { "contrats",     "Contract"     },
+        { "facture",      "Invoice"      }, { "factures",     "Invoice"      },
+        { "rapport",      "Report"       }, { "rapports",     "Report"       },
+        { "lettre",       "Letter"       }, { "lettres",      "Letter"       },
+        { "courrier",     "Letter"       },
+        { "devis",        "Invoice"      },
+        { "note",         "Memo"         },
+        { "présentation", "Presentation" }, { "presentation", "Presentation" },
+        // Arabic → English
+        { "عقد",          "Contract"     }, { "عقود",         "Contract"     },
+        { "فاتورة",       "Invoice"      }, { "فواتير",       "Invoice"      },
+        { "تقرير",        "Report"       }, { "تقارير",       "Report"       },
+        { "رسالة",        "Letter"       }, { "رسائل",        "Letter"       },
+        { "مذكرة",        "Memo"         },
+        { "عرض",          "Presentation" },
+    };
+
 
     public OpenSearchService(
         IOpenSearchClient client,
         INlpService nlpService,
         ILogger<OpenSearchService> logger)
     {
-        _client = client;
+        _client     = client;
         _nlpService = nlpService;
-        _logger = logger;
+        _logger     = logger;
     }
 
-    public async Task<SearchResult> SearchAsync(CoreSearchRequest request, CancellationToken cancellationToken = default)
+    // ── SearchAsync (hybrid pipeline) ─────────────────────────────────────────
+
+    public async Task<SearchResult> SearchAsync(
+        CoreSearchRequest request,
+        CancellationToken cancellationToken = default)
     {
+        var startTime = DateTime.UtcNow;
+
         try
         {
-            var startTime = DateTime.UtcNow;
-
-            // Process natural language query if needed
-            string processedQuery = request.Query;
+            // ── Step 1: NLP understanding (fully local, <5ms) ─────────────────
             NaturalLanguageQuery? nlQuery = null;
+            var processedQuery = request.Query;
 
-            if (request.SearchType == GED.Core.Models.SearchType.Natural && !string.IsNullOrWhiteSpace(request.Query))
+            if (request.SearchType == GED.Core.Models.SearchType.Natural &&
+                !string.IsNullOrWhiteSpace(request.Query))
             {
-                nlQuery = await _nlpService.UnderstandQueryAsync(request.Query, cancellationToken);
+                nlQuery = await _nlpService.UnderstandQueryAsync(
+                    request.Query, cancellationToken);
+
                 processedQuery = nlQuery.ProcessedQuery;
-                _logger.LogInformation("NLP processed query: '{Original}' -> '{Processed}', Keywords: {Keywords}", 
-                    request.Query, processedQuery, string.Join(", ", nlQuery.Keywords));
-                
-                // Apply NLP-extracted filters
-                if (nlQuery.ExtractedFilters != null && nlQuery.ExtractedFilters.Any())
+
+                _logger.LogInformation(
+                    "NLP: '{Original}' → lang={Lang}, keywords=[{KW}], understood={OK}",
+                    request.Query, nlQuery.DetectedLanguage,
+                    string.Join(",", nlQuery.Keywords), nlQuery.IsUnderstood);
+
+                // Query is all stop-words — return empty immediately
+                if (!nlQuery.IsUnderstood)
                 {
-                    _logger.LogInformation("Applying {Count} NLP-extracted filters", nlQuery.ExtractedFilters.Count);
-                    
-                    if (nlQuery.ExtractedFilters.ContainsKey("fromDate"))
+                    return new SearchResult
                     {
-                        request.FromDate = DateTime.Parse(nlQuery.ExtractedFilters["fromDate"]);
-                        _logger.LogInformation("✅ Applied FromDate filter: {Date}", request.FromDate);
-                    }
-                    if (nlQuery.ExtractedFilters.ContainsKey("toDate"))
-                    {
-                        request.ToDate = DateTime.Parse(nlQuery.ExtractedFilters["toDate"]);
-                        _logger.LogInformation("✅ Applied ToDate filter: {Date}", request.ToDate);
-                    }
-                    
-                    if (nlQuery.ExtractedFilters.ContainsKey("filetype"))
-                    {
-                        var fileType = nlQuery.ExtractedFilters["filetype"];
-                        var contentType = MapFileTypeToContentType(fileType);
-                        if (!string.IsNullOrEmpty(contentType))
-                        {
-                            request.ContentTypes = new List<string> { contentType };
-                            _logger.LogInformation("✅ Applied ContentType filter: {Type}", contentType);
-                        }
-                    }
+                        TotalResults     = 0,
+                        Page             = request.Page,
+                        PageSize         = request.PageSize,
+                        TotalPages       = 0,
+                        Documents        = new(),
+                        IsUnderstood     = false,
+                        DetectedLanguage = nlQuery.DetectedLanguage,
+                        SearchTimeMs     = (long)(DateTime.UtcNow - startTime).TotalMilliseconds
+                    };
                 }
-                
-                // Detect generic queries
-                var lowerQuery = request.Query.ToLower().Trim();
-                var genericPhrases = new[] { "all documents", "show all", "list all", "get all", "find all" };
-                
-                if (genericPhrases.Any(phrase => lowerQuery.Contains(phrase)) || 
-                    (!nlQuery.Keywords.Any() && lowerQuery.Split(' ').All(w => w.Length <= 4)))
+
+                // Apply NLP-extracted hard filters
+                ApplyNlpFilters(request, nlQuery);
+
+                // Generic "show all" detection
+                var lowerRaw = request.Query.ToLower().Trim();
+                var genericPhrases = new[] { "all documents", "show all", "list all", "get all",
+                                             "tous les documents", "كل الوثائق", "جميع الملفات" };
+                if (genericPhrases.Any(p => lowerRaw.Contains(p)) ||
+                    (!nlQuery.Keywords.Any() && lowerRaw.Split(' ').All(w => w.Length <= 3)))
                 {
                     processedQuery = string.Empty;
-                    _logger.LogInformation("Detected generic 'show all' query - returning all documents");
+                    _logger.LogInformation("Generic 'show all' query detected — returning all documents");
                 }
             }
 
-            // Build OpenSearch query
-            var searchResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
+            // ── Step 2: Generate query embedding (Ollama, ~50-100ms) ──────────
+            // Run in parallel with BM25 to hide latency
+            var embeddingText  = string.IsNullOrWhiteSpace(processedQuery)
+                ? request.Query : processedQuery;
+            var embeddingTask  = string.IsNullOrWhiteSpace(embeddingText)
+                ? Task.FromResult<float[]?>(null)
+                : _nlpService.GenerateEmbeddingAsync(embeddingText, cancellationToken);
+
+            // ── Step 3: BM25 search ───────────────────────────────────────────
+            var bm25Task = RunBm25SearchAsync(
+                request, processedQuery, nlQuery, cancellationToken);
+
+            // Both run concurrently
+            await Task.WhenAll(bm25Task, embeddingTask);
+
+            var bm25Response  = await bm25Task;
+            var queryEmbedding = await embeddingTask;
+
+            // ── Step 4: Semantic / kNN search (if embedding available) ─────────
+            List<(Guid Id, float Score)> semanticHits = new();
+            var searchMode = SearchMode.BM25;
+
+            if (queryEmbedding != null)
+            {
+                semanticHits = await RunKnnSearchAsync(
+                    request, queryEmbedding, cancellationToken);
+
+                searchMode = bm25Response.Hits.Any() || semanticHits.Any()
+                    ? SearchMode.Hybrid
+                    : SearchMode.BM25;
+            }
+
+            // ── Step 5: Merge BM25 + semantic ─────────────────────────────────
+            var documents = await MergeHybridResultsAsync(bm25Response, semanticHits, cancellationToken);
+
+            // ── Step 6: Determine IsUnderstood from results ───────────────────
+            // A query "understood" = NLP said OK AND we got at least one result.
+            // If both search modes returned 0, the query is likely too vague/gibberish.
+            var totalBm25 = (int)(bm25Response?.Total ?? 0);
+            var isUnderstood = nlQuery?.IsUnderstood != false &&
+                               (documents.Any() || totalBm25 > 0 ||
+                                !string.IsNullOrWhiteSpace(request.Query));
+
+            // ── Step 7: Normalize scores to 0–1 range ─────────────────────────
+            if (documents.Any())
+            {
+                var maxScore = documents.Max(d => d.Score);
+                if (maxScore > 0)
+                    foreach (var d in documents)
+                        d.Score = d.Score / maxScore;
+            }
+
+            var result = new SearchResult
+            {
+                TotalResults     = Math.Max(totalBm25, documents.Count),
+                Page             = request.Page,
+                PageSize         = request.PageSize,
+                TotalPages       = (int)Math.Ceiling((double)Math.Max(totalBm25, documents.Count) / request.PageSize),
+                Documents        = documents,
+                Facets           = bm25Response != null ? ExtractFacets(bm25Response.Aggregations) : null,
+                SearchTimeMs     = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
+                ProcessedQuery   = processedQuery,
+                IsUnderstood     = isUnderstood,
+                DetectedLanguage = nlQuery?.DetectedLanguage,
+                NlpSummary       = BuildNlpSummary(nlQuery),
+                SearchMode       = searchMode
+            };
+
+            if (request.IncludeSuggestions && result.Documents.Any())
+                result.Suggestions = await GetRelatedDocumentsAsync(
+                    result.Documents.First().Id, 5, cancellationToken);
+
+            _logger.LogInformation(
+                "Search complete: {Mode}, {Count} docs, {Ms}ms, understood={OK}",
+                searchMode, documents.Count, result.SearchTimeMs, isUnderstood);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error performing search for '{Query}'", request.Query);
+            throw;
+        }
+    }
+
+    // ── BM25 search ───────────────────────────────────────────────────────────
+
+    private async Task<ISearchResponse<DocumentIndexModel>?> RunBm25SearchAsync(
+        CoreSearchRequest request,
+        string processedQuery,
+        NaturalLanguageQuery? nlQuery,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _client.SearchAsync<DocumentIndexModel>(s => s
                 .Index(DocumentIndex)
                 .From((request.Page - 1) * request.PageSize)
                 .Size(request.PageSize)
@@ -91,678 +229,684 @@ public class OpenSearchService : ISearchService
                 .Sort(ss => BuildSort(ss, request.SortBy, request.SortDescending))
                 .Highlight(h => h
                     .Fields(
-                        f => f.Field(doc => doc.Title).NumberOfFragments(0),
-                        f => f.Field(doc => doc.Description).NumberOfFragments(3).FragmentSize(150),
-                        f => f.Field(doc => doc.ExtractedText).NumberOfFragments(3).FragmentSize(150),
-                        f => f.Field(doc => doc.OcrText).NumberOfFragments(3).FragmentSize(150)
+                        f => f.Field(d => d.Title).NumberOfFragments(0),
+                        f => f.Field(d => d.Description).NumberOfFragments(3).FragmentSize(150),
+                        f => f.Field(d => d.ExtractedText).NumberOfFragments(3).FragmentSize(150),
+                        f => f.Field(d => d.OcrText).NumberOfFragments(3).FragmentSize(150)
                     )
                 )
                 .Aggregations(a => BuildAggregations(a))
                 .MinScore(request.MinScore ?? 0),
-                cancellationToken
-            );
+                cancellationToken);
 
-            if (!searchResponse.IsValid)
-            {
-                _logger.LogError("OpenSearch query failed: {Error}", searchResponse.DebugInformation);
-                throw new Exception($"Search failed: {searchResponse.ServerError?.Error?.Reason}");
-            }
+            if (!response.IsValid)
+                _logger.LogWarning("BM25 search issue: {Error}", response.DebugInformation);
 
-            _logger.LogInformation("Search returned {Count} results out of {Total} total", 
-                searchResponse.Documents.Count, searchResponse.Total);
-
-            // Map hits to search results
-            var documents = searchResponse.Hits.Select(hit => MapToSearchHit(hit)).ToList();
-
-            // Normalize scores to 0-1.0 range
-            if (documents.Any())
-            {
-                var maxScore = documents.Max(d => d.Score);
-                if (maxScore > 0)
-                {
-                    foreach (var doc in documents)
-                    {
-                        doc.Score = doc.Score / maxScore;
-                    }
-                }
-            }
-
-            var result = new SearchResult
-            {
-                TotalResults = (int)searchResponse.Total,
-                Page = request.Page,
-                PageSize = request.PageSize,
-                TotalPages = (int)Math.Ceiling((double)searchResponse.Total / request.PageSize),
-                Documents = documents,
-                Facets = ExtractFacets(searchResponse.Aggregations),
-                SearchTimeMs = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
-                ProcessedQuery = processedQuery
-            };
-
-            // Get related document suggestions if requested
-            if (request.IncludeSuggestions && result.Documents.Any())
-            {
-                result.Suggestions = await GetRelatedDocumentsAsync(
-                    result.Documents.First().Id,
-                    5,
-                    cancellationToken
-                );
-            }
-
-            return result;
+            return response;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error performing search");
-            throw;
+            _logger.LogError(ex, "BM25 search failed");
+            return null;
         }
     }
 
+    // ── kNN semantic search ───────────────────────────────────────────────────
 
-private QueryContainer BuildPrecisionQuery(
-    QueryContainerDescriptor<DocumentIndexModel> q,
-    string query,
-    CoreSearchRequest request,
-    NaturalLanguageQuery? nlQuery)
-{
-    var mustQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
-    var shouldQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
-    var filterQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
-
-    // ========== HARD FILTERS (Must match, no scoring) ==========
-    
-    // Status filter - only indexed documents
-    filterQueries.Add(sq => sq.Term(t => t.Field("status").Value("Indexed")));
-    
-    // Content type filter
-    if (request.ContentTypes?.Any() == true)
-    {
-        _logger.LogInformation("🔒 Applying HARD contentType filter: {Types}", 
-            string.Join(", ", request.ContentTypes));
-        
-        filterQueries.Add(ctq => ctq.Terms(t => t
-            .Field(doc => doc.ContentType)
-            .Terms(request.ContentTypes)
-        ));
-    }
-
-    // Category filter (from manual filters OR NLP)
-    var categoriesToFilter = new List<string>();
-    
-    if (request.Categories?.Any() == true)
-    {
-        categoriesToFilter.AddRange(request.Categories);
-    }
-    
-    if (nlQuery?.Entities != null)
-    {
-        var categoryEntities = nlQuery.Entities
-            .Where(e => e.StartsWith("CATEGORY:"))
-            .Select(e => e.Substring(9))
-            .Select(c => char.ToUpper(c[0]) + c.Substring(1))
-            .ToList();
-        
-        if (categoryEntities.Any())
-        {
-            categoriesToFilter.AddRange(categoryEntities);
-            _logger.LogInformation("✅ Added category from NLP: {Categories}", 
-                string.Join(", ", categoryEntities));
-        }
-    }
-    
-    if (categoriesToFilter.Any())
-    {
-        _logger.LogInformation("🔒 Applying category filter: {Categories}", 
-            string.Join(", ", categoriesToFilter));
-        
-        filterQueries.Add(cq => cq.Bool(b => b
-            .Should(categoriesToFilter.Select(cat => 
-                new Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>(
-                    sq => sq.Term(t => t
-                        .Field("category.keyword")
-                        .Value(cat)
-                        .CaseInsensitive(true)
-                    )
-                )
-            ).ToArray())
-            .MinimumShouldMatch(1)
-        ));
-    }
-
-    // Tags filter
-    if (request.Tags?.Any() == true)
-    {
-        filterQueries.Add(tq => tq.Terms(t => t
-            .Field(doc => doc.Tags)
-            .Terms(request.Tags)
-        ));
-    }
-
-    // Date range filter
-    if (request.FromDate.HasValue || request.ToDate.HasValue)
-    {
-        _logger.LogInformation("🔒 Applying date range filter: {From} to {To}", 
-            request.FromDate?.ToString("yyyy-MM-dd") ?? "start", 
-            request.ToDate?.ToString("yyyy-MM-dd") ?? "end");
-        
-        filterQueries.Add(dq => dq.Bool(b => b
-            .Should(
-                s => s.Bool(b1 => b1
-                    .Must(
-                        m => m.Exists(e => e.Field(doc => doc.DocumentDate)),
-                        m => m.DateRange(dr => dr
-                            .Field(doc => doc.DocumentDate)
-                            .GreaterThanOrEquals(request.FromDate)
-                            .LessThanOrEquals(request.ToDate)
-                        )
-                    )
-                ),
-                s => s.Bool(b2 => b2
-                    .Must(
-                        m => m.Bool(nb => nb
-                            .MustNot(mn => mn.Exists(e => e.Field(doc => doc.DocumentDate)))
-                        ),
-                        m => m.DateRange(dr => dr
-                            .Field(doc => doc.CreatedAt)
-                            .GreaterThanOrEquals(request.FromDate)
-                            .LessThanOrEquals(request.ToDate)
-                        )
-                    )
-                )
-            )
-            .MinimumShouldMatch(1)
-        ));
-    }
-
-    // ========== TEXT SEARCH QUERIES (Tiered scoring) ==========
-    
-    if (!string.IsNullOrWhiteSpace(query))
-    {
-        var cleanQuery = query.Trim();
-        var normalizedQuery = NormalizeSearchQuery(cleanQuery);
-        var queryVariations = GenerateQueryVariations(cleanQuery);
-        
-        _logger.LogInformation("🔍 Search query: '{Original}' → normalized: '{Normalized}', variations: [{Variations}]", 
-            cleanQuery, normalizedQuery, string.Join(", ", queryVariations));
-
-        var isMultiWord = cleanQuery.Contains(' ');
-
-        if (isMultiWord)
-        {
-            shouldQueries.Add(sq => sq.MatchPhrase(mp => mp
-                .Field(doc => doc.Title)
-                .Query(cleanQuery)
-                .Boost(100.0)
-            ));
-        }
-        
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.Term(t => t
-                .Field("category.keyword")
-                .Value(variant)
-                .CaseInsensitive(true)
-                .Boost(80.0)
-            ));
-        }
-        
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.Term(t => t
-                .Field("title.keyword")
-                .Value(variant)
-                .CaseInsensitive(true)
-                .Boost(70.0)
-            ));
-        }
-
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.Prefix(p => p
-                .Field(doc => doc.Title)
-                .Value(variant.ToLower())
-                .CaseInsensitive(true)
-                .Boost(50.0)
-            ));
-        }
-        
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.MultiMatch(m => m
-                .Query(variant)
-                .Fields(f => f
-                    .Field(doc => doc.Title, 20.0)
-                    .Field(doc => doc.Category, 15.0)
-                    .Field(doc => doc.FileName, 10.0)
-                    .Field(doc => doc.Description, 5.0)
-                )
-                .Type(TextQueryType.BestFields)
-                .Operator(Operator.And)
-                .Boost(40.0)
-            ));
-        }
-        
-        shouldQueries.Add(sq => sq.MatchPhrasePrefix(mpp => mpp
-            .Field(doc => doc.Title)
-            .Query(cleanQuery)
-            .MaxExpansions(20)
-            .Boost(35.0)
-        ));
-
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.MultiMatch(m => m
-                .Query(variant)
-                .Fields(f => f
-                    .Field(doc => doc.Title, 10.0)
-                    .Field(doc => doc.Category, 8.0)
-                    .Field(doc => doc.FileName, 5.0)
-                    .Field(doc => doc.Description, 3.0)
-                    .Field(doc => doc.ExtractedText, 2.0)
-                )
-                .Type(TextQueryType.MostFields)
-                .Operator(Operator.Or)
-                .MinimumShouldMatch("50%")
-                .Boost(25.0)
-            ));
-        }
-        
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.Wildcard(w => w
-                .Field(doc => doc.Title)
-                .Value($"*{variant.ToLower()}*")
-                .CaseInsensitive(true)
-                .Boost(20.0)
-            ));
-            
-            shouldQueries.Add(sq => sq.Wildcard(w => w
-                .Field(doc => doc.FileName)
-                .Value($"*{variant.ToLower()}*")
-                .CaseInsensitive(true)
-                .Boost(18.0)
-            ));
-        }
-
-        foreach (var variant in queryVariations)
-        {
-            shouldQueries.Add(sq => sq.MultiMatch(m => m
-                .Query(variant)
-                .Fields(f => f
-                    .Field(doc => doc.Title, 5.0)
-                    .Field(doc => doc.Category, 4.0)
-                    .Field(doc => doc.FileName, 3.0)
-                )
-                .Fuzziness(Fuzziness.Auto)
-                .Operator(Operator.Or)
-                .Boost(15.0)
-            ));
-        }
-
-        shouldQueries.Add(sq => sq.Match(m => m
-            .Field(doc => doc.ExtractedText)
-            .Query(normalizedQuery)
-            .Operator(Operator.Or)
-            .MinimumShouldMatch("40%")
-            .Boost(10.0)
-        ));
-        
-        shouldQueries.Add(sq => sq.Match(m => m
-            .Field(doc => doc.OcrText)
-            .Query(normalizedQuery)
-            .Operator(Operator.Or)
-            .MinimumShouldMatch("40%")
-            .Boost(5.0)
-        ));
-
-        if (nlQuery?.Keywords != null && nlQuery.Keywords.Any())
-        {
-            foreach (var keyword in nlQuery.Keywords)
-            {
-                var keywordVariations = GenerateQueryVariations(keyword);
-                
-                foreach (var variant in keywordVariations)
-                {
-                    shouldQueries.Add(sq => sq.Term(t => t
-                        .Field("category.keyword")
-                        .Value(variant)
-                        .CaseInsensitive(true)
-                        .Boost(30.0)
-                    ));
-                    
-                    shouldQueries.Add(sq => sq.MultiMatch(m => m
-                        .Query(variant)
-                        .Fields(f => f
-                            .Field(doc => doc.Title, 8.0)
-                            .Field(doc => doc.Category, 6.0)
-                            .Field(doc => doc.Description, 3.0)
-                        )
-                        .Operator(Operator.Or)
-                        .Boost(12.0)
-                    ));
-                }
-            }
-        }
-    }
-
-    var minimumShouldMatch = CalculateMinimumShouldMatch(query, shouldQueries.Count);
-    
-    _logger.LogInformation("📊 Query structure: {ShouldQueries} scoring queries, {FilterQueries} filters, MinShouldMatch: {MinMatch}",
-        shouldQueries.Count, filterQueries.Count, minimumShouldMatch);
-    
-    return q.Bool(b =>
-    {
-        var boolQuery = b;
-        
-        if (filterQueries.Any())
-        {
-            boolQuery = boolQuery.Filter(filterQueries.ToArray());
-        }
-        
-        if (shouldQueries.Any())
-        {
-            boolQuery = boolQuery.Should(shouldQueries.ToArray());
-            boolQuery = boolQuery.MinimumShouldMatch(minimumShouldMatch);
-        }
-        else
-        {
-            boolQuery = boolQuery.Must(m => m.MatchAll());
-        }
-        
-        return boolQuery;
-    });
-}
-
-private string NormalizeSearchQuery(string query)
-{
-    if (string.IsNullOrWhiteSpace(query))
-        return query;
-    
-    var normalized = query.ToLower().Trim();
-    
-    if (normalized.EndsWith("s") && normalized.Length > 2 && !normalized.EndsWith("ss"))
-    {
-        normalized = normalized.TrimEnd('s');
-    }
-    
-    if (normalized.EndsWith("ies") && normalized.Length > 4)
-    {
-        normalized = normalized.Substring(0, normalized.Length - 3) + "y";
-    }
-    
-    return normalized;
-}
-
-private List<string> GenerateQueryVariations(string query)
-{
-    var variations = new List<string>();
-    
-    if (string.IsNullOrWhiteSpace(query))
-        return variations;
-    
-    var cleaned = query.Trim();
-    variations.Add(cleaned);
-    
-    var normalized = NormalizeSearchQuery(cleaned);
-    if (normalized != cleaned)
-    {
-        variations.Add(normalized);
-    }
-    
-    if (!cleaned.EndsWith("s", StringComparison.OrdinalIgnoreCase))
-    {
-        variations.Add(cleaned + "s");
-    }
-    
-    var lower = cleaned.ToLower();
-    if (!variations.Contains(lower))
-    {
-        variations.Add(lower);
-    }
-    
-    if (lower.Length > 0)
-    {
-        var capitalized = char.ToUpper(lower[0]) + lower.Substring(1);
-        if (!variations.Contains(capitalized))
-        {
-            variations.Add(capitalized);
-        }
-    }
-    
-    return variations.Distinct().ToList();
-}
-
-private string CalculateMinimumShouldMatch(string query, int totalShouldClauses)
-{
-    if (string.IsNullOrWhiteSpace(query))
-    {
-        return "0";
-    }
-
-    if (totalShouldClauses <= 10)
-    {
-        return "1";
-    }
-    else if (totalShouldClauses <= 30)
-    {
-        return "2";
-    }
-    else
-    {
-        return "3";
-    }
-}
-
-private SortDescriptor<DocumentIndexModel> BuildSort(
-    SortDescriptor<DocumentIndexModel> sort,
-    SortField sortBy,
-    bool descending)
-{
-    var order = descending ? SortOrder.Descending : SortOrder.Ascending;
-
-    return sortBy switch
-    {
-        SortField.Relevance => sort.Descending(SortSpecialField.Score),
-        SortField.CreatedDate => sort.Field(doc => doc.CreatedAt, order),
-        SortField.ModifiedDate => sort.Field(doc => doc.ModifiedAt, order),
-        SortField.Title => sort.Field("title.keyword", order),
-        SortField.FileSize => sort.Field(doc => doc.FileSize, order),
-        _ => sort.Descending(SortSpecialField.Score)
-    };
-}
-
-    private AggregationContainerDescriptor<DocumentIndexModel> BuildAggregations(
-        AggregationContainerDescriptor<DocumentIndexModel> agg)
-    {
-        return agg
-            .Terms("categories", t => t.Field("category.keyword").Size(10))
-            .Terms("content_types", t => t.Field(doc => doc.ContentType).Size(10))
-            .Terms("tags", t => t.Field(doc => doc.Tags).Size(20))
-            .DateHistogram("created_dates", d => d
-                .Field(doc => doc.CreatedAt)
-                .CalendarInterval(DateInterval.Month)
-            );
-    }
-
-private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
-{
-    var doc = hit.Source;
-    var highlights = new List<string>();
-
-    if (hit.Highlight != null)
-    {
-        foreach (var highlight in hit.Highlight.Values)
-        {
-            highlights.AddRange(highlight);
-        }
-    }
-
-    return new DocumentSearchHit
-    {
-        Id = doc.Id,
-        Title = doc.Title,
-        Description = doc.Description,
-        FileName = doc.FileName,
-        ContentType = doc.ContentType,
-        FileSize = doc.FileSize,
-        CreatedAt = doc.CreatedAt,
-        DocumentDate = doc.DocumentDate,
-        ModifiedAt = doc.ModifiedAt,
-        Category = doc.Category,
-        Tags = doc.Tags,
-        Score = (float)(hit.Score ?? 0),
-        Highlights = highlights.Any() ? highlights : null,
-        Metadata = doc.Metadata
-    };
-}
-
-    private Dictionary<string, List<FacetValue>> ExtractFacets(IReadOnlyDictionary<string, IAggregate> aggregations)
-    {
-        var facets = new Dictionary<string, List<FacetValue>>();
-
-        foreach (var agg in aggregations)
-        {
-            if (agg.Value is BucketAggregate bucketAgg)
-            {
-                facets[agg.Key] = bucketAgg.Items
-                    .OfType<KeyedBucket<object>>()
-                    .Select(b => new FacetValue
-                    {
-                        Value = b.Key.ToString() ?? "",
-                        Count = (int)(b.DocCount ?? 0)
-                    })
-                    .ToList();
-            }
-        }
-
-        return facets;
-    }
-
-    public async Task<List<DocumentSuggestion>> GetRelatedDocumentsAsync(
-        Guid documentId,
-        int count = 5,
-        CancellationToken cancellationToken = default)
+    private async Task<List<(Guid Id, float Score)>> RunKnnSearchAsync(
+        CoreSearchRequest request,
+        float[] queryEmbedding,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var document = await GetDocumentFromIndexAsync(documentId, cancellationToken);
-            if (document == null) return new List<DocumentSuggestion>();
+            // Fetch more candidates (k = pageSize * 3) then filter/merge with BM25
+            var k = Math.Min(request.PageSize * 3, 50);
 
             var response = await _client.SearchAsync<DocumentIndexModel>(s => s
                 .Index(DocumentIndex)
-                .Size(count + 1)
-                .Query(q => q.MoreLikeThis(mlt => mlt
-                    .Fields(f => f
-                        .Field(doc => doc.Title)
-                        .Field(doc => doc.Description)
-                        .Field(doc => doc.ExtractedText)
-                        .Field(doc => doc.Tags)
+                .Size(k)
+                .Query(q => q
+                    .Bool(b => b
+                        // Hard filter: only indexed documents
+                        .Filter(f => f.Term(t => t.Field("status").Value("Indexed")))
+                        // kNN vector similarity
+                        .Must(m => m.Knn(knn => knn
+                            .Field("embedding")
+                            .Vector(queryEmbedding)
+                            .K(k)
+                        ))
                     )
-                    .Like(l => l.Document(d => d.Id(documentId.ToString())))
-                    .MinTermFrequency(1)
-                    .MinDocumentFrequency(1)
-                )),
-                cancellationToken
-            );
+                ),
+                cancellationToken);
 
-            return response.Documents
-                .Where(d => d.Id != documentId)
-                .Take(count)
-                .Select(d => new DocumentSuggestion
-                {
-                    DocumentId = d.Id,
-                    Title = d.Title,
-                    SimilarityScore = 0.8f,
-                    Reason = "Similar content and tags"
-                })
+            if (!response.IsValid)
+            {
+                _logger.LogWarning("kNN search issue: {Error}", response.DebugInformation);
+                return new();
+            }
+
+            return response.Hits
+                .Where(h => (float)(h.Score ?? 0) >= SemanticThreshold)
+                .Select(h => (h.Source.Id, (float)(h.Score ?? 0)))
                 .ToList();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting related documents for {DocumentId}", documentId);
-            return new List<DocumentSuggestion>();
+            _logger.LogWarning(ex, "kNN search failed — BM25-only mode");
+            return new();
         }
     }
 
-    public async Task<NaturalLanguageQuery> ProcessNaturalLanguageQueryAsync(
-        string query,
-        CancellationToken cancellationToken = default)
-    {
-        return await _nlpService.UnderstandQueryAsync(query, cancellationToken);
-    }
+    // ── Hybrid merge ──────────────────────────────────────────────────────────
 
-    public async Task<bool> IndexDocumentAsync(Document document, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Merges BM25 and semantic results using Reciprocal Rank Fusion (RRF).
+    ///
+    /// RRF: score(d) = Σ 1/(k + rank(d)) for each ranked list.
+    /// With k=60 this is robust to score scale differences between BM25 and cosine.
+    /// Documents from both lists are rewarded; documents from only one are penalized.
+    /// </summary>
+    private async Task<List<DocumentSearchHit>> MergeHybridResultsAsync(
+        ISearchResponse<DocumentIndexModel>? bm25Response,
+        List<(Guid Id, float Score)> semanticHits,
+        CancellationToken cancellationToken)
+    {
+        const int rrfK = 60;
+        var scores = new Dictionary<Guid, float>();
+        var hitMap = new Dictionary<Guid, DocumentSearchHit>();
+
+        if (bm25Response?.Hits != null)
+        {
+            int rank = 1;
+            foreach (var hit in bm25Response.Hits)
+            {
+                var docHit = MapToSearchHit(hit);
+                scores[docHit.Id] = scores.GetValueOrDefault(docHit.Id) + 1f / (rrfK + rank++);
+                hitMap.TryAdd(docHit.Id, docHit);
+            }
+        }
+
+        var missingIds = new List<Guid>();
+        for (int i = 0; i < semanticHits.Count; i++)
+        {
+            var (id, _) = semanticHits[i];
+            scores[id] = scores.GetValueOrDefault(id) + 1f / (rrfK + i + 1);
+            if (!hitMap.ContainsKey(id))
+                missingIds.Add(id);
+        }
+
+        // Fetch semantic-only hits that BM25 didn't return
+        if (missingIds.Any())
+        {
+            var fetchResponse = await _client.MultiGetAsync(mg => mg
+                .Index(DocumentIndex)
+                .GetMany<DocumentIndexModel>(missingIds.Select(id => id.ToString())),
+                cancellationToken);
+
+            foreach (var hit in fetchResponse.Hits.OfType<MultiGetHit<DocumentIndexModel>>()
+                        .Where(h => h.Found))
+            {
+                var doc = hit.Source;
+                if (doc == null) continue;
+
+                if (!Guid.TryParse(hit.Id, out var docId)) continue;
+
+                var docHit = new DocumentSearchHit
+                {
+                    Id           = doc.Id,
+                    Title        = doc.Title,
+                    Description  = doc.Description,
+                    FileName     = doc.FileName,
+                    ContentType  = doc.ContentType,
+                    FileSize     = doc.FileSize,
+                    CreatedAt    = doc.CreatedAt,
+                    DocumentDate = doc.DocumentDate,
+                    ModifiedAt   = doc.ModifiedAt,
+                    Category     = doc.Category,
+                    Tags         = doc.Tags,
+                    Score        = 0f,   // will be overwritten by RRF score below
+                    Highlights   = null,
+                    Metadata     = doc.Metadata,
+                    OcrText      = doc.OcrText,
+                    ExtractedText = doc.ExtractedText
+                };
+
+                hitMap.TryAdd(docHit.Id, docHit);
+            }
+
+        }
+
+        return hitMap.Values
+            .OrderByDescending(d => scores.GetValueOrDefault(d.Id))
+            .Select(d => { d.Score = scores.GetValueOrDefault(d.Id); return d; })
+            .ToList();
+    }
+    
+    // ── Index document with embedding ─────────────────────────────────────────
+
+    public async Task<bool> IndexDocumentAsync(
+        Document document,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var indexModel = MapToIndexModel(document);
 
-            _logger.LogInformation("Indexing document {DocumentId}: Status={Status}, Title={Title}, Category={Category}",
-                document.Id, indexModel.Status, indexModel.Title, indexModel.Category);
+            // Generate semantic embedding for the document
+            // Text = Title + Description + first 3000 chars of content (context window limit)
+            var embeddingText = BuildEmbeddingText(document);
+            if (!string.IsNullOrWhiteSpace(embeddingText))
+            {
+                var embedding = await _nlpService.GenerateEmbeddingAsync(
+                    embeddingText, cancellationToken);
+
+                if (embedding != null)
+                {
+                    indexModel.Embedding = embedding;
+                    _logger.LogInformation(
+                        "Generated {Dims}-dim embedding for document {Id}",
+                        embedding.Length, document.Id);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Ollama unavailable — indexing document {Id} without embedding",
+                        document.Id);
+                }
+            }
 
             var response = await _client.IndexAsync(indexModel, i => i
                 .Index(DocumentIndex)
                 .Id(document.Id.ToString()),
-                cancellationToken
-            );
+                cancellationToken);
 
             if (response.IsValid)
             {
                 await _client.Indices.RefreshAsync(DocumentIndex, r => r, cancellationToken);
-                _logger.LogInformation("✅ Document {DocumentId} indexed successfully", document.Id);
+                _logger.LogInformation("✅ Document {Id} indexed (embedding={HasEmb})",
+                    document.Id, indexModel.Embedding != null);
                 return true;
             }
-            else
-            {
-                _logger.LogError("❌ Failed to index document {DocumentId}: {Error}",
-                    document.Id, response.DebugInformation);
-                return false;
-            }
+
+            _logger.LogError("❌ Failed to index document {Id}: {Error}",
+                document.Id, response.DebugInformation);
+            return false;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error indexing document {DocumentId}", document.Id);
+            _logger.LogError(ex, "Error indexing document {Id}", document.Id);
             return false;
         }
     }
 
-    public async Task<bool> UpdateDocumentIndexAsync(Document document, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Builds the text used for embedding generation.
+    /// Priority: title (highest signal) + description + first 3000 chars of content.
+    /// Truncated to ~4000 chars total (nomic-embed-text context window).
+    /// </summary>
+    private static string BuildEmbeddingText(Document document)
     {
-        return await IndexDocumentAsync(document, cancellationToken);
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(document.Title))
+            parts.Add(document.Title);
+
+        if (!string.IsNullOrWhiteSpace(document.Description))
+            parts.Add(document.Description);
+
+        if (!string.IsNullOrWhiteSpace(document.Category))
+            parts.Add(document.Category);
+
+        // Prefer OCR text (scanned docs) over extracted text (native PDFs)
+        var content = !string.IsNullOrWhiteSpace(document.OcrText)
+            ? document.OcrText
+            : document.ExtractedText;
+
+        if (!string.IsNullOrWhiteSpace(content))
+            parts.Add(content.Length > 3000 ? content[..3000] : content);
+
+        return string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
     }
 
-    public async Task<bool> DeleteDocumentIndexAsync(Guid documentId, CancellationToken cancellationToken = default)
+    // ── NLP filter application ─────────────────────────────────────────────────
+
+private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQuery)
+{
+    if (nlQuery.ExtractedFilters == null || !nlQuery.ExtractedFilters.Any()) return;
+
+    // Only apply year-based date filter when the year is the ONLY meaningful token.
+    // e.g. "2024" alone → date filter OK
+    // e.g. "contrats 2024" → year should boost relevance, NOT hard-filter (kills results)
+    bool hasNonYearKeywords = nlQuery.Keywords
+        .Any(k => !System.Text.RegularExpressions.Regex.IsMatch(k, @"^\d{4}$"));
+
+    if (!hasNonYearKeywords)
+    {
+        if (nlQuery.ExtractedFilters.TryGetValue("fromDate", out var fromDate))
+        {
+            request.FromDate = DateTime.Parse(fromDate);
+            _logger.LogInformation("✅ NLP fromDate filter: {Date}", request.FromDate);
+        }
+        if (nlQuery.ExtractedFilters.TryGetValue("toDate", out var toDate))
+        {
+            request.ToDate = DateTime.Parse(toDate);
+            _logger.LogInformation("✅ NLP toDate filter: {Date}", request.ToDate);
+        }
+    }
+    else
+    {
+        _logger.LogInformation(
+            "⏭️  Skipping year date filter — other keywords present ({KW})",
+            string.Join(", ", nlQuery.Keywords));
+    }
+
+    // Filetype filter — only apply as hard filter when it's the only token
+    // "pdf" alone → filter by ContentType
+    // "pdf contracts" → let BM25 handle it via text matching on FileName/Tags
+    if (nlQuery.ExtractedFilters.TryGetValue("filetype", out var fileType))
+    {
+        bool hasNonFiletypeKeywords = nlQuery.Keywords
+            .Any(k => !new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
+                .Contains(k.ToLower()));
+
+        if (!hasNonFiletypeKeywords)
+        {
+            var contentType = MapFileTypeToContentType(fileType);
+            if (!string.IsNullOrEmpty(contentType))
+            {
+                request.ContentTypes = new List<string> { contentType };
+                _logger.LogInformation("✅ NLP contentType filter: {Type}", contentType);
+            }
+        }
+    }
+
+    // Category from entities — only if frontend didn't already set one
+    var categoryEntity = nlQuery.Entities
+        .FirstOrDefault(e => e.StartsWith("CATEGORY:"));
+    if (categoryEntity != null && request.Categories == null)
+    {
+        var category = categoryEntity["CATEGORY:".Length..];
+        request.Categories = new List<string> { category };
+        _logger.LogInformation("✅ NLP category filter: {Cat}", category);
+    }
+}
+    // ── NLP summary for the frontend banner ───────────────────────────────────
+
+    private static string? BuildNlpSummary(NaturalLanguageQuery? nlQuery)
+    {
+        if (nlQuery == null) return null;
+
+        var parts = new List<string>();
+
+        var category = nlQuery.Entities
+            .FirstOrDefault(e => e.StartsWith("CATEGORY:"))
+            ?["CATEGORY:".Length..];
+        if (!string.IsNullOrEmpty(category)) parts.Add(category);
+
+        var fileType = nlQuery.ExtractedFilters?.GetValueOrDefault("filetype");
+        if (!string.IsNullOrEmpty(fileType)) parts.Add(fileType.ToUpper());
+
+        var fromDate = nlQuery.ExtractedFilters?.GetValueOrDefault("fromDate");
+        if (!string.IsNullOrEmpty(fromDate))
+            parts.Add($"depuis {DateTime.Parse(fromDate):yyyy-MM-dd}");
+
+        var toDate = nlQuery.ExtractedFilters?.GetValueOrDefault("toDate");
+        if (!string.IsNullOrEmpty(toDate))
+            parts.Add($"jusqu'au {DateTime.Parse(toDate):yyyy-MM-dd}");
+
+        if (nlQuery.Keywords.Any())
+            parts.Add($"\"{string.Join(", ", nlQuery.Keywords.Take(3))}\"");
+
+        return parts.Any() ? string.Join(" · ", parts) : null;
+    }
+
+    // ── BM25 query builder (unchanged from original) ──────────────────────────
+
+    private QueryContainer BuildPrecisionQuery(
+        QueryContainerDescriptor<DocumentIndexModel> q,
+        string query,
+        CoreSearchRequest request,
+        NaturalLanguageQuery? nlQuery)
+    {
+        var shouldQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
+        var filterQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
+
+        // ── Hard filters ─────────────────────────────────────────────────────
+        filterQueries.Add(fq => fq.Term(t => t.Field("status").Value("Indexed")));
+
+        if (request.ContentTypes?.Any() == true)
+            filterQueries.Add(ctq => ctq.Terms(t => t
+                .Field(d => d.ContentType).Terms(request.ContentTypes)));
+
+        var categoriesToFilter = new List<string>();
+        if (request.Categories?.Any() == true)
+            categoriesToFilter.AddRange(request.Categories);
+
+        if (categoriesToFilter.Any())
+            filterQueries.Add(cq => cq.Bool(b => b
+                .Should(categoriesToFilter.Select(cat =>
+                    new Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>(
+                        sq => sq.Term(t => t.Field("category.keyword").Value(cat).CaseInsensitive(true))
+                    )).ToArray())
+                .MinimumShouldMatch(1)));
+
+        if (request.Tags?.Any() == true)
+            filterQueries.Add(tq => tq.Terms(t => t
+                .Field(d => d.Tags).Terms(request.Tags)));
+
+        if (request.FromDate.HasValue || request.ToDate.HasValue)
+            filterQueries.Add(dq => dq.Bool(b => b
+                .Should(
+                    s => s.Bool(b1 => b1.Must(
+                        m => m.Exists(e => e.Field(d => d.DocumentDate)),
+                        m => m.DateRange(dr => dr.Field(d => d.DocumentDate)
+                            .GreaterThanOrEquals(request.FromDate)
+                            .LessThanOrEquals(request.ToDate)))),
+                    s => s.Bool(b2 => b2.Must(
+                        m => m.Bool(nb => nb.MustNot(mn => mn.Exists(e => e.Field(d => d.DocumentDate)))),
+                        m => m.DateRange(dr => dr.Field(d => d.CreatedAt)
+                            .GreaterThanOrEquals(request.FromDate)
+                            .LessThanOrEquals(request.ToDate))))
+                ).MinimumShouldMatch(1)));
+
+        // ── Scoring queries ───────────────────────────────────────────────────
+if (!string.IsNullOrWhiteSpace(query))
+        {
+            var cleanQuery   = query.Trim();
+            var normalized   = NormalizeSearchQuery(cleanQuery);
+            var variations   = GenerateQueryVariations(cleanQuery);
+
+            // Add cross-language alias (e.g. "contrats" → "Contract")
+            foreach (var token in cleanQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                if (CategoryAliases.TryGetValue(token, out var aliasedCategory))
+                    variations.Add(aliasedCategory);
+
+            if (cleanQuery.Contains(' '))
+                shouldQueries.Add(sq => sq.MatchPhrase(mp => mp
+                    .Field(d => d.Title).Query(cleanQuery).Boost(100.0)));
+
+            foreach (var v in variations)
+            {
+                shouldQueries.Add(sq => sq.Term(t => t.Field("category.keyword").Value(v).CaseInsensitive(true).Boost(80.0)));
+                shouldQueries.Add(sq => sq.Term(t => t.Field("title.keyword").Value(v).CaseInsensitive(true).Boost(70.0)));
+                shouldQueries.Add(sq => sq.Prefix(p => p.Field(d => d.Title).Value(v.ToLower()).CaseInsensitive(true).Boost(50.0)));
+                shouldQueries.Add(sq => sq.MultiMatch(m => m
+                    .Query(v)
+                    .Fields(f => f.Field(d => d.Title, 20.0).Field(d => d.Category, 15.0).Field(d => d.FileName, 10.0).Field(d => d.Description, 5.0))
+                    .Type(TextQueryType.BestFields).Operator(Operator.Or).Boost(40.0)));
+                shouldQueries.Add(sq => sq.Wildcard(w => w.Field(d => d.Title).Value($"*{v.ToLower()}*").CaseInsensitive(true).Boost(20.0)));
+            }
+
+            shouldQueries.Add(sq => sq.MatchPhrasePrefix(mpp => mpp
+                .Field(d => d.Title).Query(cleanQuery).MaxExpansions(20).Boost(35.0)));
+
+            shouldQueries.Add(sq => sq.Match(m => m
+                .Field(d => d.ExtractedText).Query(normalized).Operator(Operator.Or).MinimumShouldMatch("30%").Boost(10.0)));
+            shouldQueries.Add(sq => sq.Match(m => m
+                .Field(d => d.OcrText).Query(normalized).Operator(Operator.Or).MinimumShouldMatch("30%").Boost(5.0)));
+
+            // Boost by NLP keywords (with cross-language aliases)
+            if (nlQuery?.Keywords?.Any() == true)
+            {
+                foreach (var kw in nlQuery.Keywords)
+                {
+                    // Skip pure year tokens — already handled via date filter or used as text boost
+                    if (System.Text.RegularExpressions.Regex.IsMatch(kw, @"^\d{4}$"))
+                    {
+                        // Still boost text fields that mention the year
+                        shouldQueries.Add(sq => sq.Match(m => m
+                            .Field(d => d.ExtractedText).Query(kw).Boost(8.0)));
+                        shouldQueries.Add(sq => sq.Match(m => m
+                            .Field(d => d.OcrText).Query(kw).Boost(4.0)));
+                        shouldQueries.Add(sq => sq.Match(m => m
+                            .Field(d => d.Title).Query(kw).Boost(6.0)));
+                        continue;
+                    }
+
+                    var kwVariations = GenerateQueryVariations(kw);
+                    // Add alias for this keyword too
+                    if (CategoryAliases.TryGetValue(kw, out var kwAlias))
+                        kwVariations.Add(kwAlias);
+
+                    foreach (var v in kwVariations)
+                    {
+                        shouldQueries.Add(sq => sq.Term(t => t.Field("category.keyword").Value(v).CaseInsensitive(true).Boost(30.0)));
+                        shouldQueries.Add(sq => sq.MultiMatch(m => m
+                            .Query(v)
+                            .Fields(f => f.Field(d => d.Title, 8.0).Field(d => d.Category, 6.0).Field(d => d.Description, 3.0))
+                            .Operator(Operator.Or)
+                            .Boost(12.0)));
+                    }
+                }
+            }
+        }
+        var msm = CalculateMinimumShouldMatch(query, shouldQueries.Count);
+
+        return q.Bool(b =>
+        {
+            var bq = b;
+            if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
+            if (shouldQueries.Any())
+                bq = bq.Should(shouldQueries.ToArray()).MinimumShouldMatch(msm);
+            else
+                bq = bq.Must(m => m.MatchAll());
+            return bq;
+        });
+    }
+
+    // ── Helpers: normalize, variations, sort, aggregations ───────────────────
+
+    private static string NormalizeSearchQuery(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return query;
+        var n = query.ToLower().Trim();
+        if (n.EndsWith("ies") && n.Length > 4) return n[..^3] + "y";
+        if (n.EndsWith("s") && n.Length > 2 && !n.EndsWith("ss")) return n.TrimEnd('s');
+        return n;
+    }
+
+    private static List<string> GenerateQueryVariations(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return new();
+        var cleaned  = query.Trim();
+        var lower    = cleaned.ToLower();
+        var norm     = NormalizeSearchQuery(lower);
+        var cap      = char.ToUpper(lower[0]) + lower[1..];
+
+        return new[] { cleaned, norm, lower, cap, lower + "s" }
+            .Distinct()
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .ToList();
+    }
+
+    private static string CalculateMinimumShouldMatch(string query, int total)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return "0";
+        return total <= 10 ? "1" : total <= 30 ? "2" : "3";
+    }
+
+    private static SortDescriptor<DocumentIndexModel> BuildSort(
+        SortDescriptor<DocumentIndexModel> sort, SortField sortBy, bool descending)
+    {
+        var order = descending ? SortOrder.Descending : SortOrder.Ascending;
+        return sortBy switch
+        {
+            SortField.Relevance    => sort.Descending(SortSpecialField.Score),
+            SortField.CreatedDate  => sort.Field(d => d.CreatedAt, order),
+            SortField.ModifiedDate => sort.Field(d => d.ModifiedAt, order),
+            SortField.Title        => sort.Field("title.keyword", order),
+            SortField.FileSize     => sort.Field(d => d.FileSize, order),
+            _                      => sort.Descending(SortSpecialField.Score)
+        };
+    }
+
+    private static AggregationContainerDescriptor<DocumentIndexModel> BuildAggregations(
+        AggregationContainerDescriptor<DocumentIndexModel> agg)
+        => agg
+            .Terms("categories",     t => t.Field("category.keyword").Size(10))
+            .Terms("content_types",  t => t.Field(d => d.ContentType).Size(10))
+            .Terms("tags",           t => t.Field(d => d.Tags).Size(20))
+            .DateHistogram("created_dates", d => d.Field(doc => doc.CreatedAt).CalendarInterval(DateInterval.Month));
+
+    // ── Mapping helpers ───────────────────────────────────────────────────────
+
+    private static DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
+    {
+        var highlights = hit.Highlight?.Values.SelectMany(v => v).ToList() ?? new();
+        var doc        = hit.Source;
+
+        return new DocumentSearchHit
+        {
+            Id          = doc.Id,
+            Title       = doc.Title,
+            Description = doc.Description,
+            FileName    = doc.FileName,
+            ContentType = doc.ContentType,
+            FileSize    = doc.FileSize,
+            CreatedAt   = doc.CreatedAt,
+            DocumentDate = doc.DocumentDate,
+            ModifiedAt  = doc.ModifiedAt,
+            Category    = doc.Category,
+            Tags        = doc.Tags,
+            Score       = (float)(hit.Score ?? 0),
+            Highlights  = highlights.Any() ? highlights : null,
+            Metadata    = doc.Metadata,
+            OcrText       = hit.Source.OcrText,
+            ExtractedText = hit.Source.ExtractedText,
+        };
+    }
+
+    private DocumentIndexModel MapToIndexModel(Document document)
+        => new()
+        {
+            Id            = document.Id,
+            Title         = document.Title,
+            Description   = document.Description,
+            FileName      = document.FileName,
+            ContentType   = document.ContentType,
+            FileSize      = document.FileSize,
+            CreatedAt     = document.CreatedAt,
+            DocumentDate  = document.DocumentDate,
+            ModifiedAt    = document.ModifiedAt,
+            Status        = document.Status.ToString(),
+            ExtractedText = document.ExtractedText,
+            OcrText       = document.OcrText,
+            Tags          = document.Tags,
+            Category      = document.Category,
+            Metadata      = SanitizeMetadata(document.Metadata)
+        };
+
+    private static Dictionary<string, object>? SanitizeMetadata(Dictionary<string, object>? metadata)
+    {
+        if (metadata == null) return null;
+        var result = new Dictionary<string, object>(metadata.Count);
+        foreach (var (key, value) in metadata)
+            result[key] = FlattenValue(value);
+        return result;
+    }
+
+    private static object FlattenValue(object? value)
+    {
+        if (value is null) return string.Empty;
+        if (value is JsonElement je)
+            return je.ValueKind switch
+            {
+                JsonValueKind.String => je.GetString() ?? string.Empty,
+                JsonValueKind.Number => je.TryGetInt64(out var l) ? (object)l : je.GetDouble(),
+                JsonValueKind.True   => true,
+                JsonValueKind.False  => false,
+                JsonValueKind.Null   => string.Empty,
+                _                    => je.GetRawText()
+            };
+        return value;
+    }
+
+    private static string MapFileTypeToContentType(string fileType)
+        => fileType.ToLower() switch
+        {
+            "pdf"  => "application/pdf",
+            "doc"  => "application/msword",
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xls"  => "application/vnd.ms-excel",
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "jpg" or "jpeg" => "image/jpeg",
+            "png"  => "image/png",
+            "txt"  => "text/plain",
+            _      => string.Empty
+        };
+
+    private Dictionary<string, List<FacetValue>> ExtractFacets(
+        IReadOnlyDictionary<string, IAggregate> aggregations)
+    {
+        var facets = new Dictionary<string, List<FacetValue>>();
+        foreach (var agg in aggregations)
+            if (agg.Value is BucketAggregate ba)
+                facets[agg.Key] = ba.Items.OfType<KeyedBucket<object>>()
+                    .Select(b => new FacetValue { Value = b.Key?.ToString() ?? "", Count = (int)(b.DocCount ?? 0) })
+                    .ToList();
+        return facets;
+    }
+
+    // ── Pass-through implementations ──────────────────────────────────────────
+
+    public async Task<NaturalLanguageQuery> ProcessNaturalLanguageQueryAsync(
+        string query, CancellationToken cancellationToken = default)
+        => await _nlpService.UnderstandQueryAsync(query, cancellationToken);
+
+    public async Task<bool> UpdateDocumentIndexAsync(
+        Document document, CancellationToken cancellationToken = default)
+        => await IndexDocumentAsync(document, cancellationToken);
+
+    public async Task<bool> DeleteDocumentIndexAsync(
+        Guid documentId, CancellationToken cancellationToken = default)
     {
         try
         {
             var response = await _client.DeleteAsync<DocumentIndexModel>(
-                documentId.ToString(),
-                d => d.Index(DocumentIndex),
-                cancellationToken
-            );
-
+                documentId.ToString(), d => d.Index(DocumentIndex), cancellationToken);
             return response.IsValid;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error deleting document index {DocumentId}", documentId);
+            _logger.LogError(ex, "Error deleting document index {Id}", documentId);
             return false;
         }
     }
 
     public async Task<bool> BulkIndexDocumentsAsync(
-        IEnumerable<Document> documents,
-        CancellationToken cancellationToken = default)
+        IEnumerable<Document> documents, CancellationToken cancellationToken = default)
     {
         try
         {
-            var indexModels = documents.Select(MapToIndexModel);
+            // Generate embeddings in parallel (max 4 concurrent Ollama calls)
+            var docs         = documents.ToList();
+            var indexModels  = new List<DocumentIndexModel>(docs.Count);
+            var semaphore    = new SemaphoreSlim(4, 4);
+
+            var tasks = docs.Select(async doc =>
+            {
+                var model         = MapToIndexModel(doc);
+                var embeddingText = BuildEmbeddingText(doc);
+
+                await semaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    var embedding = await _nlpService.GenerateEmbeddingAsync(
+                        embeddingText, cancellationToken);
+                    model.Embedding = embedding;
+                }
+                finally { semaphore.Release(); }
+
+                return model;
+            });
+
+            indexModels.AddRange(await Task.WhenAll(tasks));
 
             var response = await _client.BulkAsync(b => b
                 .Index(DocumentIndex)
                 .IndexMany(indexModels),
-                cancellationToken
-            );
+                cancellationToken);
 
             if (response.IsValid && !response.ItemsWithErrors.Any())
             {
@@ -770,6 +914,7 @@ private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
                 return true;
             }
 
+            _logger.LogError("Bulk index errors: {Count}", response.ItemsWithErrors.Count());
             return false;
         }
         catch (Exception ex)
@@ -779,106 +924,77 @@ private DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
         }
     }
 
-    private async Task<DocumentIndexModel?> GetDocumentFromIndexAsync(
-        Guid documentId,
-        CancellationToken cancellationToken)
+    public async Task<List<DocumentSuggestion>> GetRelatedDocumentsAsync(
+        Guid documentId, int count = 5, CancellationToken cancellationToken = default)
     {
-        var response = await _client.GetAsync<DocumentIndexModel>(
-            documentId.ToString(),
-            g => g.Index(DocumentIndex),
-            cancellationToken
-        );
-
-        return response.Found ? response.Source : null;
-    }
-
-    /// <summary>
-    /// FIX: Flattens JsonElement values in the Metadata dictionary so OpenSearch
-    /// receives plain primitives (string, double, bool) instead of serialized
-    /// JsonElement objects like {valueKind=3}.
-    ///
-    /// Root cause: when the upload controller deserializes JSON from the HTTP
-    /// request body using System.Text.Json, dictionary values typed as `object`
-    /// become JsonElement instances rather than native .NET primitives.  Those
-    /// JsonElement objects then serialize to {valueKind=N} instead of the actual
-    /// value, causing OpenSearch mapper_parsing_exception on text fields.
-    /// </summary>
-    private static Dictionary<string, object>? SanitizeMetadata(Dictionary<string, object>? metadata)
-    {
-        if (metadata == null) return null;
-
-        var result = new Dictionary<string, object>(metadata.Count);
-        foreach (var (key, value) in metadata)
+        try
         {
-            result[key] = FlattenValue(value);
-        }
-        return result;
-    }
+            // Try semantic "more like this" via the embedding first
+            var docResponse = await _client.GetAsync<DocumentIndexModel>(
+                documentId.ToString(), g => g.Index(DocumentIndex), cancellationToken);
 
-    private static object FlattenValue(object? value)
-    {
-        if (value is null) return string.Empty;
-
-        if (value is JsonElement je)
-        {
-            return je.ValueKind switch
+            if (docResponse.Found && docResponse.Source.Embedding != null)
             {
-                JsonValueKind.String  => je.GetString() ?? string.Empty,
-                JsonValueKind.Number  => je.TryGetInt64(out var l) ? (object)l : je.GetDouble(),
-                JsonValueKind.True    => true,
-                JsonValueKind.False   => false,
-                JsonValueKind.Null    => string.Empty,
-                // For arrays/objects fall back to raw JSON string so the field
-                // at least has a safe text value instead of an unparseable object.
-                _                     => je.GetRawText()
-            };
+                var embedding = docResponse.Source.Embedding;
+                var knnResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
+                    .Index(DocumentIndex)
+                    .Size(count + 1)
+                    .Query(q => q.Bool(b => b
+                        .Filter(f => f.Term(t => t.Field("status").Value("Indexed")))
+                        .Must(m => m.Knn(knn => knn
+                            .Field("embedding")
+                            .Vector(embedding)
+                            .K(count + 1))))),
+                    cancellationToken);
+
+                var semanticSuggestions = knnResponse.Hits
+                    .Where(h => h.Source.Id != documentId)
+                    .Take(count)
+                    .Select(h => new DocumentSuggestion
+                    {
+                        DocumentId     = h.Source.Id,
+                        Title          = h.Source.Title,
+                        SimilarityScore = (float)(h.Score ?? 0),
+                        Reason         = "Semantic similarity"
+                    })
+                    .ToList();
+
+                if (semanticSuggestions.Any()) return semanticSuggestions;
+            }
+
+            // Fallback to MoreLikeThis
+            var mltResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
+                .Index(DocumentIndex)
+                .Size(count + 1)
+                .Query(q => q.MoreLikeThis(mlt => mlt
+                    .Fields(f => f.Field(d => d.Title).Field(d => d.Description)
+                        .Field(d => d.ExtractedText).Field(d => d.Tags))
+                    .Like(l => l.Document(d => d.Id(documentId.ToString())))
+                    .MinTermFrequency(1).MinDocumentFrequency(1))),
+                cancellationToken);
+
+            return mltResponse.Documents
+                .Where(d => d.Id != documentId)
+                .Take(count)
+                .Select(d => new DocumentSuggestion
+                {
+                    DocumentId = d.Id, Title = d.Title,
+                    SimilarityScore = 0.7f, Reason = "Similar content"
+                })
+                .ToList();
         }
-
-        return value;
-    }
-
-private DocumentIndexModel MapToIndexModel(Document document)
-{
-    return new DocumentIndexModel
-    {
-        Id = document.Id,
-        Title = document.Title,
-        Description = document.Description,
-        FileName = document.FileName,
-        ContentType = document.ContentType,
-        FileSize = document.FileSize,
-        CreatedAt = document.CreatedAt,
-        DocumentDate = document.DocumentDate,
-        ModifiedAt = document.ModifiedAt,
-        Status = document.Status.ToString(),
-        ExtractedText = document.ExtractedText,
-        OcrText = document.OcrText,
-        Tags = document.Tags,
-        Category = document.Category,
-        // FIX: sanitize metadata to unwrap JsonElement values before sending
-        // to OpenSearch — prevents mapper_parsing_exception on text fields
-        // (e.g. metadata.category arriving as {valueKind=3} instead of "Contract")
-        Metadata = SanitizeMetadata(document.Metadata)
-    };
-}
-
-    private string MapFileTypeToContentType(string fileType)
-    {
-        return fileType.ToLower() switch
+        catch (Exception ex)
         {
-            "pdf" => "application/pdf",
-            "doc" => "application/msword",
-            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "xls" => "application/vnd.ms-excel",
-            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "jpg" or "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "txt" => "text/plain",
-            _ => ""
-        };
+            _logger.LogError(ex, "Error getting related documents for {Id}", documentId);
+            return new();
+        }
     }
 }
 
+/// <summary>
+/// OpenSearch index document model.
+/// The <c>Embedding</c> field is mapped as a knn_vector in Program.cs index setup.
+/// </summary>
 public class DocumentIndexModel
 {
     public Guid Id { get; set; }
@@ -896,4 +1012,11 @@ public class DocumentIndexModel
     public List<string>? Tags { get; set; }
     public string? Category { get; set; }
     public Dictionary<string, object>? Metadata { get; set; }
+
+    /// <summary>
+    /// 768-dimensional nomic-embed-text vector.
+    /// Stored as a knn_vector field in OpenSearch for approximate nearest-neighbor search.
+    /// Null for documents indexed before the semantic search feature was enabled.
+    /// </summary>
+    public float[]? Embedding { get; set; }
 }

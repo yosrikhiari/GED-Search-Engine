@@ -25,6 +25,7 @@ namespace GED.Infrastructure.Services;
 public class RagService : IRagService
 {
     private readonly ISearchService _searchService;
+    private readonly AuthService _authService;      // ← added
     private readonly HttpClient _httpClient;
     private readonly ILogger<RagService> _logger;
 
@@ -36,17 +37,19 @@ public class RagService : IRagService
 
     public RagService(
         ISearchService searchService,
+        AuthService authService,                    // ← added
         HttpClient httpClient,
         ILogger<RagService> logger,
         IConfiguration configuration)
     {
-        _searchService  = searchService;
-        _httpClient     = httpClient;
-        _logger         = logger;
-        _llmEndpoint    = configuration["NLP:LlmApiEndpoint"] ?? "http://localhost:11434/api/generate";
-        _llmModel       = configuration["NLP:Model"] ?? "llama3.2";
-        _enabled        = configuration.GetValue<bool>("NLP:Enabled", true);
-        _topK           = configuration.GetValue<int>("RAG:TopK", 5);
+        _searchService   = searchService;
+        _authService     = authService;             // ← added
+        _httpClient      = httpClient;
+        _logger          = logger;
+        _llmEndpoint     = configuration["NLP:LlmApiEndpoint"] ?? "http://localhost:11434/api/generate";
+        _llmModel        = configuration["NLP:Model"] ?? "llama3.2";
+        _enabled         = configuration.GetValue<bool>("NLP:Enabled", true);
+        _topK            = configuration.GetValue<int>("RAG:TopK", 5);
         _maxContextChars = configuration.GetValue<int>("RAG:MaxContextChars", 6000);
     }
 
@@ -85,6 +88,21 @@ public class RagService : IRagService
             FromDate           = request.FromDate,
             ToDate             = request.ToDate
         };
+        if (!string.IsNullOrEmpty(request.Username))
+        {
+            var allowedCategories = _authService.GetAllowedCategories(request.Username);
+
+            if (allowedCategories != null)   // null = Admin, sees everything
+            {
+                searchRequest.Categories = searchRequest.Categories == null
+                    ? allowedCategories                                          // no filter requested → apply ACL
+                    : searchRequest.Categories.Intersect(allowedCategories, StringComparer.OrdinalIgnoreCase).ToList();  // filter requested → keep only allowed subset
+
+                _logger.LogInformation(
+                    "RAG ACL applied for '{User}': categories restricted to [{Cats}]",
+                    request.Username, string.Join(", ", searchRequest.Categories));
+            }
+        }
 
         SearchResult searchResult;
         try
@@ -118,16 +136,20 @@ public class RagService : IRagService
 
         foreach (var doc in searchResult.Documents)
         {
-            // Extract the most relevant excerpt for this document
             var excerpt = ExtractBestExcerpt(doc);
             if (string.IsNullOrWhiteSpace(excerpt)) continue;
 
-            // Truncate excerpt if adding it would exceed context limit
             var remaining = _maxContextChars - charsUsed;
             if (remaining <= 100) break;
 
-            var truncated = excerpt.Length > remaining
-                ? excerpt[..remaining] + "…"
+            // Score-proportional budget: top result gets up to 60% of remaining space,
+            // lower results get progressively less
+            var scoreFraction = doc.Score > 0 ? Math.Min(doc.Score * 1.5f, 1.0f) : 0.5f;
+            var budget = (int)(remaining * scoreFraction);
+            budget = Math.Max(budget, 300); // minimum 300 chars per document
+
+            var truncated = excerpt.Length > budget
+                ? excerpt[..budget] + "…"
                 : excerpt;
 
             contextBuilder.AppendLine($"--- Document {sources.Count + 1}: {doc.Title} ---");
@@ -273,17 +295,25 @@ RÉPONSE :";
     /// Priority: highlights → extracted text → description.
     /// </summary>
     private static string ExtractBestExcerpt(DocumentSearchHit doc)
-    {
-        // Prefer search highlights (already relevant snippets)
-        if (doc.Highlights?.Any() == true)
-            return string.Join(" … ", doc.Highlights.Take(3));
+{
+    // 1. Prefer OpenSearch highlights (already query-relevant snippets)
+    if (doc.Highlights?.Any() == true)
+        return string.Join(" … ", doc.Highlights.Take(3));
 
-        // Fall back to description
-        if (!string.IsNullOrWhiteSpace(doc.Description))
-            return doc.Description;
+    // 2. Fall back to OCR text (scanned documents)
+    if (!string.IsNullOrWhiteSpace(doc.OcrText))
+        return doc.OcrText.Length > 2000 ? doc.OcrText[..2000] : doc.OcrText;
 
-        return string.Empty;
-    }
+    // 3. Fall back to extracted text (native PDFs, DOCX, etc.)
+    if (!string.IsNullOrWhiteSpace(doc.ExtractedText))
+        return doc.ExtractedText.Length > 2000 ? doc.ExtractedText[..2000] : doc.ExtractedText;
+
+    // 4. Last resort: description
+    if (!string.IsNullOrWhiteSpace(doc.Description))
+        return doc.Description;
+
+    return string.Empty;
+}
 
     /// <summary>
     /// Fallback answer when the LLM is unavailable — lists found documents.
