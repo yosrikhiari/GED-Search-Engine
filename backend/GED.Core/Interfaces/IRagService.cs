@@ -14,4 +14,10 @@ public interface IRagService
     /// Returns an AI-generated answer and the source documents used.
     /// </summary>
     Task<RagResponse> AskAsync(RagRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Streaming version of AskAsync.
+    /// Yields LLM tokens one by one via Server-Sent Events.
+    /// </summary>
+    IAsyncEnumerable<string> AskStreamAsync(RagRequest request, CancellationToken cancellationToken = default);
 }

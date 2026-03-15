@@ -48,6 +48,9 @@ public class RagResponse
     /// <summary>Total number of documents in the index that matched.</summary>
     public int TotalDocumentsSearched { get; set; }
 
+    /// <summary>True if retrieved chunks had sufficient confidence. False = low-confidence answer.</summary>
+    public bool IsConfident { get; set; } = true;
+
     /// <summary>LLM model used for generation.</summary>
     public string? ModelUsed { get; set; }
 }

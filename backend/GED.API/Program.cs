@@ -227,6 +227,7 @@ builder.Services.AddScoped<DocumentChunkingService>();
 
 // ── Auth Service ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<AuthService>();
+builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
 
 // ── Search pipeline ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<OpenSearchService>();

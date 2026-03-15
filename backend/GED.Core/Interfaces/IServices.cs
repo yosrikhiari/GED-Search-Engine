@@ -71,3 +71,12 @@ public interface IMessageQueueService
     Task PublishAsync<T>(string queueName, T message, CancellationToken cancellationToken = default);
     Task SubscribeAsync<T>(string queueName, Func<T, Task> handler, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// Provides ACL-based access control queries without coupling to AuthService implementation.
+/// </summary>
+public interface IUserContext
+{
+    List<string>? GetAllowedCategories(string username);
+    bool UserExists(string username);
+}

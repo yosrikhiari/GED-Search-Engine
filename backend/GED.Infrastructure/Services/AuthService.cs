@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using GED.Core.Interfaces;
 
 namespace GED.Infrastructure.Services;
 
@@ -20,7 +21,7 @@ namespace GED.Infrastructure.Services;
 ///
 /// This satisfies the "droits d'accès" and "sécurité" requirements.
 /// </summary>
-public class AuthService
+public class AuthService : IUserContext
 {
     private readonly ILogger<AuthService> _logger;
 
@@ -304,6 +305,14 @@ private void EnsureDefaultAdmin()
         if (changed) SaveUsers();
     }
 }
+    public bool UserExists(string username)
+    {
+        lock (_lock)
+        {
+            return _users.Any(u =>
+                u.Username.Equals(username, StringComparison.OrdinalIgnoreCase) && u.IsActive);
+        }
+    }
     private void LoadUsers()
     {
         try

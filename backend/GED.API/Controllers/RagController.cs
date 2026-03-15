@@ -4,27 +4,30 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Services;
 using System.Security.Claims;
+using System.Text.Json;
 
 namespace GED.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]                          // ← was missing
+[Authorize]
 public class RagController : ControllerBase
 {
-    private readonly IRagService _ragService;
-    private readonly AuthService _authService;   // ← added
+    private readonly IRagService            _ragService;
+    private readonly AuthService            _authService;
     private readonly ILogger<RagController> _logger;
 
     public RagController(
-        IRagService ragService,
-        AuthService authService,     // ← added
+        IRagService            ragService,
+        AuthService            authService,
         ILogger<RagController> logger)
     {
-        _ragService   = ragService;
-        _authService  = authService;
-        _logger       = logger;
+        _ragService  = ragService;
+        _authService = authService;
+        _logger      = logger;
     }
+
+    // ── POST /api/rag/ask (non-streaming, kept for backward compatibility) ────
 
     [HttpPost("ask")]
     [ProducesResponseType(typeof(RagResponse), StatusCodes.Status200OK)]
@@ -37,7 +40,6 @@ public class RagController : ControllerBase
             if (string.IsNullOrWhiteSpace(request?.Query))
                 return BadRequest(new { error = "Query is required." });
 
-            // Stamp the authenticated user's identity — cannot be spoofed by the client
             request.Username = User.FindFirst(ClaimTypes.Name)?.Value;
 
             _logger.LogInformation(
@@ -56,8 +58,48 @@ public class RagController : ControllerBase
         }
     }
 
+    // ── POST /api/rag/ask/stream (SSE streaming) ──────────────────────────────
+
+    [HttpPost("ask/stream")]
+    public async Task AskStream([FromBody] RagRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request?.Query))
+        {
+            Response.StatusCode = 400;
+            return;
+        }
+
+        request.Username = User.FindFirst(ClaimTypes.Name)?.Value;
+
+        _logger.LogInformation(
+            "RAG stream request: query='{Query}', lang='{Lang}', user='{User}'",
+            request.Query, request.Language, request.Username ?? "anonymous");
+
+        Response.Headers["Content-Type"]      = "text/event-stream";
+        Response.Headers["Cache-Control"]     = "no-cache";
+        Response.Headers["X-Accel-Buffering"] = "no";
+
+        try
+        {
+            await foreach (var token in _ragService.AskStreamAsync(request, cancellationToken))
+            {
+                var data = JsonSerializer.Serialize(new { token });
+                await Response.WriteAsync($"data: {data}\n\n", cancellationToken);
+                await Response.Body.FlushAsync(cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing RAG stream request");
+            var error = JsonSerializer.Serialize(new { error = "RAG processing failed" });
+            await Response.WriteAsync($"data: {error}\n\n", cancellationToken);
+        }
+    }
+
+    // ── GET /api/rag/health ───────────────────────────────────────────────────
+
     [HttpGet("health")]
-    [AllowAnonymous]                 // health check doesn't need auth
+    [AllowAnonymous]
     public IActionResult Health()
     {
         return Ok(new

@@ -270,7 +270,30 @@ const sendMessage = async () => {
 
     logger.step('rag', 'Sending request to /api/rag/ask', body)
 
-    const response = await rag.ask(body)
+    const response = await fetch('/api/rag/ask/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  credentials: 'include',
+  body: JSON.stringify(body)
+})
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    aiMsg.loading = false
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const text = decoder.decode(value)
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const { token } = JSON.parse(line.slice(6))
+          aiMsg.content += token
+          await scrollToBottom()
+        } catch {}
+      }
+    }
 
     logger.response('POST', '/api/rag/ask', response.status)
 

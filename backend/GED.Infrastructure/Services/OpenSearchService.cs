@@ -4,6 +4,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using CoreSearchRequest = GED.Core.Models.SearchRequest;
 
 namespace GED.Infrastructure.Services;
@@ -30,10 +31,10 @@ public class OpenSearchService : ISearchService
 
     private const string DocumentIndex   = "ged-documents";
     private const int    EmbeddingDim    = 768;   // nomic-embed-text output size
-    private const float  Bm25Weight      = 0.6f;
-    private const float  SemanticWeight  = 0.4f;
+    private readonly float _bm25Weight;
+    private readonly float _semanticWeight;
     // Minimum cosine similarity below which a semantic-only result is discarded
-    private const float  SemanticThreshold = 0.30f;
+    private readonly float _semanticThreshold;
 
     // Maps FR/AR query words → stored English category values
     private static readonly Dictionary<string, string> CategoryAliases =
@@ -59,13 +60,17 @@ public class OpenSearchService : ISearchService
 
 
     public OpenSearchService(
-        IOpenSearchClient client,
-        INlpService nlpService,
-        ILogger<OpenSearchService> logger)
+    IOpenSearchClient client,
+    INlpService nlpService,
+    ILogger<OpenSearchService> logger,
+    IConfiguration configuration)
     {
-        _client     = client;
-        _nlpService = nlpService;
-        _logger     = logger;
+        _client             = client;
+        _nlpService         = nlpService;
+        _logger             = logger;
+        _bm25Weight         = configuration.GetValue<float>("Search:Bm25Weight",        0.6f);
+        _semanticWeight     = configuration.GetValue<float>("Search:SemanticWeight",     0.4f);
+        _semanticThreshold  = configuration.GetValue<float>("Search:SemanticThreshold",  0.30f);
     }
 
     // ── SearchAsync (hybrid pipeline) ─────────────────────────────────────────
@@ -287,7 +292,7 @@ public class OpenSearchService : ISearchService
             }
 
             return response.Hits
-                .Where(h => (float)(h.Score ?? 0) >= SemanticThreshold)
+                .Where(h => (float)(h.Score ?? 0) >= _semanticThreshold)
                 .Select(h => (h.Source.Id, (float)(h.Score ?? 0)))
                 .ToList();
         }

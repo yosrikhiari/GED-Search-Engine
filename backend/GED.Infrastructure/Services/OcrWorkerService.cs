@@ -455,8 +455,34 @@ public class OcrWorkerService : BackgroundService
         document.Metadata["ocr_raw_length"]   = ocrResult.ExtractedText.Length;
         document.Metadata["ocr_processed_at"] = DateTime.UtcNow.ToString("o");
 
+        
         if (ocrResult.AverageConfidence > 0)
             document.Metadata["ocr_confidence"] = ocrResult.AverageConfidence;
+
+        // ── OCR quality indicator ─────────────────────────────────────────────────
+        // chars-per-page is a cheap proxy for OCR quality:
+        //   ocrmypdf doesn't expose per-word confidence without --pdf-renderer hocr,
+        //   which adds significant processing overhead.
+        //   < 100 chars/page = likely poor scan, > 500 = good readable text.
+        float charsPerPage = ocrResult.PageCount > 0
+            ? (float)(ocrResult.ExtractedText?.Length ?? 0) / ocrResult.PageCount
+            : 0f;
+
+        string ocrQuality = charsPerPage switch
+        {
+            > 500 => "good",
+            > 100 => "fair",
+            _     => "poor"
+        };
+
+        document.Metadata["ocr_quality"]          = ocrQuality;
+        document.Metadata["ocr_chars_per_page"]   = (int)charsPerPage;
+        document.Metadata["ocr_confidence_proxy"] = Math.Min(charsPerPage / 500f, 1.0f);
+
+        _logger.LogInformation(
+            "📊 OCR quality for {DocId}: {Quality} ({CharsPerPage} chars/page, proxy={Proxy:F2})",
+            document.Id, ocrQuality, (int)charsPerPage, Math.Min(charsPerPage / 500f, 1.0f));
+        // ─────────────────────────────────────────────────────────────────────────
 
         await db.SaveChangesAsync(ct);
         await ReIndexDocumentAsync(document, search, ct);
@@ -468,15 +494,16 @@ public class OcrWorkerService : BackgroundService
 
         await SetStageAsync(db, document, "llm_cleaning", ct);
 
-        string cleanedText = ocrResult.ExtractedText;
+        string cleanedText = ocrResult.ExtractedText!;
 
         if (textCleaner != null)
         {
             _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
-                ocrResult.ExtractedText.Length);
+                ocrResult.ExtractedText!.Length);
             try
             {
-                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
+                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct)
+                    ?? ocrResult.ExtractedText;
                 _logger.LogInformation("✅ Ollama cleaning: {Before} → {After} chars",
                     ocrResult.ExtractedText.Length, cleanedText.Length);
             }
@@ -489,7 +516,7 @@ public class OcrWorkerService : BackgroundService
 
         await EnrichAndSaveAsync(
             db, document, search, enricher, dateExtractor,
-            cleanedText, "ocr_llm", scope, ct);    
+            cleanedText!, "ocr_llm", scope, ct);
     }
 
     private async Task EnrichAndSaveAsync(
@@ -751,7 +778,7 @@ public class OcrWorkerService : BackgroundService
         {
             using var scope = _serviceProvider.CreateScope();
             var db  = scope.ServiceProvider.GetRequiredService<GedDbContext>();
-            var doc = await db.Documents.FindAsync(new object[] { documentId }, ct);
+            var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
             if (doc != null)
             {
                 doc.IsOcrProcessed = false;
