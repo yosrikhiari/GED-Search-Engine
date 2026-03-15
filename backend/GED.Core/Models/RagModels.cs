@@ -10,6 +10,9 @@ public class RagRequest
     /// <summary>Optional: restrict search to these categories.</summary>
     public List<string>? Categories { get; set; }
 
+    /// <summary>Optional: restrict RAG search to these specific document IDs.</summary>
+    public List<Guid>? DocumentIds { get; set; }
+
     /// <summary>Optional: restrict search to these MIME types.</summary>
     public List<string>? ContentTypes { get; set; }
 

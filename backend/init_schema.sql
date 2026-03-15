@@ -1,94 +1,220 @@
--- =============================================================================
--- GED Database — Full Schema Bootstrap
--- Usage: docker exec -i ged-postgres psql -U ged_user -d ged_db < init_schema.sql
--- =============================================================================
+-- ============================================================================
+-- GED Elise — SQL Server init schema
+-- Converted from PostgreSQL to T-SQL
+--
+-- Key syntax changes vs the original PostgreSQL version:
+--   UUID        → UNIQUEIDENTIFIER
+--   VARCHAR     → NVARCHAR
+--   TEXT        → NVARCHAR(MAX)
+--   TEXT[]      → NVARCHAR(MAX)  (JSON array stored as text)
+--   JSONB       → NVARCHAR(MAX)  (JSON object stored as text)
+--   BOOLEAN     → BIT
+--   TIMESTAMP   → DATETIME2
+--   DEFAULT true/false → DEFAULT 1 / DEFAULT 0
+--   NOW()       → GETUTCDATE()
+--   SERIAL      → IDENTITY(1,1)  (not used here — all PKs are UNIQUEIDENTIFIER)
+--   IF NOT EXISTS (table) → IF OBJECT_ID(...) IS NULL
+--   IF NOT EXISTS (index) → IF NOT EXISTS (SELECT 1 FROM sys.indexes ...)
+--   ON CONFLICT DO NOTHING → IF NOT EXISTS (...) INSERT
+-- ============================================================================
 
--- ─── documents ────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS documents (
-    id                  UUID PRIMARY KEY,
-    title               VARCHAR(500)  NOT NULL,
-    description         VARCHAR(2000),
-    file_name           TEXT          NOT NULL,
-    file_path           TEXT          NOT NULL,
-    content_type        TEXT          NOT NULL,
-    file_size           BIGINT        NOT NULL,
-    file_hash           TEXT,
-    created_at          TIMESTAMP     NOT NULL,
-    document_date       TIMESTAMP,
-    modified_at         TIMESTAMP,
-    created_by          TEXT,
-    modified_by         TEXT,
-    status              TEXT          NOT NULL DEFAULT 'Active',
-    is_ocr_processed    BOOLEAN       NOT NULL DEFAULT false,
-    ocr_text            TEXT,
-    extracted_text      TEXT,
-    tags                TEXT[],
-    category            TEXT,
-    metadata            JSONB,
-    version             INT           NOT NULL DEFAULT 1,
-    parent_document_id  UUID
-);
+-- ─── documents ───────────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.documents', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.documents (
+        id                  UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        title               NVARCHAR(500)     NOT NULL,
+        description         NVARCHAR(2000),
+        file_name           NVARCHAR(500)     NOT NULL,
+        file_path           NVARCHAR(1000)    NOT NULL,
+        content_type        NVARCHAR(200)     NOT NULL,
+        file_size           BIGINT            NOT NULL DEFAULT 0,
+        file_hash           NVARCHAR(200),
+        created_at          DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        document_date       DATETIME2,
+        modified_at         DATETIME2,
+        created_by          NVARCHAR(200),
+        modified_by         NVARCHAR(200),
+        -- stored as string enum (e.g. 'Active', 'Deleted', 'Processing')
+        status              NVARCHAR(50)      NOT NULL DEFAULT 'Active',
+        is_ocr_processed    BIT               NOT NULL DEFAULT 0,
+        ocr_text            NVARCHAR(MAX),
+        extracted_text      NVARCHAR(MAX),
+        -- was TEXT[] in PostgreSQL — stored as JSON array, e.g. ["invoice","pdf"]
+        tags                NVARCHAR(MAX),
+        category            NVARCHAR(200),
+        -- was JSONB in PostgreSQL — stored as JSON object
+        metadata            NVARCHAR(MAX),
+        version             INT               NOT NULL DEFAULT 1,
+        parent_document_id  UNIQUEIDENTIFIER
+    );
+END
 
-CREATE INDEX IF NOT EXISTS ix_documents_created_at    ON documents (created_at);
-CREATE INDEX IF NOT EXISTS ix_documents_document_date ON documents (document_date);
-CREATE INDEX IF NOT EXISTS ix_documents_category      ON documents (category);
-CREATE INDEX IF NOT EXISTS ix_documents_status        ON documents (status);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_created_at'    AND object_id = OBJECT_ID('dbo.documents'))
+    CREATE INDEX ix_documents_created_at    ON dbo.documents (created_at);
 
--- ─── document_metadata ────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS document_metadata (
-    id          UUID PRIMARY KEY,
-    document_id UUID         NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
-    key         VARCHAR(200) NOT NULL,
-    value       TEXT,
-    type        TEXT         NOT NULL DEFAULT 'String',
-    created_at  TIMESTAMP    NOT NULL
-);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_document_date' AND object_id = OBJECT_ID('dbo.documents'))
+    CREATE INDEX ix_documents_document_date ON dbo.documents (document_date);
 
-CREATE INDEX IF NOT EXISTS ix_document_metadata_document_id ON document_metadata (document_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_category'      AND object_id = OBJECT_ID('dbo.documents'))
+    CREATE INDEX ix_documents_category      ON dbo.documents (category);
 
--- ─── document_acls ────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS document_acls (
-    id          UUID      NOT NULL,
-    document_id UUID      NOT NULL,
-    user_id     UUID      NOT NULL,
-    permission  INTEGER   NOT NULL,
-    granted_at  TIMESTAMP NOT NULL,
-    granted_by  UUID      NOT NULL,
-    expires_at  TIMESTAMP,
-    CONSTRAINT "PK_document_acls" PRIMARY KEY (id)
-);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_status'        AND object_id = OBJECT_ID('dbo.documents'))
+    CREATE INDEX ix_documents_status        ON dbo.documents (status);
 
-CREATE INDEX IF NOT EXISTS ix_acl_doc_user ON document_acls (document_id, user_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_content_type'  AND object_id = OBJECT_ID('dbo.documents'))
+    CREATE INDEX ix_documents_content_type  ON dbo.documents (content_type);
 
--- ─── outbox_messages ──────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS outbox_messages (
-    id           UUID         NOT NULL DEFAULT gen_random_uuid(),
-    type         VARCHAR(100) NOT NULL,
-    payload      TEXT         NOT NULL,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    processed_at TIMESTAMPTZ  NULL,
-    error        TEXT         NULL,
-    retry_count  INTEGER      NOT NULL DEFAULT 0,
-    CONSTRAINT pk_outbox_messages PRIMARY KEY (id)
-);
 
-CREATE INDEX IF NOT EXISTS ix_outbox_unprocessed
-    ON outbox_messages (created_at)
-    WHERE processed_at IS NULL AND retry_count < 5;
+-- ─── document_acls ───────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.document_acls', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.document_acls (
+        id           UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        document_id  UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.documents (id) ON DELETE CASCADE,
+        user_id      UNIQUEIDENTIFIER  NOT NULL,
+        permission   INT               NOT NULL DEFAULT 0,
+        granted_at   DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        granted_by   NVARCHAR(200),
+        expires_at   DATETIME2
+    );
+END
 
-COMMENT ON TABLE outbox_messages IS
-    'Outbox Pattern: OCR and other async jobs written here atomically with the '
-    'source document. OutboxRelayService publishes them to RabbitMQ.';
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_acl_doc_user' AND object_id = OBJECT_ID('dbo.document_acls'))
+    CREATE INDEX ix_acl_doc_user ON dbo.document_acls (document_id, user_id);
+
+-- ─── users ───────────────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.users', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.users (
+        id                  UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        username            NVARCHAR(100)     NOT NULL,
+        password_hash       NVARCHAR(500)     NOT NULL,
+        full_name           NVARCHAR(200),
+        email               NVARCHAR(200),
+        role                NVARCHAR(50)      NOT NULL DEFAULT 'User',
+        is_active           BIT               NOT NULL DEFAULT 1,
+        created_at          DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        last_login_at       DATETIME2,
+        allowed_categories  NVARCHAR(MAX)
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_users_username' AND object_id = OBJECT_ID('dbo.users'))
+    CREATE UNIQUE INDEX ix_users_username ON dbo.users (username);
+
+-- ─── document_metadata ───────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.document_metadata', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.document_metadata (
+        id           UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        document_id  UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.documents (id) ON DELETE CASCADE,
+        -- stored as string enum (e.g. 'Text', 'Number', 'Date')
+        [key]        NVARCHAR(200)     NOT NULL,
+        value        NVARCHAR(MAX),
+        type         NVARCHAR(50)      NOT NULL DEFAULT 'Text',
+        created_at   DATETIME2         NOT NULL DEFAULT GETUTCDATE()
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_document_metadata_document_id' AND object_id = OBJECT_ID('dbo.document_metadata'))
+    CREATE INDEX ix_document_metadata_document_id ON dbo.document_metadata (document_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_document_metadata_doc_key' AND object_id = OBJECT_ID('dbo.document_metadata'))
+    CREATE INDEX ix_document_metadata_doc_key ON dbo.document_metadata (document_id, [key]);
+
+
+-- ─── outbox_messages ─────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.outbox_messages', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.outbox_messages (
+        id            UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        type          NVARCHAR(100)     NOT NULL,
+        payload       NVARCHAR(MAX)     NOT NULL,
+        created_at    DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        processed_at  DATETIME2,
+        error         NVARCHAR(MAX),
+        retry_count   INT               NOT NULL DEFAULT 0
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_unprocessed' AND object_id = OBJECT_ID('dbo.outbox_messages'))
+    CREATE INDEX ix_outbox_unprocessed ON dbo.outbox_messages (processed_at);
+
+
+-- ─── document_groups ─────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.document_groups', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.document_groups (
+        id           UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        name         NVARCHAR(200)     NOT NULL,
+        description  NVARCHAR(1000),
+        color        NVARCHAR(20),
+        icon         NVARCHAR(10),
+        category     NVARCHAR(100),
+        created_by   UNIQUEIDENTIFIER  NOT NULL,
+        created_at   DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        updated_at   DATETIME2,
+        is_active    BIT               NOT NULL DEFAULT 1    -- was DEFAULT true
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_document_groups_active' AND object_id = OBJECT_ID('dbo.document_groups'))
+    CREATE INDEX ix_document_groups_active ON dbo.document_groups (is_active);
+
+
+-- ─── document_group_members ───────────────────────────────────────────────────
+IF OBJECT_ID('dbo.document_group_members', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.document_group_members (
+        id                  UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        group_id            UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.document_groups (id) ON DELETE CASCADE,
+        document_id         UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.documents (id)       ON DELETE NO ACTION,
+        default_permission  INT               NOT NULL DEFAULT 0,
+        added_at            DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        added_by            UNIQUEIDENTIFIER  NOT NULL
+    );
+END
+
+-- SQL Server does not support two cascading FK paths to the same table in one
+-- statement, so document_id uses NO ACTION (handled by application logic).
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_group_members_group_doc' AND object_id = OBJECT_ID('dbo.document_group_members'))
+    CREATE UNIQUE INDEX ix_group_members_group_doc ON dbo.document_group_members (group_id, document_id);
+
+
+-- ─── user_group_assignments ───────────────────────────────────────────────────
+IF OBJECT_ID('dbo.user_group_assignments', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.user_group_assignments (
+        id           UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        group_id     UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.document_groups (id) ON DELETE CASCADE,
+        user_id      UNIQUEIDENTIFIER  NOT NULL,
+        permission   INT               NOT NULL DEFAULT 0,
+        assigned_at  DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        assigned_by  UNIQUEIDENTIFIER  NOT NULL,
+        expires_at   DATETIME2
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_user_group_assignments_group_user' AND object_id = OBJECT_ID('dbo.user_group_assignments'))
+    CREATE UNIQUE INDEX ix_user_group_assignments_group_user ON dbo.user_group_assignments (group_id, user_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_user_group_assignments_user' AND object_id = OBJECT_ID('dbo.user_group_assignments'))
+    CREATE INDEX ix_user_group_assignments_user ON dbo.user_group_assignments (user_id);
+
 
 -- ─── EF Migrations history ────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
-    "MigrationId"    VARCHAR(150) NOT NULL,
-    "ProductVersion" VARCHAR(32)  NOT NULL,
-    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
-);
+-- EF Core creates this table automatically on first migration run.
+-- We pre-create it here so the INSERT below does not fail on a fresh database.
+IF OBJECT_ID('dbo.__EFMigrationsHistory', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.__EFMigrationsHistory (
+        MigrationId    NVARCHAR(150)  NOT NULL PRIMARY KEY,
+        ProductVersion NVARCHAR(32)   NOT NULL
+    );
+END
 
-INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
-VALUES
-    ('20240101000000_InitialCreate',              '8.0.0'),
-    ('20260307092924_AddDocumentAclExpiresAt',    '8.0.0')
-ON CONFLICT DO NOTHING;
+-- was: INSERT ... ON CONFLICT DO NOTHING
+IF NOT EXISTS (SELECT 1 FROM dbo.__EFMigrationsHistory WHERE MigrationId = '20260313114636_InitialCreate')
+    INSERT INTO dbo.__EFMigrationsHistory (MigrationId, ProductVersion)
+    VALUES ('20260313114636_InitialCreate', '8.0.25');

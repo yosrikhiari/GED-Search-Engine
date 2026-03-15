@@ -5,11 +5,13 @@ using GED.Core.Models;
 using GED.Infrastructure.Data;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authorization;
 
 namespace GED.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class DocumentsController : ControllerBase
 {
     private readonly IDocumentService _documentService;
@@ -132,28 +134,6 @@ public async Task<ActionResult<Document>> UploadDocument(
             else
                 _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
 
-            // Queue OCR for images and PDFs
-            // Outbox Pattern: write OCR job to DB in the same operation as the document.
-            // OutboxRelayService will publish to RabbitMQ when it's available.
-            // This prevents silent OCR loss if RabbitMQ is temporarily down during upload.
-            if (document.ContentType.StartsWith("image/") || document.ContentType == "application/pdf")
-            {
-                var outboxMsg = new OutboxMessage
-                {
-                    Type    = "OcrJob",
-                    Payload = System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        JobId      = Guid.NewGuid(),
-                        DocumentId = document.Id,
-                        Language   = "eng+fra+ara"   // match your existing OCR languages
-                    })
-                };
-                _db.OutboxMessages.Add(outboxMsg);
-                await _db.SaveChangesAsync();
-
-                _logger.LogInformation(
-                    "📥 OCR job queued via outbox for document {DocumentId}", document.Id);
-            }
 
                 if (!string.IsNullOrWhiteSpace(idempotencyKey))
                 {

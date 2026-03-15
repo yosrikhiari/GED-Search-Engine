@@ -325,6 +325,7 @@ public class OcrWorkerService : BackgroundService
 
     // ── Job processing ────────────────────────────────────────────────────────
 
+    
     private async Task ProcessOcrJobAsync(OcrJobMessage message, CancellationToken ct)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -338,7 +339,8 @@ public class OcrWorkerService : BackgroundService
 
         var document = await db.Documents
             .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
-
+        
+        
         if (document == null)
         {
             _logger.LogWarning("Document {DocumentId} not found — skipping", message.DocumentId);
@@ -374,9 +376,16 @@ public class OcrWorkerService : BackgroundService
 
             await db.SaveChangesAsync(ct);
 
+            // ── Phase 1: index immediately with raw native text ───────────────
+            // The document is now searchable (BM25) while LLM enrichment runs.
+            // EnrichAndSaveAsync will do a partial _update once tags/date/summary are ready.
+            await ReIndexDocumentAsync(document, search, ct);
+            _logger.LogInformation(
+                "🔍 Phase 1 index done for {DocId} (native text) — document is now searchable", document.Id);
+
             await EnrichAndSaveAsync(
                 db, document, search, enricher, dateExtractor,
-                document.ExtractedText!, "native_text_llm", ct);
+                document.ExtractedText!, "native_text_llm", scope, ct);
 
             return;
         }
@@ -390,12 +399,26 @@ public class OcrWorkerService : BackgroundService
 
         _logger.LogInformation("🔍 Starting Tesseract OCR for {DocId}…", document.Id);
 
+        bool isImageUpload = TesseractDirectOcrService.SupportsContentType(document.ContentType);
+
+
         OcrResult ocrResult;
         try
         {
             using var fileStream = File.OpenRead(document.FilePath);
-            ocrResult = await ocrService.ProcessDocumentAsync(
-                message.DocumentId, fileStream, message.Language ?? "eng", ct);
+            if (isImageUpload)
+            {
+                // Direct Tesseract — no PDF intermediary needed for pure image files
+                var directOcr = scope.ServiceProvider.GetRequiredService<TesseractDirectOcrService>();
+                ocrResult = await directOcr.ProcessDocumentAsync(
+                    message.DocumentId, fileStream, message.Language ?? "eng", ct);
+            }
+            else
+            {
+                // Existing ocrmypdf path for PDFs and other formats
+                ocrResult = await ocrService.ProcessDocumentAsync(
+                    message.DocumentId, fileStream, message.Language ?? "eng", ct);
+            }
         }
         catch (Exception ex)
         {
@@ -466,7 +489,7 @@ public class OcrWorkerService : BackgroundService
 
         await EnrichAndSaveAsync(
             db, document, search, enricher, dateExtractor,
-            cleanedText, "ocr_llm", ct);
+            cleanedText, "ocr_llm", scope, ct);    
     }
 
     private async Task EnrichAndSaveAsync(
@@ -477,6 +500,7 @@ public class OcrWorkerService : BackgroundService
         DocumentDateExtractor? dateExtractor,
         string textToAnalyze,
         string enrichmentSource,
+        IServiceScope scope,
         CancellationToken ct)
     {
         document.Metadata ??= new Dictionary<string, object>();
@@ -586,6 +610,48 @@ public class OcrWorkerService : BackgroundService
             document.DocumentDate?.ToString("yyyy-MM-dd") ?? "none");
 
         await ReIndexDocumentAsync(document, search, ct);
+        // ── Chunk-level indexing for RAG ─────────────────────────────────────────────
+        try
+        {
+            var chunker    = scope.ServiceProvider.GetRequiredService<DocumentChunkingService>();
+            var openSearch = scope.ServiceProvider.GetRequiredService<OpenSearchService>();
+
+            // Build domain object inline — MapToDomain is in DocumentService, not here
+            var domainDoc = new GED.Core.Models.Document
+            {
+                Id            = document.Id,
+                Title         = document.Title,
+                Description   = document.Description,
+                FileName      = document.FileName,
+                FilePath      = document.FilePath,
+                ContentType   = document.ContentType,
+                FileSize      = document.FileSize,
+                CreatedAt     = document.CreatedAt,
+                DocumentDate  = document.DocumentDate,
+                ModifiedAt    = document.ModifiedAt,
+                Status        = document.Status,
+                OcrText       = document.OcrText,
+                ExtractedText = document.ExtractedText,
+                Tags          = document.Tags,
+                Category      = document.Category,
+                Metadata      = document.Metadata,
+                IsOcrProcessed = document.IsOcrProcessed
+            };
+
+            var chunks = chunker.ChunkText(document.Id, textToAnalyze);
+            if (chunks.Any())
+            {
+                await openSearch.IndexChunksAsync(domainDoc, chunks, ct);
+                _logger.LogInformation(
+                    "✅ Chunk indexing complete for {DocId}: {Count} chunks",
+                    document.Id, chunks.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Chunk indexing failed for {DocId} — RAG will use full-doc fallback", document.Id);
+        }
     }
 
     private static void ApplyKeywordTagFallback(DocumentEntity document, string text)

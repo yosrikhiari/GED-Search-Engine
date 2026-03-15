@@ -1,7 +1,6 @@
 /**
  * Centralized API client.
  *
- * Automatically injects the JWT Bearer token from localStorage into every
  * request, and redirects to /login on 401 responses.
  */
 
@@ -13,12 +12,7 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
  * Core fetch wrapper with auth header injection and logging.
  */
 async function apiFetch(path, options = {}) {
-  const token = localStorage.getItem('ged_token')
-
-  const headers = {
-    ...(options.headers || {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {})
-  }
+  const headers = { ...(options.headers || {}) }
 
   // Don't set Content-Type for FormData — browser sets it with boundary
   if (!(options.body instanceof FormData) && options.body && typeof options.body === 'string') {
@@ -30,14 +24,17 @@ async function apiFetch(path, options = {}) {
 
   logger.request(method, url)
 
-  const response = await fetch(url, { ...options, headers })
+  const response = await fetch(url, { 
+    ...options, 
+    headers,
+    credentials: 'include' 
+  })
 
   logger.response(method, url, response.status)
 
   // Auto-logout on 401
   if (response.status === 401) {
     logger.error('api', `401 Unauthorized on ${method} ${path} — redirecting to login`)
-    localStorage.removeItem('ged_token')
     localStorage.removeItem('ged_user')
     window.location.href = '/login'
     throw new Error('Unauthorized — redirecting to login')
@@ -74,11 +71,10 @@ export const auth = {
   deactivateUser: (id) =>
     apiFetch(`/api/auth/users/${id}`, { method: 'DELETE' }),
 
-  logout() {
-    logger.info('Auth logout — clearing tokens')
-    localStorage.removeItem('ged_token')
-    localStorage.removeItem('ged_user')
-    window.location.href = '/login'
+  logout: async () => {
+  await apiFetch('/api/auth/logout', { method: 'POST' })
+  localStorage.removeItem('ged_user')  // still store non-sensitive user info locally
+  window.location.href = '/login'
   },
 
   getUser() {
@@ -92,6 +88,22 @@ export const auth = {
   isAdmin() {
     return this.getUser()?.role === 'Admin'
   }
+}
+// ── groups ─────────────────────────────────────────────────────────────────
+
+export const groups = {
+  list:             ()              => apiFetch('/api/groups'),
+  create:           (data)          => apiFetch('/api/groups', { method: 'POST', body: JSON.stringify(data) }),
+  get:              (id)            => apiFetch(`/api/groups/${id}`),
+  update:           (id, data)      => apiFetch(`/api/groups/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete:           (id)            => apiFetch(`/api/groups/${id}`, { method: 'DELETE' }),
+  addDocuments:     (id, data)      => apiFetch(`/api/groups/${id}/documents`, { method: 'POST', body: JSON.stringify(data) }),
+  removeDocument:   (id, memberId)  => apiFetch(`/api/groups/${id}/documents/${memberId}`, { method: 'DELETE' }),
+  assign:           (id, data)      => apiFetch(`/api/groups/${id}/assign`, { method: 'POST', body: JSON.stringify(data) }),
+  revokeAssignment: (id, assignId)  => apiFetch(`/api/groups/${id}/assignments/${assignId}`, { method: 'DELETE' }),
+  accessSummary:    ()              => apiFetch('/api/groups/users/access-summary'),
+  userAccess:       (userId)        => apiFetch(`/api/groups/users/${userId}/access`),
+  changeUserRole:   (userId, role)  => apiFetch(`/api/groups/users/${userId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
 }
 
 // ── Documents ─────────────────────────────────────────────────────────────────
@@ -154,4 +166,4 @@ export const rag = {
   health: () => apiFetch('/api/rag/health')
 }
 
-export default { auth, documents, search, rag }
+ export default { auth, documents, search, rag, groups }

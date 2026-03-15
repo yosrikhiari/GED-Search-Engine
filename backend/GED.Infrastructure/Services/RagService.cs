@@ -14,36 +14,37 @@ namespace GED.Infrastructure.Services;
 ///
 /// Pipeline:
 ///   1. Receive a natural-language user query
-///   2. Search OpenSearch for the top-N most relevant document chunks
-///   3. Build a context prompt from the retrieved excerpts
-///   4. Call Ollama (local LLM) to generate a synthetic answer
-///   5. Return the answer + the source documents with relevant excerpts
-///
-/// This is the core AI feature requested in the cahier des charges:
-///   "Génération de réponses synthétiques avec références aux documents sources"
+///   2. Search the ged-chunks index for the top-N most relevant chunks (semantic KNN)
+///   3. Fall back to full-document BM25 search if chunks index is empty
+///   4. Build a context prompt from retrieved excerpts
+///   5. Call Ollama (local LLM) to generate a synthetic answer
+///   6. Return the answer + source documents with relevant excerpts
 /// </summary>
 public class RagService : IRagService
 {
-    private readonly ISearchService _searchService;
-    private readonly AuthService _authService;      // ← added
-    private readonly HttpClient _httpClient;
+    private readonly ISearchService      _searchService;
+    private readonly AuthService         _authService;
+    private readonly OpenSearchService   _openSearch;
+    private readonly HttpClient          _httpClient;
     private readonly ILogger<RagService> _logger;
 
     private readonly string _llmEndpoint;
     private readonly string _llmModel;
-    private readonly bool _enabled;
-    private readonly int _topK;
-    private readonly int _maxContextChars;
+    private readonly bool   _enabled;
+    private readonly int    _topK;
+    private readonly int    _maxContextChars;
 
     public RagService(
-        ISearchService searchService,
-        AuthService authService,                    // ← added
-        HttpClient httpClient,
+        ISearchService      searchService,
+        OpenSearchService   openSearch,
+        AuthService         authService,
+        HttpClient          httpClient,
         ILogger<RagService> logger,
-        IConfiguration configuration)
+        IConfiguration      configuration)
     {
         _searchService   = searchService;
-        _authService     = authService;             // ← added
+        _openSearch      = openSearch;
+        _authService     = authService;
         _httpClient      = httpClient;
         _logger          = logger;
         _llmEndpoint     = configuration["NLP:LlmApiEndpoint"] ?? "http://localhost:11434/api/generate";
@@ -54,7 +55,8 @@ public class RagService : IRagService
     }
 
     /// <summary>
-    /// Full RAG pipeline: search → build context → generate answer → return with sources.
+    /// Full RAG pipeline: chunk search → build context → generate answer → return with sources.
+    /// Falls back to full-document search if the chunks index is empty (e.g. first run).
     /// </summary>
     public async Task<RagResponse> AskAsync(
         RagRequest request,
@@ -71,135 +73,220 @@ public class RagService : IRagService
         }
 
         var startTime = DateTime.UtcNow;
-
         _logger.LogInformation("🤖 RAG pipeline starting for query: '{Query}'", request.Query);
 
-        // ── Step 1: Retrieve relevant documents from OpenSearch ───────────────
-        var searchRequest = new SearchRequest
-        {
-            Query              = request.Query,
-            SearchType         = SearchType.Natural,
-            Page               = 1,
-            PageSize           = _topK,
-            IncludeOcrContent  = true,
-            IncludeSuggestions = false,
-            Categories         = request.Categories,
-            ContentTypes       = request.ContentTypes,
-            FromDate           = request.FromDate,
-            ToDate             = request.ToDate
-        };
+        // ── Resolve ACL-filtered category list ────────────────────────────────
+        List<string>? allowedCategories = null;
         if (!string.IsNullOrEmpty(request.Username))
         {
-            var allowedCategories = _authService.GetAllowedCategories(request.Username);
-
-            if (allowedCategories != null)   // null = Admin, sees everything
+            allowedCategories = _authService.GetAllowedCategories(request.Username);
+            if (allowedCategories != null)
             {
-                searchRequest.Categories = searchRequest.Categories == null
-                    ? allowedCategories                                          // no filter requested → apply ACL
-                    : searchRequest.Categories.Intersect(allowedCategories, StringComparer.OrdinalIgnoreCase).ToList();  // filter requested → keep only allowed subset
+                // Intersect with any caller-supplied category filter
+                allowedCategories = request.Categories == null
+                    ? allowedCategories
+                    : request.Categories
+                        .Intersect(allowedCategories, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
 
                 _logger.LogInformation(
                     "RAG ACL applied for '{User}': categories restricted to [{Cats}]",
-                    request.Username, string.Join(", ", searchRequest.Categories));
+                    request.Username, string.Join(", ", allowedCategories));
             }
         }
 
-        SearchResult searchResult;
+        var effectiveCategories = allowedCategories ?? request.Categories;
+
+        // ── Step 1: Try chunk-level semantic search ───────────────────────────
+        List<ChunkSearchHit> chunkHits = new();
         try
         {
-            searchResult = await _searchService.SearchAsync(searchRequest, cancellationToken);
+            chunkHits = await _openSearch.SearchChunksAsync(
+                request.Query,
+                topK:         _topK,
+                categories:   effectiveCategories,
+                cancellationToken: cancellationToken);
+
             _logger.LogInformation(
-                "🔍 RAG retrieved {Count} documents (total={Total})",
-                searchResult.Documents.Count, searchResult.TotalResults);
+                "🔍 RAG chunk search: {Count} chunk hits", chunkHits.Count);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "RAG search step failed");
-            return ErrorResponse(request.Query, "La recherche de documents a échoué.");
+            _logger.LogWarning(ex, "Chunk search failed — will fall back to full-doc search");
         }
 
-        if (!searchResult.Documents.Any())
+        // ── Step 2: Build context ─────────────────────────────────────────────
+        var sources        = new List<RagSource>();
+        var contextBuilder = new StringBuilder();
+        int charsUsed      = 0;
+
+        if (chunkHits.Any())
+        {
+            // ── 2a: Chunk-based context (preferred) ───────────────────────────
+            var seenDocIds = new HashSet<Guid>();
+
+            foreach (var chunk in chunkHits)
+            {
+                if (charsUsed >= _maxContextChars) break;
+
+                var remaining = _maxContextChars - charsUsed;
+                var text      = chunk.Text.Length > remaining
+                    ? chunk.Text[..remaining] + "…"
+                    : chunk.Text;
+
+                contextBuilder.AppendLine(
+                    $"--- Document : {chunk.Title} (extrait {chunk.ChunkIndex + 1}) ---");
+                if (chunk.DocumentDate.HasValue)
+                    contextBuilder.AppendLine($"Date : {chunk.DocumentDate.Value:yyyy-MM-dd}");
+                if (!string.IsNullOrEmpty(chunk.Category))
+                    contextBuilder.AppendLine($"Catégorie : {chunk.Category}");
+                contextBuilder.AppendLine(text);
+                contextBuilder.AppendLine();
+
+                charsUsed += text.Length + 80;
+
+                // One source entry per document even if multiple chunks matched
+                if (seenDocIds.Add(chunk.DocumentId))
+                {
+                    sources.Add(new RagSource
+                    {
+                        DocumentId     = chunk.DocumentId,
+                        Title          = chunk.Title,
+                        Category       = chunk.Category,
+                        DocumentDate   = chunk.DocumentDate,
+                        FileName       = chunk.FileName,
+                        ContentType    = chunk.ContentType,
+                        RelevanceScore = chunk.Score,
+                        Excerpt        = text.Length > 400 ? text[..400] + "…" : text,
+                        Highlights     = new List<string>()
+                    });
+                }
+            }
+
+            _logger.LogInformation(
+                "📄 Built chunk context: {DocCount} docs, {ChunkCount} chunks, {Chars} chars",
+                sources.Count, chunkHits.Count, charsUsed);
+        }
+        else
+        {
+            // ── 2b: Full-document fallback (chunks index empty / first run) ───
+            _logger.LogInformation(
+                "⚠️  No chunk hits — falling back to full-document search");
+
+            var searchRequest = new SearchRequest
+            {
+                Query              = request.Query,
+                SearchType         = SearchType.Natural,
+                Page               = 1,
+                PageSize           = _topK,
+                IncludeOcrContent  = true,
+                IncludeSuggestions = false,
+                Categories         = effectiveCategories,
+                ContentTypes       = request.ContentTypes,
+                FromDate           = request.FromDate,
+                ToDate             = request.ToDate,
+                DocumentIds        = request.DocumentIds
+            };
+
+            SearchResult searchResult;
+            try
+            {
+                searchResult = await _searchService.SearchAsync(searchRequest, cancellationToken);
+                _logger.LogInformation(
+                    "🔍 RAG full-doc fallback: {Count} documents (total={Total})",
+                    searchResult.Documents.Count, searchResult.TotalResults);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "RAG full-doc fallback search also failed");
+                return ErrorResponse(request.Query, "La recherche de documents a échoué.");
+            }
+
+            if (!searchResult.Documents.Any())
+            {
+                return new RagResponse
+                {
+                    Answer                 = "Aucun document pertinent n'a été trouvé pour répondre à votre question.",
+                    Sources                = new List<RagSource>(),
+                    Query                  = request.Query,
+                    TotalDocumentsSearched = searchResult.TotalResults
+                };
+            }
+
+            foreach (var doc in searchResult.Documents)
+            {
+                var excerpt = ExtractBestExcerpt(doc);
+                if (string.IsNullOrWhiteSpace(excerpt)) continue;
+
+                var remaining = _maxContextChars - charsUsed;
+                if (remaining <= 100) break;
+
+                var scoreFraction = doc.Score > 0 ? Math.Min(doc.Score * 1.5f, 1.0f) : 0.5f;
+                var budget        = Math.Max((int)(remaining * scoreFraction), 300);
+
+                var truncated = excerpt.Length > budget
+                    ? excerpt[..budget] + "…"
+                    : excerpt;
+
+                contextBuilder.AppendLine($"--- Document {sources.Count + 1} : {doc.Title} ---");
+                if (doc.DocumentDate.HasValue)
+                    contextBuilder.AppendLine($"Date : {doc.DocumentDate.Value:yyyy-MM-dd}");
+                if (!string.IsNullOrEmpty(doc.Category))
+                    contextBuilder.AppendLine($"Catégorie : {doc.Category}");
+                contextBuilder.AppendLine(truncated);
+                contextBuilder.AppendLine();
+
+                charsUsed += truncated.Length + 100;
+
+                sources.Add(new RagSource
+                {
+                    DocumentId     = doc.Id,
+                    Title          = doc.Title,
+                    Category       = doc.Category,
+                    DocumentDate   = doc.DocumentDate,
+                    CreatedAt      = doc.CreatedAt,
+                    FileName       = doc.FileName,
+                    ContentType    = doc.ContentType,
+                    RelevanceScore = doc.Score,
+                    Excerpt        = truncated.Length > 400 ? truncated[..400] + "…" : truncated,
+                    Highlights     = doc.Highlights ?? new List<string>()
+                });
+            }
+
+            _logger.LogInformation(
+                "📄 Built full-doc context: {Count} sources, {Chars} chars",
+                sources.Count, charsUsed);
+        }
+
+        if (!sources.Any())
         {
             return new RagResponse
             {
                 Answer  = "Aucun document pertinent n'a été trouvé pour répondre à votre question.",
                 Sources = new List<RagSource>(),
-                Query   = request.Query,
-                TotalDocumentsSearched = searchResult.TotalResults
+                Query   = request.Query
             };
         }
 
-        // ── Step 2: Build context from retrieved document excerpts ────────────
-        var sources  = new List<RagSource>();
-        var contextBuilder = new StringBuilder();
-        int charsUsed = 0;
-
-        foreach (var doc in searchResult.Documents)
-        {
-            var excerpt = ExtractBestExcerpt(doc);
-            if (string.IsNullOrWhiteSpace(excerpt)) continue;
-
-            var remaining = _maxContextChars - charsUsed;
-            if (remaining <= 100) break;
-
-            // Score-proportional budget: top result gets up to 60% of remaining space,
-            // lower results get progressively less
-            var scoreFraction = doc.Score > 0 ? Math.Min(doc.Score * 1.5f, 1.0f) : 0.5f;
-            var budget = (int)(remaining * scoreFraction);
-            budget = Math.Max(budget, 300); // minimum 300 chars per document
-
-            var truncated = excerpt.Length > budget
-                ? excerpt[..budget] + "…"
-                : excerpt;
-
-            contextBuilder.AppendLine($"--- Document {sources.Count + 1}: {doc.Title} ---");
-            if (doc.DocumentDate.HasValue)
-                contextBuilder.AppendLine($"Date: {doc.DocumentDate.Value:yyyy-MM-dd}");
-            if (!string.IsNullOrEmpty(doc.Category))
-                contextBuilder.AppendLine($"Catégorie: {doc.Category}");
-            contextBuilder.AppendLine(truncated);
-            contextBuilder.AppendLine();
-
-            charsUsed += truncated.Length + 100; // +100 for the header lines
-
-            sources.Add(new RagSource
-            {
-                DocumentId   = doc.Id,
-                Title        = doc.Title,
-                Category     = doc.Category,
-                DocumentDate = doc.DocumentDate,
-                CreatedAt    = doc.CreatedAt,
-                FileName     = doc.FileName,
-                ContentType  = doc.ContentType,
-                RelevanceScore = doc.Score,
-                Excerpt      = truncated.Length > 400 ? truncated[..400] + "…" : truncated,
-                Highlights   = doc.Highlights ?? new List<string>()
-            });
-        }
-
-        _logger.LogInformation(
-            "📄 Built context from {Count} sources ({Chars} chars)",
-            sources.Count, charsUsed);
-
-        // ── Step 3: Generate synthetic answer via Ollama ──────────────────────
+        // ── Step 3: Generate answer via Ollama ────────────────────────────────
         var context = contextBuilder.ToString();
         string answer;
 
         try
         {
-            answer = await GenerateAnswerAsync(request.Query, context, request.Language, cancellationToken);
+            answer = await GenerateAnswerAsync(
+                request.Query, context, request.Language, cancellationToken);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "RAG generation step failed");
-            // Degrade gracefully: return search results without AI answer
             answer = BuildFallbackAnswer(sources);
         }
 
         var elapsed = (long)(DateTime.UtcNow - startTime).TotalMilliseconds;
 
         _logger.LogInformation(
-            "✅ RAG pipeline completed in {Ms}ms: {SourceCount} sources, answer={Chars} chars",
+            "✅ RAG pipeline completed in {Ms}ms: {SourceCount} sources, {Chars} chars answer",
             elapsed, sources.Count, answer.Length);
 
         return new RagResponse
@@ -208,7 +295,7 @@ public class RagService : IRagService
             Answer                 = answer,
             Sources                = sources,
             SearchTimeMs           = elapsed,
-            TotalDocumentsSearched = searchResult.TotalResults,
+            TotalDocumentsSearched = sources.Count,
             ModelUsed              = _llmModel
         };
     }
@@ -221,7 +308,6 @@ public class RagService : IRagService
         string language,
         CancellationToken cancellationToken)
     {
-        // Detect response language preference
         var lang = string.IsNullOrEmpty(language) ? "fr" : language.ToLower();
         var langInstruction = lang switch
         {
@@ -242,7 +328,7 @@ QUESTION DE L'UTILISATEUR :
 INSTRUCTIONS :
 - Réponds de manière précise et synthétique en te basant UNIQUEMENT sur les documents fournis.
 - Si les documents ne contiennent pas suffisamment d'informations pour répondre, indique-le clairement.
-- Cite les documents pertinents dans ta réponse (exemple : ""Selon le document 1 (titre)..."" ).
+- Cite les documents pertinents dans ta réponse (exemple : ""Selon le document 1 (titre)..."").
 - Ne fabrique aucune information qui ne figure pas dans les documents.
 - {langInstruction}
 
@@ -253,14 +339,14 @@ RÉPONSE :";
             model       = _llmModel,
             prompt      = prompt,
             stream      = false,
-            temperature = 0.3,  // Low temp for factual responses
+            temperature = 0.3,
             options     = new { num_predict = 1024 }
         };
 
         _logger.LogDebug("Calling Ollama for RAG generation at {Endpoint}", _llmEndpoint);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(TimeSpan.FromSeconds(120));   // RAG max 2 minutes
+        cts.CancelAfter(TimeSpan.FromSeconds(120));
 
         HttpResponseMessage response;
         try
@@ -281,7 +367,6 @@ RÉPONSE :";
         }
 
         var result = await response.Content.ReadFromJsonAsync<OllamaResponse>(cancellationToken);
-
         var answer = result?.Response?.Trim() ?? string.Empty;
 
         if (string.IsNullOrWhiteSpace(answer))
@@ -290,34 +375,23 @@ RÉPONSE :";
         return answer;
     }
 
-    /// <summary>
-    /// Extract the best text excerpt from a search hit.
-    /// Priority: highlights → extracted text → description.
-    /// </summary>
     private static string ExtractBestExcerpt(DocumentSearchHit doc)
-{
-    // 1. Prefer OpenSearch highlights (already query-relevant snippets)
-    if (doc.Highlights?.Any() == true)
-        return string.Join(" … ", doc.Highlights.Take(3));
+    {
+        if (doc.Highlights?.Any() == true)
+            return string.Join(" … ", doc.Highlights.Take(3));
 
-    // 2. Fall back to OCR text (scanned documents)
-    if (!string.IsNullOrWhiteSpace(doc.OcrText))
-        return doc.OcrText.Length > 2000 ? doc.OcrText[..2000] : doc.OcrText;
+        if (!string.IsNullOrWhiteSpace(doc.OcrText))
+            return doc.OcrText.Length > 2000 ? doc.OcrText[..2000] : doc.OcrText;
 
-    // 3. Fall back to extracted text (native PDFs, DOCX, etc.)
-    if (!string.IsNullOrWhiteSpace(doc.ExtractedText))
-        return doc.ExtractedText.Length > 2000 ? doc.ExtractedText[..2000] : doc.ExtractedText;
+        if (!string.IsNullOrWhiteSpace(doc.ExtractedText))
+            return doc.ExtractedText.Length > 2000 ? doc.ExtractedText[..2000] : doc.ExtractedText;
 
-    // 4. Last resort: description
-    if (!string.IsNullOrWhiteSpace(doc.Description))
-        return doc.Description;
+        if (!string.IsNullOrWhiteSpace(doc.Description))
+            return doc.Description;
 
-    return string.Empty;
-}
+        return string.Empty;
+    }
 
-    /// <summary>
-    /// Fallback answer when the LLM is unavailable — lists found documents.
-    /// </summary>
     private static string BuildFallbackAnswer(List<RagSource> sources)
     {
         var sb = new StringBuilder();

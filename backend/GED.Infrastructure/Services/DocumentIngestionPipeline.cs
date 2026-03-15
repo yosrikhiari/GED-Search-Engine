@@ -1,6 +1,5 @@
 using GED.Core.Interfaces;
 using Microsoft.Extensions.Logging;
-using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
 namespace GED.Infrastructure.Services;
@@ -21,21 +20,23 @@ namespace GED.Infrastructure.Services;
 ///   1. Text extraction (Tika / built-in fallback)
 ///   2. Description generation (keyword-based, no LLM needed)
 ///   3. Tag generation (from filename, category, content keywords)
-///   4. Document date extraction (LLM-powered, skipped if LLM unavailable)
+///
+/// NOTE: LLM date extraction (formerly step 4) has been intentionally removed
+/// from this pipeline. It was blocking the upload response for 5–15s per document.
+/// Date extraction now runs asynchronously inside OcrWorkerService.EnrichAndSaveAsync,
+/// after the document is already indexed and visible in search.
 /// </summary>
 public class DocumentIngestionPipeline
 {
     private readonly ITextExtractionService              _textExtractor;
-    private readonly DocumentDateExtractor?              _dateExtractor;
     private readonly ILogger<DocumentIngestionPipeline>  _logger;
 
     public DocumentIngestionPipeline(
         ITextExtractionService textExtractor,
         ILogger<DocumentIngestionPipeline> logger,
-        DocumentDateExtractor? dateExtractor = null)   // optional — null if LLM disabled
+        DocumentDateExtractor? dateExtractor = null)   // kept for DI compatibility — no longer used here
     {
         _textExtractor = textExtractor;
-        _dateExtractor = dateExtractor;
         _logger        = logger;
     }
 
@@ -43,7 +44,7 @@ public class DocumentIngestionPipeline
     public record IngestionResult(
         string?                    ExtractedText,
         string?                    Description,
-        DateTime?                  DocumentDate,
+        DateTime?                  DocumentDate,    // always null — set later by OcrWorkerService
         List<string>               Tags,
         Dictionary<string, object> Metadata
     );
@@ -51,6 +52,9 @@ public class DocumentIngestionPipeline
     /// <summary>
     /// Run all ingestion steps. Failures in individual steps are caught and logged;
     /// the pipeline always returns a result (possibly with null fields).
+    ///
+    /// DocumentDate is always null here — it is extracted asynchronously by
+    /// OcrWorkerService after OCR/LLM enrichment, so the upload response is fast.
     /// </summary>
     public async Task<IngestionResult> RunAsync(
         byte[]            fileBytes,
@@ -61,7 +65,7 @@ public class DocumentIngestionPipeline
     {
         var metadata = new Dictionary<string, object>();
 
-        // Step 1: Extract text
+        // Step 1: Extract text (fast — Tika or built-in parser)
         var extractedText = await ExtractTextSafeAsync(fileBytes, contentType, ct);
 
         // Step 2: Generate description (synchronous, no LLM)
@@ -70,16 +74,15 @@ public class DocumentIngestionPipeline
         // Step 3: Generate tags (synchronous, no LLM)
         var tags = GenerateTags(fileName, category, extractedText);
 
-        // Step 4: Extract document date (LLM, optional)
-        var documentDate = await ExtractDateSafeAsync(
-            extractedText, fileName, category ?? "Other", metadata, ct);
+        // Step 4 (REMOVED): LLM date extraction was here.
+        // It blocked the upload for 5–15s. Moved to OcrWorkerService.EnrichAndSaveAsync.
+        DateTime? documentDate = null;
 
         _logger.LogInformation(
-            "✅ Ingestion complete for '{FileName}' — text={TextLen}chars, tags={TagCount}, date={Date}",
+            "✅ Ingestion complete for '{FileName}' — text={TextLen}chars, tags={TagCount} (date deferred to OCR worker)",
             fileName,
             extractedText?.Length ?? 0,
-            tags.Count,
-            documentDate?.ToString("yyyy-MM-dd") ?? "none");
+            tags.Count);
 
         return new IngestionResult(extractedText, description, documentDate, tags, metadata);
     }
@@ -161,50 +164,5 @@ public class DocumentIngestionPipeline
             .OrderBy(t => t)
             .Take(15)
             .ToList();
-    }
-
-    // ─── Step 4: Date Extraction (LLM, optional) ─────────────────────────────
-    private async Task<DateTime?> ExtractDateSafeAsync(
-        string?                    extractedText,
-        string                     fileName,
-        string                     category,
-        Dictionary<string, object> metadata,
-        CancellationToken          ct)
-    {
-        if (_dateExtractor == null || string.IsNullOrWhiteSpace(extractedText))
-            return null;
-
-        try
-        {
-            var info = await _dateExtractor.ExtractDocumentDateAsync(
-                extractedText, fileName, category, ct);
-
-            if (info?.DocumentDate == null || info.Confidence < 0.5f)
-            {
-                _logger.LogDebug(
-                    "Date extraction: no confident date found (confidence={Conf:F2})",
-                    info?.Confidence ?? 0f);
-                return null;
-            }
-
-            var date = DateTime.SpecifyKind(info.DocumentDate.Value, DateTimeKind.Utc);
-
-            // Store date metadata for audit trail
-            metadata["extracted_date"]     = date.ToString("yyyy-MM-dd");
-            metadata["date_confidence"]    = info.Confidence;
-            metadata["date_type"]          = info.DateType ?? "unknown";
-            metadata["date_extracted_by"]  = "llm";
-
-            _logger.LogInformation(
-                "📅 Date extracted: {Date} (type={Type}, confidence={Conf:F2})",
-                date.ToString("yyyy-MM-dd"), info.DateType, info.Confidence);
-
-            return date;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Date extraction failed — continuing without date");
-            return null;
-        }
     }
 }

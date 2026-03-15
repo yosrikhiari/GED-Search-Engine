@@ -153,7 +153,7 @@ public class OpenSearchService : ISearchService
                 semanticHits = await RunKnnSearchAsync(
                     request, queryEmbedding, cancellationToken);
 
-                searchMode = bm25Response.Hits.Any() || semanticHits.Any()
+                searchMode = (bm25Response?.Hits?.Any() == true) || semanticHits.Any()
                     ? SearchMode.Hybrid
                     : SearchMode.BM25;
             }
@@ -468,6 +468,152 @@ public class OpenSearchService : ISearchService
 
         return string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
     }
+
+    // ── Chunk-level indexing ──────────────────────────────────────────────────────
+
+/// <summary>
+/// Embeds and indexes all chunks for a document into the ged-chunks index.
+/// Deletes any existing chunks for the document first (idempotent re-index).
+/// </summary>
+public async Task IndexChunksAsync(
+    Document document,
+    List<DocumentChunk> chunks,
+    CancellationToken cancellationToken = default)
+{
+    if (!chunks.Any()) return;
+
+    // Delete existing chunks for this document (handles re-indexing case)
+    await DeleteChunksForDocumentAsync(document.Id, cancellationToken);
+
+    int indexed = 0;
+
+    foreach (var chunk in chunks)
+    {
+        try
+        {
+            // Get embedding for this chunk's text
+            chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(chunk.Text, cancellationToken);
+
+
+            var chunkDoc = new
+            {
+                document_id   = document.Id,
+                chunk_id      = chunk.ChunkId,
+                chunk_index   = chunk.ChunkIndex,
+                text          = chunk.Text,
+                title         = document.Title,
+                category      = document.Category,
+                document_date = document.DocumentDate,
+                created_at    = document.CreatedAt,
+                file_name     = document.FileName,
+                content_type  = document.ContentType,
+                tags          = document.Tags,
+                embedding     = chunk.Embedding
+            };
+
+            var response = await _client.IndexAsync(
+                chunkDoc,
+                i => i.Index("ged-chunks").Id(chunk.ChunkId),
+                cancellationToken);
+
+            if (response.IsValid)
+                indexed++;
+            else
+                _logger.LogWarning(
+                    "Failed to index chunk {ChunkId}: {Error}",
+                    chunk.ChunkId, response.ServerError?.Error?.Reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error indexing chunk {ChunkId} — skipping", chunk.ChunkId);
+        }
+    }
+
+    _logger.LogInformation(
+        "✅ Indexed {Indexed}/{Total} chunks for document {DocId}",
+        indexed, chunks.Count, document.Id);
+}
+
+/// <summary>
+/// Searches the ged-chunks index using KNN vector search on the query embedding.
+/// Returns the top-K most relevant chunks with their parent document metadata.
+/// </summary>
+public async Task<List<ChunkSearchHit>> SearchChunksAsync(
+    string query,
+    int topK = 5,
+    List<string>? categories = null,
+    CancellationToken cancellationToken = default)
+{
+    var queryEmbedding = await _nlpService.GenerateEmbeddingAsync(query, cancellationToken);
+    if (queryEmbedding == null || queryEmbedding.Length == 0)
+        return new List<ChunkSearchHit>();
+
+    // Build KNN query on chunks index
+    var searchResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
+        .Index("ged-chunks")
+        .Size(topK)
+        .Query(q =>
+        {
+            // KNN vector query
+            var knn = q.Knn(k => k
+                .Field("embedding")
+                .Vector(queryEmbedding)
+                .K(topK));
+
+            // Optionally filter by category
+            if (categories?.Any() == true)
+            {
+                return q.Bool(b => b
+                    .Must(knn)
+                    .Filter(f => f.Terms(t => t
+                        .Field("category.keyword")
+                        .Terms(categories))));
+            }
+
+            return knn;
+        }),
+        cancellationToken);
+
+    if (!searchResponse.IsValid)
+    {
+        _logger.LogWarning(
+            "Chunk search failed: {Error}",
+            searchResponse.ServerError?.Error?.Reason);
+        return new List<ChunkSearchHit>();
+    }
+
+    return searchResponse.Hits.Select(h => new ChunkSearchHit
+    {
+        ChunkId      = h.Source.ChunkId,
+        DocumentId   = h.Source.DocumentId,
+        ChunkIndex   = h.Source.ChunkIndex,
+        Text         = h.Source.Text,
+        Title        = h.Source.Title,
+        Category     = h.Source.Category,
+        DocumentDate = h.Source.DocumentDate,
+        FileName     = h.Source.FileName,
+        ContentType  = h.Source.ContentType,
+        Tags         = h.Source.Tags,
+        Score        = (float)(h.Score ?? 0)
+    }).ToList();
+}
+
+private async Task DeleteChunksForDocumentAsync(
+    Guid documentId,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        await _client.DeleteByQueryAsync<ChunkIndexModel>(d => d
+            .Index("ged-chunks")
+            .Query(q => q.Term(t => t.Field("document_id").Value(documentId.ToString()))),
+            cancellationToken);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogWarning(ex, "Failed to delete existing chunks for document {DocId}", documentId);
+    }
+}
 
     // ── NLP filter application ─────────────────────────────────────────────────
 
@@ -1019,4 +1165,33 @@ public class DocumentIndexModel
     /// Null for documents indexed before the semantic search feature was enabled.
     /// </summary>
     public float[]? Embedding { get; set; }
+}
+// ── Chunk index model ─────────────────────────────────────────────────────────
+
+public class ChunkIndexModel
+{
+    public Guid DocumentId { get; set; }
+    public string ChunkId { get; set; } = string.Empty;
+    public int ChunkIndex { get; set; }
+    public string Text { get; set; } = string.Empty;
+    public string Title { get; set; } = string.Empty;
+    public string? Category { get; set; }
+    public DateTime? DocumentDate { get; set; }
+    public string FileName { get; set; } = string.Empty;
+    public string ContentType { get; set; } = string.Empty;
+    public List<string>? Tags { get; set; }
+}
+public class ChunkSearchHit
+{
+    public string   ChunkId      { get; set; } = string.Empty;
+    public Guid     DocumentId   { get; set; }
+    public int      ChunkIndex   { get; set; }
+    public string   Text         { get; set; } = string.Empty;
+    public string   Title        { get; set; } = string.Empty;
+    public string?  Category     { get; set; }
+    public DateTime? DocumentDate { get; set; }
+    public string   FileName     { get; set; } = string.Empty;
+    public string   ContentType  { get; set; } = string.Empty;
+    public List<string>? Tags    { get; set; }
+    public float    Score        { get; set; }
 }

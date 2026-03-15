@@ -1,5 +1,3 @@
-================================================================================
-
 <template>
   <div class="user-layout">
     <!-- ── Sidebar ─────────────────────────────────────────────────────── -->
@@ -56,12 +54,12 @@
                   d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
               </svg>
               <input v-model="searchQuery"
-                @keyup.enter="performSearch"
+                @keyup.enter="handleSearch"
                 @input="onSearchInput"
                 @keydown.down.prevent="selectSuggestion(1)"
                 @keydown.up.prevent="selectSuggestion(-1)"
                 @keydown.escape="showAutocomplete = false"
-                @blur="window.setTimeout(()=>showAutocomplete=false,180)"
+                @blur="onSearchBlur"
                 type="text"
                 placeholder="Recherche en langage naturel… ex : « factures du mois dernier »"
                 class="search-input"/>
@@ -79,7 +77,67 @@
                 </div>
               </div>
             </div>
-            <button @click="performSearch" :disabled="searchLoading || !searchQuery.trim()" class="search-btn">
+            <button
+              @click="ragMode = !ragMode; ragAnswer = ''; ragSources = []; attachedDocIds = []; showDocPicker = false"
+              :class="['rag-toggle-btn', { active: ragMode }]"
+              title="Mode Assistant IA"
+            >
+              ✨ {{ ragMode ? 'Elise active' : 'Ask Elise' }}
+            </button>
+
+            <button v-if="ragMode" @click="openDocPicker" class="elise-attach-btn">
+              📎 {{ attachedDocIds.length ? attachedDocIds.length + ' joint(s)' : 'Joindre' }}
+            </button>
+
+            <!-- Doc picker modal -->
+            <teleport to="body">
+              <div v-if="showDocPicker" class="picker-overlay" @click.self="showDocPicker = false">
+                <div class="picker-modal">
+                  <div class="picker-modal-header">
+                    <h3 class="picker-modal-title">📎 Joindre des documents à Elise</h3>
+                    <button @click="showDocPicker = false" class="picker-modal-close">✕</button>
+                  </div>
+
+                  <div class="picker-modal-search">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px;color:#9ca3af;flex-shrink:0">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input v-model="pickerSearch" type="text" placeholder="Rechercher un document…" class="picker-modal-search-input" />
+                    <button v-if="pickerSearch" @click="pickerSearch = ''" class="picker-modal-search-clear">✕</button>
+                  </div>
+
+                  <div class="picker-modal-body">
+                    <div v-if="pickerLoading" class="picker-modal-loading">
+                      <svg class="spinner" style="width:20px;height:20px" fill="none" viewBox="0 0 24 24">
+                        <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                        <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                      </svg>
+                      Chargement…
+                    </div>
+                    <div v-else-if="!filteredPickerDocs.length" class="picker-modal-empty">
+                      Aucun document trouvé
+                    </div>
+                    <label v-else v-for="doc in filteredPickerDocs" :key="doc.id" class="picker-modal-item" :class="{ selected: attachedDocIds.includes(doc.id) }">
+                      <input type="checkbox" :value="doc.id" v-model="attachedDocIds" style="display:none" />
+                      <span class="picker-modal-icon">{{ getFileIcon(doc.contentType) }}</span>
+                      <div class="picker-modal-info">
+                        <span class="picker-modal-name">{{ doc.title }}</span>
+                        <span class="picker-modal-meta">{{ doc.category || '—' }}</span>
+                      </div>
+                      <span v-if="attachedDocIds.includes(doc.id)" class="picker-modal-check">✓</span>
+                    </label>
+                  </div>
+
+                  <div class="picker-modal-footer">
+                    <span class="picker-modal-count">{{ attachedDocIds.length }} sélectionné(s)</span>
+                    <button @click="attachedDocIds = []" class="picker-modal-clear-btn">Tout désélectionner</button>
+                    <button @click="showDocPicker = false" class="picker-modal-confirm-btn">Confirmer</button>
+                  </div>
+                </div>
+              </div>
+            </teleport>
+
+            <button @click="handleSearch" :disabled="searchLoading || ragLoading || !searchQuery.trim()" class="search-btn">
               <span v-if="!searchLoading">Rechercher</span>
               <span v-else class="loading-text">
                 <svg class="spinner" fill="none" viewBox="0 0 24 24">
@@ -190,9 +248,63 @@
             </div>
           </div>
         </div>
+        <!-- RAG answer panel -->
+        <div v-if="ragMode && (ragAnswer || ragLoading)" class="rag-answer-panel">
+          <!-- ── Header ───────────────────────────────────────────────── -->
+          <div class="rag-answer-header">
+            <div class="elise-avatar-row">
+              <span class="elise-avatar">✨</span>
+              <div>
+                <span class="elise-name">Elise</span>
+                <span class="elise-subtitle">Assistante documentaire IA</span>
+              </div>
+            </div>
+            <div class="rag-header-actions">
+              <span v-if="ragSources.length" class="rag-source-count">{{ ragSources.length }} source(s)</span>
+              <button @click="ragAnswer = ''; ragSources = []" class="rag-close">✕</button>
+            </div>
+          </div>
 
+          <!-- ── Loading state ────────────────────────────────────────── -->
+          <div v-if="ragLoading" class="rag-thinking">
+            <svg class="spinner" style="width:16px;height:16px" fill="none" viewBox="0 0 24 24">
+              <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            Elise analyse vos documents…
+          </div>
+
+          <!-- ── Two-part answer ──────────────────────────────────────── -->
+          <template v-else-if="ragAnswer">
+            <!-- Part 1: Elise conversational intro -->
+            <div class="elise-intro-block">
+              <p class="elise-intro-text">Voici ce que j'ai trouvé dans vos documents :</p>
+            </div>
+
+            <!-- Part 2: Actual query result -->
+            <div class="elise-result-block">
+              <p class="rag-answer-text">{{ ragAnswer }}</p>
+            </div>
+          </template>
+
+          <!-- ── Sources ──────────────────────────────────────────────── -->
+          <div v-if="ragSources.length" class="rag-sources-grid">
+            <div v-for="(src, i) in ragSources" :key="i" class="rag-source-chip">
+              <span class="src-num">{{ i + 1 }}</span>
+              <div class="src-body">
+                <p class="src-title">{{ src.title }}</p>
+                <p class="src-meta">
+                  <span v-if="src.category">{{ src.category }} · </span>
+                  {{ Math.round(src.relevanceScore * 100) }}% pertinent
+                </p>
+                <p v-if="src.excerpt" class="src-excerpt">{{ src.excerpt }}</p>
+              </div>
+              <button @click="viewDocument({ id: src.documentId, title: src.title, fileName: src.title, contentType: 'application/pdf', score: src.relevanceScore })" class="src-view-btn">Voir</button>
+            </div>
+          </div>
+        </div>
         <!-- Results summary -->
-        <div v-if="searchResults && searchResults.documents.length > 0" class="results-summary">
+        <div v-if="searchResults && searchResults.documents?.length > 0" class="results-summary">
           <div class="summary-card">
             <span class="summary-count">{{ searchResults.totalResults }}</span>
             <span class="summary-text"> résultat(s)</span>
@@ -203,7 +315,7 @@
         </div>
 
         <!-- Documents grid -->
-        <div v-if="searchResults && searchResults.documents.length > 0" class="documents-grid">
+        <div v-if="searchResults && searchResults.documents?.length > 0" class="documents-grid">
           <article v-for="doc in searchResults.documents" :key="doc.id" class="document-card">
             <div class="card-content">
               <div class="doc-info">
@@ -287,7 +399,7 @@
         </nav>
 
         <!-- Empty state -->
-        <div v-else-if="!searchLoading && searched" class="empty-state">
+        <div v-else-if="!searchLoading && searched && (!searchResults || searchResults.documents.length === 0)" class="empty-state">
           <div class="state-icon empty-icon">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -312,21 +424,6 @@
         </div>
       </section>
 
-      <!-- ══════════════════════════════════════════════════════════════
-           AI ASSISTANT TAB
-      ══════════════════════════════════════════════════════════════ -->
-      <section v-if="activeTab === 'rag'">
-        <div class="page-header">
-          <div>
-            <h1 class="page-title">Assistant IA</h1>
-            <p class="page-subtitle">Posez des questions en langage naturel sur vos documents</p>
-          </div>
-        </div>
-        <div class="redirect-card">
-          <p>L'assistant IA est disponible dans une interface dédiée.</p>
-          <router-link to="/rag" class="btn-primary">🤖 Ouvrir l'Assistant IA</router-link>
-        </div>
-      </section>
     </main>
 
     <!-- ══════════════════════════════════════════════════════════════════
@@ -630,6 +727,10 @@ import { logger } from '../logger.js'
 
 const router = useRouter()
 
+const onSearchBlur = () => {
+  window.setTimeout(() => { showAutocomplete.value = false }, 180)
+}
+
 // ── Auth ───────────────────────────────────────────────────────────────────────
 const user = computed(() => JSON.parse(localStorage.getItem('ged_user') || '{}'))
 const userInitials = computed(() => {
@@ -650,7 +751,6 @@ const canDelete = computed(() => user.value?.role === 'Manager')
 const activeTab = ref('search')
 const tabs = [
   { id: 'search', label: 'Recherche',    icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>' },
-  { id: 'rag',    label: 'Assistant IA', icon: '🤖' },
 ]
 
 // ── Role display ───────────────────────────────────────────────────────────────
@@ -665,6 +765,48 @@ const searched      = ref(false)
 const searchResults = ref(null)
 const filters       = reactive({ category:'', contentType:'', dateFrom:'', dateTo:'', ocrStatus:'', service:'' })
 const quickSearches = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents']
+const ragMode       = ref(false)   // toggle: false = normal search, true = RAG
+const ragAnswer     = ref('')
+const ragSources    = ref([])
+const ragLoading    = ref(false)
+const showDocPicker    = ref(false)
+const attachedDocIds   = ref([])
+const pickerDocs       = ref([])
+const pickerSearch     = ref('')
+const pickerLoading    = ref(false)
+
+const filteredPickerDocs = computed(() =>
+  pickerSearch.value.trim()
+    ? pickerDocs.value.filter(d => d.title.toLowerCase().includes(pickerSearch.value.toLowerCase()))
+    : pickerDocs.value
+)
+
+const fetchPickerDocs = async () => {
+  pickerLoading.value = true
+  try {
+    // Empty query bypasses NLP entirely → BuildPrecisionQuery has no shouldQueries
+    // → falls into bq.Must(m => m.MatchAll()) → returns ALL indexed documents
+    const res = await fetch('/api/search/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ query: '', searchType: 0, page: 1, pageSize: 500 })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      pickerDocs.value = data.documents || []
+    }
+  } catch (e) {
+    console.error('[Picker] fetchPickerDocs error:', e)
+  } finally {
+    pickerLoading.value = false
+  }
+}
+
+const openDocPicker = () => {
+  showDocPicker.value = true
+  pickerSearch.value = ''
+  if (!pickerDocs.value.length) fetchPickerDocs()
+}
 
 // ── NLP interpretation ─────────────────────────────────────────────────────────
 const nlpInterpretation = ref(null)
@@ -902,8 +1044,48 @@ const buildSearchBody = (page = 1) => ({
   contentTypes: filters.contentType ? [filters.contentType] : null,
   fromDate:     filters.dateFrom    || null,
   toDate:       filters.dateTo      || null,
+  documentIds: attachedDocIds.value.length ? attachedDocIds.value : undefined,
   includeOcrContent: true
 })
+
+const handleSearch = () => {
+  if (ragMode.value) return askRag()
+  performSearch()
+}
+
+const askRag = async () => {
+  const query = searchQuery.value.trim()
+  if (!query) return
+  ragAnswer.value  = ''
+  ragSources.value = []
+  ragLoading.value = true
+  searched.value   = true
+  searchResults.value     = null
+  nlpInterpretation.value = null
+  searchError.value       = null
+  try {
+    const res = await fetch('/api/rag/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        query,
+        language: 'fr',
+        categories:  filters.category        ? [filters.category] : undefined,
+        fromDate:    filters.dateFrom         || undefined,
+        toDate:      filters.dateTo           || undefined,
+        documentIds: attachedDocIds.value.length ? attachedDocIds.value : undefined,
+      })
+    })
+    if (!res.ok) { searchError.value = `Erreur IA (HTTP ${res.status})`; return }
+    const data = await res.json()
+    ragAnswer.value  = data.answer  || ''
+    ragSources.value = data.sources || []
+  } catch {
+    searchError.value = 'Impossible de contacter le service IA.'
+  } finally {
+    ragLoading.value = false
+  }
+}
 
 const performSearch = async () => {
   if (!searchQuery.value.trim()) return
@@ -1089,7 +1271,7 @@ const uploadDocument = async () => {
 .doc-details { flex:1; min-width:0; }
 .doc-title { font-size:1rem; font-weight:700; color:#111827; margin-bottom:.3rem; word-break:break-word; transition:color .2s; }
 .document-card:hover .doc-title { color:#2563eb; }
-.doc-description { color:#6b7280; font-size:.82rem; margin-bottom:.6rem; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.doc-description { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .highlights { display:flex; flex-direction:column; gap:.35rem; margin-bottom:.6rem; }
 .highlight-item { font-size:.78rem; background:#fef9c3; border:1px solid #fde68a; border-radius:6px; padding:.4rem .65rem; font-style:italic; color:#374151; }
 .metadata-row { display:flex; flex-wrap:wrap; gap:.5rem; font-size:.78rem; color:#6b7280; margin-bottom:.5rem; }
@@ -1331,4 +1513,171 @@ const uploadDocument = async () => {
 .upload-submit:disabled { opacity:.5; cursor:not-allowed; }
 .cancel-btn { padding:.7rem 1.4rem; background:#f3f4f6; color:#374151; border:none; border-radius:9px; font-weight:600; cursor:pointer; }
 .cancel-btn:hover { background:#e5e7eb; }
+
+
+/* ── RAG toggle button ── */
+.rag-toggle-btn { padding:.8rem 1rem; border:2px solid #e5e7eb; border-radius:9px; background:white; color:#6b7280; font-size:.85rem; font-weight:600; cursor:pointer; transition:all .2s; white-space:nowrap; }
+.rag-toggle-btn.active { background:linear-gradient(135deg,#1a2b4a,#2563eb); border-color:transparent; color:white; }
+.rag-toggle-btn.active::before { content:''; }
+/* ── RAG answer panel ── */
+/* ── Elise answer panel identity ─────────────────────────────── */
+.rag-answer-panel { background:white; border:2px solid #e8edff; border-radius:14px; padding:0; overflow:hidden; }
+
+.rag-answer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .875rem 1.25rem;
+  background: linear-gradient(135deg, #1a2b4a 0%, #2563eb 100%);
+  color: white;
+}
+
+.elise-avatar-row { display:flex; align-items:center; gap:.75rem; }
+
+.elise-avatar {
+  width: 36px;
+  height: 36px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  border: 2px solid rgba(255,255,255,0.3);
+}
+
+.elise-name { font-weight:700; font-size:.95rem; display:block; letter-spacing:.01em; }
+.elise-subtitle { font-size:.7rem; opacity:.75; display:block; margin-top:1px; }
+
+.rag-header-actions { display:flex; align-items:center; gap:.75rem; }
+
+.rag-source-count {
+  font-size:.72rem;
+  background: rgba(255,255,255,0.2);
+  color: white;
+  padding:.2rem .65rem;
+  border-radius:999px;
+  font-weight:600;
+}
+
+.rag-close {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: white;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .8rem;
+  transition: background .2s;
+}
+.rag-close:hover { background: rgba(255,255,255,0.3); }
+
+/* Part 1 — Elise conversational intro */
+.elise-intro-block {
+  padding: .875rem 1.25rem .5rem;
+  border-bottom: 1px solid #f0f4ff;
+  background: #f8faff;
+}
+
+.elise-intro-text {
+  font-size: .875rem;
+  color: #2563eb;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+}
+
+.elise-intro-text::before {
+  content: '—';
+  opacity: .5;
+}
+
+/* Part 2 — Actual query result */
+.elise-result-block {
+  padding: .875rem 1.25rem 1rem;
+}
+
+.rag-answer-text { margin:0; font-size:.9rem; color:#1f2937; line-height:1.7; white-space:pre-wrap; }
+
+.rag-thinking {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: 1rem 1.25rem;
+  font-size: .875rem;
+  color: #6b7280;
+}
+.elise-attach-wrapper { position: relative; }
+.elise-attach-btn { padding: .65rem .9rem; border: 2px dashed #a5b4fc; border-radius: 9px; background: #f5f3ff; color: #4f46e5; font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
+.elise-attach-btn:hover { background: #ede9fe; border-color: #6366f1; }
+.elise-doc-picker { position: absolute; top: calc(100% + 8px); left: 0; z-index: 100; background: white; border: 1.5px solid #e0e7ff; border-radius: 12px; padding: 1rem; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.1); }
+.picker-label { font-size: .78rem; font-weight: 600; color: #6b7280; margin: 0 0 .6rem; }
+.picker-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: .3rem; }
+.picker-item { display: flex; align-items: center; gap: .5rem; padding: .45rem .5rem; border-radius: 7px; cursor: pointer; font-size: .85rem; color: #1f2937; }
+.picker-item:hover { background: #f5f3ff; }
+.picker-item input { accent-color: #4f46e5; width: 15px; height: 15px; flex-shrink: 0; }
+.picker-icon { font-size: 1rem; flex-shrink: 0; }
+.picker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-empty { font-size: .82rem; color: #9ca3af; text-align: center; padding: .5rem; }
+.picker-close-btn { margin-top: .75rem; width: 100%; padding: .4rem; border: 1px solid #e5e7eb; border-radius: 7px; background: white; color: #6b7280; font-size: .8rem; cursor: pointer; }
+.picker-close-btn:hover { background: #f9fafb; }
+
+/* Sources grid (unchanged layout, minor polish) */
+.rag-sources-grid { display:flex; flex-direction:column; gap:.5rem; padding:.75rem 1.25rem 1.25rem; }
+.rag-badge { background:linear-gradient(135deg,#2563eb,#4f46e5); color:white; font-size:.72rem; font-weight:700; padding:.2rem .75rem; border-radius:999px; }
+.rag-source-count { font-size:.8rem; color:#6b7280; }
+.rag-close { margin-left:auto; background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1rem; }
+.rag-thinking { display:flex; align-items:center; gap:.5rem; color:#9ca3af; font-size:.85rem; }
+.rag-answer-text { color:#111827; line-height:1.75; white-space:pre-wrap; font-size:.9rem; }
+.rag-sources-grid { margin-top:1rem; display:flex; flex-direction:column; gap:.5rem; border-top:1px solid #e0e7ff; padding-top:.875rem; }
+.rag-source-chip { display:flex; align-items:flex-start; gap:.75rem; background:#f8faff; border:1px solid #e0e7ff; border-radius:10px; padding:.75rem; }
+.src-num { width:22px; height:22px; flex-shrink:0; background:linear-gradient(135deg,#2563eb,#4f46e5); color:white; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.68rem; font-weight:700; margin-top:.1rem; }
+.src-body { flex:1; min-width:0; }
+.src-title { font-size:.83rem; font-weight:600; color:#111827; }
+.src-meta { font-size:.73rem; color:#6b7280; margin-top:.1rem; }
+.src-excerpt { font-size:.75rem; color:#6b7280; font-style:italic; margin-top:.25rem; line-height:1.5; }
+.src-view-btn { flex-shrink:0; padding:.3rem .65rem; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; border-radius:7px; font-size:.75rem; font-weight:600; cursor:pointer; white-space:nowrap; }
+.src-view-btn:hover { background:#dbeafe; }
+
+.elise-attach-btn { padding: .65rem .9rem; border: 2px dashed #a5b4fc; border-radius: 9px; background: #f5f3ff; color: #4f46e5; font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
+.elise-attach-btn:hover { background: #ede9fe; border-color: #6366f1; }
+
+.picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.picker-modal { background: white; border-radius: 16px; width: 480px; max-width: 95vw; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.2); overflow: hidden; }
+.picker-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
+.picker-modal-title { font-size: 1rem; font-weight: 700; color: #1f2937; margin: 0; }
+.picker-modal-close { background: none; border: none; font-size: 1.1rem; color: #9ca3af; cursor: pointer; padding: .25rem; border-radius: 6px; }
+.picker-modal-close:hover { background: #f3f4f6; color: #374151; }
+.picker-modal-search { display: flex; align-items: center; gap: .5rem; margin: 1rem 1.5rem .5rem; border: 1.5px solid #e5e7eb; border-radius: 9px; padding: .5rem .75rem; }
+.picker-modal-search:focus-within { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.1); }
+.picker-modal-search-input { flex: 1; border: none; outline: none; font-size: .875rem; color: #1f2937; background: transparent; }
+.picker-modal-search-clear { background: none; border: none; color: #9ca3af; cursor: pointer; font-size: .9rem; }
+.picker-modal-body { flex: 1; overflow-y: auto; padding: .5rem 1rem 1rem; display: flex; flex-direction: column; gap: .35rem; }
+.picker-modal-loading, .picker-modal-empty { display: flex; align-items: center; justify-content: center; gap: .5rem; color: #9ca3af; font-size: .875rem; padding: 2rem; }
+.picker-modal-item { display: flex; align-items: center; gap: .75rem; padding: .65rem .75rem; border-radius: 9px; border: 1.5px solid transparent; cursor: pointer; transition: all .15s; }
+.picker-modal-item:hover { background: #f5f3ff; border-color: #e0e7ff; }
+.picker-modal-item.selected { background: #ede9fe; border-color: #a5b4fc; }
+.picker-modal-icon { font-size: 1.2rem; flex-shrink: 0; }
+.picker-modal-info { flex: 1; min-width: 0; }
+.picker-modal-name { display: block; font-size: .875rem; font-weight: 500; color: #1f2937; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-modal-meta { display: block; font-size: .75rem; color: #9ca3af; margin-top: 2px; }
+.picker-modal-check { color: #4f46e5; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
+.picker-modal-footer { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.5rem; border-top: 1px solid #f0f0f0; }
+.picker-modal-count { font-size: .8rem; color: #6b7280; flex: 1; }
+.picker-modal-clear-btn { padding: .45rem .9rem; border: 1px solid #e5e7eb; border-radius: 7px; background: white; color: #6b7280; font-size: .8rem; cursor: pointer; }
+.picker-modal-clear-btn:hover { background: #f9fafb; }
+.picker-modal-confirm-btn { padding: .45rem 1.1rem; border: none; border-radius: 7px; background: linear-gradient(135deg,#4f46e5,#2563eb); color: white; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.picker-modal-confirm-btn:hover { opacity: .9; }
+
+
 </style>
+
+
+================================================================================

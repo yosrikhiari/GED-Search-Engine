@@ -66,6 +66,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { auth } from '../api.js'   // ← THIS WAS MISSING — caused "Impossible de contacter le serveur"
 
 const router   = useRouter()
 const username = ref('')
@@ -75,19 +76,11 @@ const error    = ref('')
 
 const handleLogin = async () => {
   loading.value = true
-  error.value   = ''
-
+  error.value = ''
   try {
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: username.value, password: password.value })
-    })
-
+    const response = await auth.login(username.value, password.value)
     if (response.ok) {
       const data = await response.json()
-      // Store token and user info
-      localStorage.setItem('ged_token', data.token)
       localStorage.setItem('ged_user', JSON.stringify({
         username: data.username,
         fullName: data.fullName,
@@ -95,7 +88,7 @@ const handleLogin = async () => {
       }))
       router.push('/')
     } else {
-      const err = await response.json()
+      const err = await response.json().catch(() => ({}))
       error.value = err.error || 'Identifiants incorrects'
     }
   } catch (e) {
@@ -210,30 +203,27 @@ const handleLogin = async () => {
   background: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%);
   color: white;
   border: none;
-  border-radius: 12px;
+  border-radius: 10px;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
+  transition: opacity 0.2s, transform 0.1s;
 }
 
 .login-btn:hover:not(:disabled) {
-  box-shadow: 0 8px 15px -3px rgba(37,99,235,0.4);
+  opacity: 0.9;
   transform: translateY(-1px);
 }
 
 .login-btn:disabled {
-  opacity: 0.7;
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
 .loading-text {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
 }
 
@@ -243,8 +233,13 @@ const handleLogin = async () => {
   animation: spin 1s linear infinite;
 }
 
-.spinner-bg { opacity: 0.25; }
-.spinner-path { opacity: 0.75; }
+.spinner-bg {
+  opacity: 0.25;
+}
+
+.spinner-path {
+  opacity: 0.75;
+}
 
 @keyframes spin {
   from { transform: rotate(0deg); }
@@ -253,7 +248,7 @@ const handleLogin = async () => {
 
 .login-hint {
   text-align: center;
-  font-size: 0.8rem;
   color: #9ca3af;
+  font-size: 0.8rem;
 }
 </style>

@@ -1,5 +1,3 @@
-================================================================================
-
 <template>
   <div class="admin-layout">
     <!-- Sidebar -->
@@ -71,12 +69,12 @@
                   d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
               </svg>
               <input v-model="docSearch"
-                @keyup.enter="searchDocuments"
+                @keyup.enter="handleSearch"
                 @input="onSearchInput"
                 @keydown.down.prevent="selectSuggestion(1)"
                 @keydown.up.prevent="selectSuggestion(-1)"
                 @keydown.escape="showAutocomplete = false"
-                @blur="window.setTimeout(()=>showAutocomplete=false,180)"
+                @blur="onSearchBlur"
                 type="text"
                 placeholder="Recherche en langage naturel… ex : « contrats 2024 »"
                 class="search-input"/>
@@ -91,7 +89,66 @@
                 </div>
               </div>
             </div>
-            <button @click="searchDocuments" :disabled="searchLoading" class="search-btn">
+            <button
+              @click="ragMode = !ragMode; ragAnswer = ''; ragSources = []"
+              :class="['rag-toggle-btn', { active: ragMode }]"
+              title="Mode Assistant IA"
+            >
+              ✨ {{ ragMode ? 'Elise active' : 'Ask Elise' }}
+            </button>
+            <!-- Document attachment picker button -->
+            <button v-if="ragMode" @click="openDocPicker" class="elise-attach-btn">
+              📎 {{ attachedDocIds.length ? attachedDocIds.length + ' joint(s)' : 'Joindre' }}
+            </button>
+
+            <!-- Doc picker modal (teleported to body) -->
+            <teleport to="body">
+              <div v-if="showDocPicker" class="picker-overlay" @click.self="showDocPicker = false">
+                <div class="picker-modal">
+                  <div class="picker-modal-header">
+                    <h3 class="picker-modal-title">📎 Joindre des documents à Elise</h3>
+                    <button @click="showDocPicker = false" class="picker-modal-close">✕</button>
+                  </div>
+
+                  <div class="picker-modal-search">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px;color:#9ca3af;flex-shrink:0">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input v-model="pickerSearch" type="text" placeholder="Rechercher un document…" class="picker-modal-search-input" />
+                    <button v-if="pickerSearch" @click="pickerSearch = ''" class="picker-modal-search-clear">✕</button>
+                  </div>
+
+                  <div class="picker-modal-body">
+                    <div v-if="pickerLoading" class="picker-modal-loading">
+                      <svg class="spinner" style="width:20px;height:20px" fill="none" viewBox="0 0 24 24">
+                        <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                        <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                      </svg>
+                      Chargement…
+                    </div>
+                    <div v-else-if="!filteredPickerDocs.length" class="picker-modal-empty">
+                      Aucun document trouvé
+                    </div>
+                    <label v-else v-for="doc in filteredPickerDocs" :key="doc.id" class="picker-modal-item" :class="{ selected: attachedDocIds.includes(doc.id) }">
+                      <input type="checkbox" :value="doc.id" v-model="attachedDocIds" style="display:none" />
+                      <span class="picker-modal-icon">{{ getFileIcon(doc.contentType) }}</span>
+                      <div class="picker-modal-info">
+                        <span class="picker-modal-name">{{ doc.title }}</span>
+                        <span class="picker-modal-meta">{{ doc.category || '—' }}</span>
+                      </div>
+                      <span v-if="attachedDocIds.includes(doc.id)" class="picker-modal-check">✓</span>
+                    </label>
+                  </div>
+
+                  <div class="picker-modal-footer">
+                    <span class="picker-modal-count">{{ attachedDocIds.length }} sélectionné(s)</span>
+                    <button @click="attachedDocIds = []" class="picker-modal-clear-btn">Tout désélectionner</button>
+                    <button @click="showDocPicker = false" class="picker-modal-confirm-btn">Confirmer</button>
+                  </div>
+                </div>
+              </div>
+            </teleport>
+            <button @click="handleSearch" :disabled="searchLoading" class="search-btn">
               <span v-if="!searchLoading">Rechercher</span>
               <span v-else class="loading-text">
                 <svg class="spinner" fill="none" viewBox="0 0 24 24">
@@ -195,8 +252,64 @@
           </div>
         </div>
 
+        <!-- RAG answer panel -->
+        <div v-if="ragMode && (ragAnswer || ragLoading)" class="rag-answer-panel">
+          <!-- ── Header ───────────────────────────────────────────────── -->
+          <div class="rag-answer-header">
+            <div class="elise-avatar-row">
+              <span class="elise-avatar">✨</span>
+              <div>
+                <span class="elise-name">Elise</span>
+                <span class="elise-subtitle">Assistante documentaire IA</span>
+              </div>
+            </div>
+            <div class="rag-header-actions">
+              <span v-if="ragSources.length" class="rag-source-count">{{ ragSources.length }} source(s)</span>
+              <button @click="ragAnswer = ''; ragSources = []" class="rag-close">✕</button>
+            </div>
+          </div>
+
+          <!-- ── Loading state ────────────────────────────────────────── -->
+          <div v-if="ragLoading" class="rag-thinking">
+            <svg class="spinner" style="width:16px;height:16px" fill="none" viewBox="0 0 24 24">
+              <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            Elise analyse vos documents…
+          </div>
+
+          <!-- ── Two-part answer ──────────────────────────────────────── -->
+          <template v-else-if="ragAnswer">
+            <!-- Part 1: Elise conversational intro -->
+            <div class="elise-intro-block">
+              <p class="elise-intro-text">Voici ce que j'ai trouvé dans vos documents :</p>
+            </div>
+
+            <!-- Part 2: Actual query result -->
+            <div class="elise-result-block">
+              <p class="rag-answer-text">{{ ragAnswer }}</p>
+            </div>
+          </template>
+
+          <!-- ── Sources ──────────────────────────────────────────────── -->
+          <div v-if="ragSources.length" class="rag-sources-grid">
+            <div v-for="(src, i) in ragSources" :key="i" class="rag-source-chip">
+              <span class="src-num">{{ i + 1 }}</span>
+              <div class="src-body">
+                <p class="src-title">{{ src.title }}</p>
+                <p class="src-meta">
+                  <span v-if="src.category">{{ src.category }} · </span>
+                  {{ Math.round(src.relevanceScore * 100) }}% pertinent
+                </p>
+                <p v-if="src.excerpt" class="src-excerpt">{{ src.excerpt }}</p>
+              </div>
+              <button @click="viewDocument({ id: src.documentId, title: src.title, fileName: src.title, contentType: 'application/pdf', score: src.relevanceScore })" class="src-view-btn">Voir</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Results summary -->
-        <div v-if="searchResults && searchResults.documents.length > 0" class="results-summary">
+        <div v-if="searchResults && searchResults.documents?.length > 0" class="results-summary">
           <div class="summary-card">
             <span class="summary-count">{{ searchResults.totalResults }}</span>
             <span class="summary-text"> résultat(s)</span>
@@ -207,7 +320,7 @@
         </div>
 
         <!-- Documents grid -->
-        <div v-if="searchResults && searchResults.documents.length > 0" class="documents-grid">
+        <div v-if="searchResults && searchResults.documents?.length > 0" class="documents-grid">
           <article v-for="doc in searchResults.documents" :key="doc.id" class="document-card">
             <div class="card-content">
               <div class="doc-info">
@@ -492,21 +605,154 @@
           </div>
         </div>
       </section>
+      <!-- ── ACCESS MANAGEMENT TAB ────────────────────────────────────────── -->
+      
+      <section v-if="activeTab === 'access'" class="access-dashboard">
 
-      <!-- ── AI ASSISTANT TAB ─────────────────────────────────────────── -->
-      <section v-if="activeTab === 'rag'">
         <div class="page-header">
           <div>
-            <h1 class="page-title">Assistant IA</h1>
-            <p class="page-subtitle">Posez des questions sur vos documents</p>
+            <h1 class="page-title">Gestion des accès</h1>
+            <p class="page-subtitle">
+              {{ accessStats.groups }} groupe(s) ·
+              {{ accessStats.activeGrants }} accès actifs ·
+              {{ accessStats.expiredGrants }} expirés
+            </p>
+          </div>
+          <button @click="openAccessModal('groups')" class="btn-primary">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:18px;height:18px">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+            </svg>
+            Gérer les accès
+          </button>
+        </div>
+
+        <!-- KPI rapides -->
+        <div class="access-kpi-row">
+          <div class="access-kpi-card" @click="openAccessModal('groups')">
+            <div class="akpi-icon" style="background:#eff6ff; color:#2563eb">📦</div>
+            <div class="akpi-body">
+              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.groups }}</p>
+              <p class="akpi-label">Groupes de documents</p>
+            </div>
+            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+
+          <div class="access-kpi-card" @click="openAccessModal('rights')">
+            <div class="akpi-icon" style="background:#f0fdf4; color:#16a34a">🔑</div>
+            <div class="akpi-body">
+              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.activeGrants }}</p>
+              <p class="akpi-label">Accès actifs</p>
+            </div>
+            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+
+          <div class="access-kpi-card" :class="{ 'akpi-warning': accessStats.expiredGrants > 0 }" @click="openAccessModal('rights')">
+            <div class="akpi-icon" style="background:#fff7ed; color:#ea580c">⏰</div>
+            <div class="akpi-body">
+              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.expiredGrants }}</p>
+              <p class="akpi-label">Accès expirés</p>
+            </div>
+            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </div>
+
+          <div class="access-kpi-card" @click="openAccessModal('roles')">
+            <div class="akpi-icon" style="background:#faf5ff; color:#7c3aed">👤</div>
+            <div class="akpi-body">
+              <p class="akpi-value">{{ accessLoading ? '…' : users.filter(u => u.isActive).length }}</p>
+              <p class="akpi-label">Utilisateurs actifs</p>
+            </div>
+            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
           </div>
         </div>
-        <div class="rag-redirect">
-          <p>L'assistant IA est disponible dans une interface dédiée.</p>
-          <router-link to="/rag" class="btn-primary" style="display:inline-flex;gap:.5rem;align-items:center;">
-            🤖 Ouvrir l'Assistant IA
-          </router-link>
+
+        <!-- Tableau des groupes (preview) -->
+        <div class="access-preview-card">
+          <div class="apc-header">
+            <h2 class="apc-title">
+              <span>📦</span> Groupes récents
+            </h2>
+            <button @click="openAccessModal('groups')" class="apc-see-all">
+              Voir tout →
+            </button>
+          </div>
+
+          <div v-if="accessLoading" class="apc-loading">
+            <div class="spinner-ring"></div> Chargement…
+          </div>
+          <div v-else-if="!accessGroups.length" class="apc-empty">
+            Aucun groupe créé. Cliquez sur "Gérer les accès" pour commencer.
+          </div>
+          <div v-else class="apc-groups-list">
+            <div v-for="g in accessGroups.slice(0, 5)" :key="g.id" class="apc-group-row" @click="openAccessModal('groups')">
+              <div class="apc-group-icon" :style="{ background: (g.color || '#2563eb') + '22', color: g.color || '#2563eb' }">
+                {{ g.icon || '📁' }}
+              </div>
+              <div class="apc-group-info">
+                <p class="apc-group-name">{{ g.name }}</p>
+                <p class="apc-group-meta">
+                  <span>{{ g.category || 'Sans catégorie' }}</span>
+                  <span class="apc-dot">·</span>
+                  <span>{{ g.documentCount }} doc(s)</span>
+                  <span class="apc-dot">·</span>
+                  <span>{{ g.userCount }} utilisateur(s)</span>
+                </p>
+              </div>
+              <svg class="apc-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+            </div>
+            <div v-if="accessGroups.length > 5" class="apc-more">
+              + {{ accessGroups.length - 5 }} groupe(s) supplémentaire(s)
+            </div>
+          </div>
         </div>
+
+        <!-- Accès directs expirés (alerte si présents) -->
+        <div v-if="accessStats.expiredGrants > 0" class="access-alert-card">
+          <div class="alert-icon">⚠️</div>
+          <div>
+            <p class="alert-title">{{ accessStats.expiredGrants }} accès expirés détectés</p>
+            <p class="alert-desc">Ces accès ne sont plus fonctionnels mais restent visibles dans le journal. Vous pouvez les révoquer proprement.</p>
+          </div>
+          <button @click="openAccessModal('rights')" class="btn-primary" style="white-space:nowrap">
+            Voir les accès
+          </button>
+        </div>
+
+        <!-- Répartition des rôles -->
+        <div class="access-preview-card">
+          <div class="apc-header">
+            <h2 class="apc-title">
+              <span>👤</span> Répartition des rôles
+            </h2>
+            <button @click="openAccessModal('roles')" class="apc-see-all">
+              Gérer les rôles →
+            </button>
+          </div>
+          <div class="apc-roles-grid">
+            <div v-for="role in ['Admin','Manager','User','ReadOnly']" :key="role" class="apc-role-row">
+              <span class="role-tag" :class="roleClass(role)">{{ roleLabel(role) }}</span>
+              <div class="apc-role-bar-wrap">
+                <div class="apc-role-bar">
+                  <div class="apc-role-fill" :class="'rfill-' + role.toLowerCase()"
+                    :style="`width:${users.length ? Math.round(users.filter(u=>u.role===role).length/users.length*100) : 0}%`">
+                  </div>
+                </div>
+                <span class="apc-role-count">{{ users.filter(u=>u.role===role).length }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </section>
     </main>
 
@@ -784,6 +1030,13 @@
         </div>
       </div>
     </div>
+    <!-- ── ACCESS MANAGEMENT MODAL ──────────────────────────────────────── -->
+    <AccessManagementModal
+      v-if="showAccessModal"
+      :initial-tab="accessModalTab"
+      @close="showAccessModal = false"
+      @saved="onAccessSaved"
+    />
 
     <!-- ── UPLOAD MODAL ───────────────────────────────────────────────── -->
     <div v-if="showUpload" class="modal-overlay" @click.self="showUpload = false">
@@ -950,8 +1203,9 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AccessManagementModal from '../components/AccessManagementModal.vue'
 
 const router = useRouter()
 
@@ -969,8 +1223,8 @@ const activeTab = ref('documents')
 const tabs = [
   { id: 'documents', label: 'Documents',    icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>' },
   { id: 'users',     label: 'Utilisateurs', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>' },
+  { id: 'access',    label: 'Accès',        icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>' },
   { id: 'stats',     label: 'Statistiques', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
-  { id: 'rag',       label: 'Assistant IA', icon: '🤖' },
 ]
 
 // ── Documents / Search ─────────────────────────────────────────────────────────
@@ -984,6 +1238,48 @@ const searchResults  = ref(null)
 const totalResults   = ref(null)
 const filters        = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '', ocrStatus: '', service: '' })
 const quickSearches  = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents', 'rapports']
+const ragMode       = ref(false)   // toggle: false = normal search, true = RAG
+const ragAnswer     = ref('')
+const ragSources    = ref([])
+const ragLoading    = ref(false)
+const attachedDocIds  = ref([])   // IDs of documents pinned for Elise
+const showDocPicker   = ref(false)
+const pickerSearch    = ref('')
+const pickerLoading   = ref(false)
+const pickerDocs      = ref([])
+
+const filteredPickerDocs = computed(() =>
+  pickerSearch.value.trim()
+    ? pickerDocs.value.filter(d => d.title.toLowerCase().includes(pickerSearch.value.toLowerCase()))
+    : pickerDocs.value
+)
+
+const fetchPickerDocs = async () => {
+  pickerLoading.value = true
+  try {
+    // Empty query bypasses NLP entirely → BuildPrecisionQuery has no shouldQueries
+    // → falls into bq.Must(m => m.MatchAll()) → returns ALL indexed documents
+    const res = await fetch('/api/search/query', {
+      method: 'POST',
+      headers: authHeader(),
+      body: JSON.stringify({ query: '', searchType: 0, page: 1, pageSize: 500 })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      pickerDocs.value = data.documents || []
+    }
+  } catch (e) {
+    console.error('[Picker] fetchPickerDocs error:', e)
+  } finally {
+    pickerLoading.value = false
+  }
+}
+
+const openDocPicker = () => {
+  showDocPicker.value = true
+  pickerSearch.value = ''
+  fetchPickerDocs()   // always refresh the list when opening
+}
 
 // ── NLP interpretation ─────────────────────────────────────────────────────────
 const nlpInterpretation = ref(null)
@@ -1047,7 +1343,7 @@ const paginationPages = computed(() => {
 const fetchDocuments = async (query = '') => {
   loadingDocs.value = true
   try {
-    const body = { query: query || '*', searchType: 0, page: 1, pageSize: 50 }
+    const body = { query: query || '', searchType: 0, page: 1, pageSize: 50 }
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: authHeader(),
@@ -1075,6 +1371,44 @@ const buildSearchBody = (page = 1) => ({
   includeOcrContent: true
 })
 
+const handleSearch = () => {
+  if (ragMode.value) return askRag()
+  searchDocuments()
+}
+
+const askRag = async () => {
+  const query = docSearch.value.trim()   // ← docSearch, not searchQuery
+  if (!query) return
+  ragAnswer.value  = ''
+  ragSources.value = []
+  ragLoading.value = true
+  searched.value   = true
+  searchResults.value     = null
+  nlpInterpretation.value = null
+  searchError.value       = null
+  try {
+    const res = await fetch('/api/rag/ask', {
+      method: 'POST',
+      headers: authHeader(),             // ← authHeader(), not authHeaders()
+      body: JSON.stringify({
+        query,
+        language: 'fr',
+        categories:  filters.category        ? [filters.category] : undefined,
+        fromDate:    filters.dateFrom         || undefined,
+        toDate:      filters.dateTo           || undefined,
+        documentIds: attachedDocIds.value.length ? attachedDocIds.value : undefined,
+      })
+    })
+    if (!res.ok) { searchError.value = `Erreur IA (HTTP ${res.status})`; return }
+    const data = await res.json()
+    ragAnswer.value  = data.answer  || ''
+    ragSources.value = data.sources || []
+  } catch {
+    searchError.value = 'Impossible de contacter le service IA.'
+  } finally {
+    ragLoading.value = false
+  }
+}
 
 const searchDocuments = async () => {
   searchLoading.value     = true
@@ -1232,6 +1566,10 @@ const fetchBlobUrl  = async (path, mime) => {
   _blobUrl = url; return url
 }
 
+const onSearchBlur = () => {
+  window.setTimeout(() => { showAutocomplete.value = false }, 180)
+}
+
 const OcrStatus     = { Pending:0, Processing:1, TextExtracted:2, LlmCleaning:3, Completed:4, Failed:5 }
 const stopOcrPolling  = () => { if (ocrPollInterval.value) { clearInterval(ocrPollInterval.value); ocrPollInterval.value = null } }
 const startOcrPolling = (docId) => {
@@ -1286,6 +1624,11 @@ const viewDocument = async (doc) => {
     if (r.ok) {
       const fresh = await r.json()
       currentDocument.value = { ...fresh, score: doc.score, highlights: doc.highlights }
+    } else if (r.status === 404) {
+      documentLoading.value = false
+      showDocumentViewer.value = false
+      alert(`Ce document n'existe plus dans la base de données (index désynchronisé). Veuillez rafraîchir la recherche.`)
+      return
     }
     populateEditData(currentDocument.value)
   } catch { /* non-fatal */ }
@@ -1392,12 +1735,65 @@ const isOffice = (t) => ['application/msword','application/vnd.openxmlformats-of
 const users          = ref([])
 const loadingUsers   = ref(false)
 const showCreateUser = ref(false)
+const showAccessModal = ref(false)
+const accessModalTab   = ref('groups') 
+const accessLoading    = ref(false)
+const accessGroups     = ref([])
+const accessStats      = reactive({ groups: 0, activeGrants: 0, expiredGrants: 0 })
 const savingUser     = ref(false)
 const userError      = ref('')
 const userSuccess    = ref('')
 const newUser        = ref({ username: '', password: '', fullName: '', email: '', role: 'User' })
 
 const nonAdminUsers = computed(() => users.value.filter(u => u.role !== 'Admin' && u.isActive))
+
+/** Ouvre le modal sur un onglet précis */
+const openAccessModal = (tab = 'groups') => {
+  accessModalTab.value = tab
+  showAccessModal.value = true
+}
+/** Appelé quand le modal AccessManagementModal émet @saved (création/révocation) */
+const onAccessSaved = () => {
+  loadAccessDashboard()
+}
+
+/** Charge les données légères pour l'aperçu de la section Accès */
+const loadAccessDashboard = async () => {
+  accessLoading.value = true
+  try {
+    // Groupes
+    const gRes = await fetch('/api/groups', { headers: authHeader() })
+    if (gRes.ok) {
+      const gs = await gRes.json()
+      accessGroups.value = gs
+      accessStats.groups = gs.length
+    }
+
+    // Résumé accès par utilisateur
+    const rRes = await fetch('/api/groups/users/access-summary', { headers: authHeader() })
+    if (rRes.ok) {
+      const summary = await rRes.json()
+      let active = 0, expired = 0
+      for (const u of summary) {
+        for (const g of (u.groups || [])) active++
+        for (const d of (u.directGrants || [])) {
+          d.isActive ? active++ : expired++
+        }
+      }
+      accessStats.activeGrants  = active
+      accessStats.expiredGrants = expired
+    }
+  } catch (e) {
+    console.warn('[Access Dashboard] Load error:', e)
+  } finally {
+    accessLoading.value = false
+  }
+}
+
+// Charger lors du switch vers l'onglet access
+watch(activeTab, (tab) => {
+  if (tab === 'access') loadAccessDashboard()
+})
 
 const fetchUsers = async () => {
   loadingUsers.value = true
@@ -1974,6 +2370,83 @@ onMounted(async () => {
 .filters-reset-btn { background:none; border:1px solid #fca5a5; color:#dc2626; border-radius:7px; padding:.28rem .75rem; font-size:.76rem; font-weight:600; cursor:pointer; transition:all .15s; }
 .filters-reset-btn:hover { background:#fee2e2; }
 
+/* ── Access tab overview ─────────────────────────────────────────────── */
+.access-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; margin-top: .5rem; }
+.access-card { display: flex; align-items: center; gap: 1rem; background: white; border: 1px solid #e5e7eb; border-radius: 14px; padding: 1.25rem 1.5rem; cursor: pointer; transition: all .15s; }
+.access-card:hover { border-color: #bfdbfe; box-shadow: 0 4px 14px rgba(37,99,235,.1); transform: translateY(-1px); }
+.access-card-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; }
+.access-card-title { font-weight: 700; color: #111827; font-size: .95rem; }
+.access-card-desc  { font-size: .78rem; color: #6b7280; margin-top: .15rem; }
+.access-card-arrow { width: 18px; height: 18px; color: #9ca3af; margin-left: auto; flex-shrink: 0; }
+
+/* ── Access Dashboard ─────────────────────────────────────────────────────── */
+.access-dashboard { display: flex; flex-direction: column; gap: 1.5rem; }
+
+/* KPI row */
+.access-kpi-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+.access-kpi-card {
+  display: flex; align-items: center; gap: 1rem;
+  background: white; border: 1px solid #e5e7eb; border-radius: 14px;
+  padding: 1rem 1.25rem; cursor: pointer;
+  transition: all 0.15s; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.access-kpi-card:hover { border-color: #93c5fd; box-shadow: 0 4px 12px rgba(37,99,235,.08); transform: translateY(-1px); }
+.access-kpi-card.akpi-warning { border-color: #fed7aa; }
+.akpi-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; flex-shrink: 0; }
+.akpi-body { flex: 1; }
+.akpi-value { font-size: 1.5rem; font-weight: 800; color: #111827; line-height: 1; }
+.akpi-label { font-size: 0.78rem; color: #6b7280; margin-top: 0.15rem; }
+.akpi-arrow { width: 16px; height: 16px; color: #9ca3af; flex-shrink: 0; }
+/* Preview card */
+.access-preview-card {
+  background: white; border: 1px solid #e5e7eb; border-radius: 14px;
+  padding: 1.25rem 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,.04);
+}
+.apc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.apc-title { font-size: 0.95rem; font-weight: 700; color: #111827; display: flex; align-items: center; gap: 0.5rem; }
+.apc-see-all { font-size: 0.8rem; color: #2563eb; background: none; border: none; cursor: pointer; font-weight: 600; }
+.apc-see-all:hover { text-decoration: underline; }
+.apc-loading { color: #9ca3af; font-size: 0.875rem; display: flex; align-items: center; gap: 0.5rem; padding: 1rem 0; }
+.apc-empty { color: #9ca3af; font-size: 0.875rem; text-align: center; padding: 1.5rem 0; }
+/* Group rows */
+.apc-groups-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.apc-group-row {
+  display: flex; align-items: center; gap: 0.875rem;
+  padding: 0.65rem 0.85rem; border-radius: 10px;
+  border: 1px solid #f3f4f6; cursor: pointer;
+  transition: all 0.12s;
+}
+.apc-group-row:hover { background: #f8faff; border-color: #dbeafe; }
+.apc-group-icon { width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1rem; flex-shrink: 0; }
+.apc-group-info { flex: 1; min-width: 0; }
+.apc-group-name { font-size: 0.875rem; font-weight: 600; color: #111827; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.apc-group-meta { font-size: 0.75rem; color: #6b7280; display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.apc-dot { color: #d1d5db; }
+.apc-chevron { width: 14px; height: 14px; color: #9ca3af; flex-shrink: 0; }
+.apc-more { font-size: 0.78rem; color: #6b7280; text-align: center; padding: 0.5rem 0 0; }
+
+/* Alert card */
+.access-alert-card {
+  display: flex; align-items: center; gap: 1rem;
+  background: #fff7ed; border: 1px solid #fed7aa; border-radius: 14px;
+  padding: 1rem 1.25rem;
+}
+.alert-icon { font-size: 1.5rem; flex-shrink: 0; }
+.alert-title { font-size: 0.9rem; font-weight: 700; color: #9a3412; }
+.alert-desc  { font-size: 0.8rem; color: #c2410c; margin-top: 0.15rem; }
+
+/* Roles */
+.apc-roles-grid { display: flex; flex-direction: column; gap: 0.75rem; }
+.apc-role-row { display: flex; align-items: center; gap: 1rem; }
+.apc-role-bar-wrap { display: flex; align-items: center; gap: 0.5rem; flex: 1; }
+.apc-role-bar { flex: 1; height: 6px; background: #f3f4f6; border-radius: 99px; overflow: hidden; }
+.apc-role-fill { height: 100%; border-radius: 99px; transition: width 0.4s; }
+.rfill-admin    { background: #f59e0b; }
+.rfill-manager  { background: #3b82f6; }
+.rfill-user     { background: #22c55e; }
+.rfill-readonly { background: #94a3b8; }
+.apc-role-count { font-size: 0.8rem; font-weight: 600; color: #374151; min-width: 24px; text-align: right; }
+
 /* ── Stats tab ── */
 .stats-section { display:flex; flex-direction:column; gap:1.25rem; }
 .btn-secondary { display:inline-flex; align-items:center; gap:.4rem; padding:.55rem 1.1rem; background:white; border:1.5px solid #e5e7eb; color:#374151; border-radius:9px; font-size:.85rem; font-weight:600; cursor:pointer; transition:all .15s; }
@@ -2014,4 +2487,166 @@ onMounted(async () => {
 .rfill-user    { background:linear-gradient(90deg,#10b981,#059669); }
 .rfill-readonly { background:#94a3b8; }
 .role-count { font-size:.8rem; font-weight:700; color:#374151; min-width:24px; text-align:right; }
+
+/* ── RAG toggle button ── */
+.rag-toggle-btn { padding:.8rem 1rem; border:2px solid #e5e7eb; border-radius:9px; background:white; color:#6b7280; font-size:.85rem; font-weight:600; cursor:pointer; transition:all .2s; white-space:nowrap; }
+.rag-toggle-btn.active { background:linear-gradient(135deg,#1a2b4a,#2563eb); border-color:transparent; color:white; }
+.rag-toggle-btn.active::before { content:''; }
+/* ── RAG answer panel ── */
+/* ── Elise answer panel identity ─────────────────────────────── */
+.rag-answer-panel { background:white; border:2px solid #e8edff; border-radius:14px; padding:0; overflow:hidden; }
+
+.rag-answer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .875rem 1.25rem;
+  background: linear-gradient(135deg, #1a2b4a 0%, #2563eb 100%);
+  color: white;
+}
+
+.elise-avatar-row { display:flex; align-items:center; gap:.75rem; }
+
+.elise-avatar {
+  width: 36px;
+  height: 36px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  border: 2px solid rgba(255,255,255,0.3);
+}
+
+.elise-name { font-weight:700; font-size:.95rem; display:block; letter-spacing:.01em; }
+.elise-subtitle { font-size:.7rem; opacity:.75; display:block; margin-top:1px; }
+
+.rag-header-actions { display:flex; align-items:center; gap:.75rem; }
+
+.rag-source-count {
+  font-size:.72rem;
+  background: rgba(255,255,255,0.2);
+  color: white;
+  padding:.2rem .65rem;
+  border-radius:999px;
+  font-weight:600;
+}
+
+.rag-close {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: white;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .8rem;
+  transition: background .2s;
+}
+.rag-close:hover { background: rgba(255,255,255,0.3); }
+
+/* Part 1 — Elise conversational intro */
+.elise-intro-block {
+  padding: .875rem 1.25rem .5rem;
+  border-bottom: 1px solid #f0f4ff;
+  background: #f8faff;
+}
+
+.elise-intro-text {
+  font-size: .875rem;
+  color: #2563eb;
+  font-weight: 600;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+}
+
+.elise-intro-text::before {
+  content: '—';
+  opacity: .5;
+}
+
+/* Part 2 — Actual query result */
+.elise-result-block {
+  padding: .875rem 1.25rem 1rem;
+}
+
+.rag-answer-text { margin:0; font-size:.9rem; color:#1f2937; line-height:1.7; white-space:pre-wrap; }
+
+.rag-thinking {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: 1rem 1.25rem;
+  font-size: .875rem;
+  color: #6b7280;
+}
+.elise-attach-wrapper { position: relative; }
+.elise-attach-btn { padding: .65rem .9rem; border: 2px dashed #a5b4fc; border-radius: 9px; background: #f5f3ff; color: #4f46e5; font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
+.elise-attach-btn:hover { background: #ede9fe; border-color: #6366f1; }
+.elise-doc-picker { position: absolute; top: calc(100% + 8px); left: 0; z-index: 100; background: white; border: 1.5px solid #e0e7ff; border-radius: 12px; padding: 1rem; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.1); }
+.picker-label { font-size: .78rem; font-weight: 600; color: #6b7280; margin: 0 0 .6rem; }
+.picker-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: .3rem; }
+.picker-item { display: flex; align-items: center; gap: .5rem; padding: .45rem .5rem; border-radius: 7px; cursor: pointer; font-size: .85rem; color: #1f2937; }
+.picker-item:hover { background: #f5f3ff; }
+.picker-item input { accent-color: #4f46e5; width: 15px; height: 15px; flex-shrink: 0; }
+.picker-icon { font-size: 1rem; flex-shrink: 0; }
+.picker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-empty { font-size: .82rem; color: #9ca3af; text-align: center; padding: .5rem; }
+.picker-close-btn { margin-top: .75rem; width: 100%; padding: .4rem; border: 1px solid #e5e7eb; border-radius: 7px; background: white; color: #6b7280; font-size: .8rem; cursor: pointer; }
+.picker-close-btn:hover { background: #f9fafb; }
+
+/* Sources grid (unchanged layout, minor polish) */
+.rag-sources-grid { display:flex; flex-direction:column; gap:.5rem; padding:.75rem 1.25rem 1.25rem; }
+.rag-badge { background:linear-gradient(135deg,#2563eb,#4f46e5); color:white; font-size:.72rem; font-weight:700; padding:.2rem .75rem; border-radius:999px; }
+.rag-source-count { font-size:.8rem; color:#6b7280; }
+.rag-close { margin-left:auto; background:none; border:none; cursor:pointer; color:#9ca3af; font-size:1rem; }
+.rag-thinking { display:flex; align-items:center; gap:.5rem; color:#9ca3af; font-size:.85rem; }
+.rag-answer-text { color:#111827; line-height:1.75; white-space:pre-wrap; font-size:.9rem; }
+.rag-sources-grid { margin-top:1rem; display:flex; flex-direction:column; gap:.5rem; border-top:1px solid #e0e7ff; padding-top:.875rem; }
+.rag-source-chip { display:flex; align-items:flex-start; gap:.75rem; background:#f8faff; border:1px solid #e0e7ff; border-radius:10px; padding:.75rem; }
+.src-num { width:22px; height:22px; flex-shrink:0; background:linear-gradient(135deg,#2563eb,#4f46e5); color:white; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.68rem; font-weight:700; margin-top:.1rem; }
+.src-body { flex:1; min-width:0; }
+.src-title { font-size:.83rem; font-weight:600; color:#111827; }
+.src-meta { font-size:.73rem; color:#6b7280; margin-top:.1rem; }
+.src-excerpt { font-size:.75rem; color:#6b7280; font-style:italic; margin-top:.25rem; line-height:1.5; }
+.src-view-btn { flex-shrink:0; padding:.3rem .65rem; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; border-radius:7px; font-size:.75rem; font-weight:600; cursor:pointer; white-space:nowrap; }
+.src-view-btn:hover { background:#dbeafe; }
+
+/* ── Elise doc-picker modal (teleport) ──────────────────────────────────────── */
+.picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.picker-modal { background: white; border-radius: 16px; width: 480px; max-width: 95vw; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.2); overflow: hidden; }
+.picker-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
+.picker-modal-title { font-size: 1rem; font-weight: 700; color: #1f2937; margin: 0; }
+.picker-modal-close { background: none; border: none; cursor: pointer; font-size: 1.1rem; color: #6b7280; padding: .25rem; border-radius: 6px; }
+.picker-modal-close:hover { background: #f3f4f6; }
+.picker-modal-search { display: flex; align-items: center; gap: .5rem; padding: .75rem 1.5rem; border-bottom: 1px solid #f0f0f0; }
+.picker-modal-search-input { flex: 1; border: none; outline: none; font-size: .9rem; color: #374151; }
+.picker-modal-search-clear { background: none; border: none; cursor: pointer; color: #9ca3af; font-size: .85rem; padding: 0 .25rem; }
+.picker-modal-body { flex: 1; overflow-y: auto; padding: .75rem 1rem; display: flex; flex-direction: column; gap: .35rem; }
+.picker-modal-empty { text-align: center; color: #9ca3af; font-size: .9rem; padding: 2rem 0; }
+.picker-modal-item { display: flex; align-items: center; gap: .75rem; padding: .65rem .75rem; border-radius: 10px; cursor: pointer; border: 2px solid transparent; transition: all .15s; }
+.picker-modal-item:hover { background: #f5f3ff; }
+.picker-modal-item.selected { background: #ede9fe; border-color: #8b5cf6; }
+.picker-modal-icon { font-size: 1.3rem; flex-shrink: 0; }
+.picker-modal-info { flex: 1; min-width: 0; }
+.picker-modal-name { display: block; font-size: .9rem; font-weight: 500; color: #1f2937; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.picker-modal-meta { display: block; font-size: .78rem; color: #9ca3af; }
+.picker-modal-check { color: #7c3aed; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
+.picker-modal-footer { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.5rem; border-top: 1px solid #f0f0f0; background: #fafafa; }
+.picker-modal-count { font-size: .85rem; color: #6b7280; flex: 1; }
+.picker-modal-clear-btn { padding: .45rem .9rem; border-radius: 8px; border: 1.5px solid #e5e7eb; background: white; color: #374151; font-size: .85rem; cursor: pointer; }
+.picker-modal-clear-btn:hover { background: #f3f4f6; }
+.picker-modal-confirm-btn { padding: .45rem 1.1rem; border-radius: 8px; border: none; background: #7c3aed; color: white; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.picker-modal-confirm-btn:hover { background: #6d28d9; }
+.picker-modal-loading { display: flex; align-items: center; gap: .75rem; justify-content: center; padding: 2rem 0; color: #9ca3af; font-size: .9rem; }
 </style>
+
+
+================================================================================

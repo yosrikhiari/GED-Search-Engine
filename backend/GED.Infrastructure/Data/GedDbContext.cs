@@ -1,20 +1,34 @@
 using GED.Core.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace GED.Infrastructure.Data;
 
 /// <summary>
-/// Entity Framework Core DbContext for PostgreSQL persistence.
-/// Replaces the flat JSON file approach in DocumentService.
+/// Entity Framework Core DbContext for SQL Server persistence.
+///
+/// Migration notes from PostgreSQL:
+///   • Tags:     was text[] (PG array) → now nvarchar(max) with JSON serialization
+///   • Metadata: was jsonb             → now nvarchar(max) with JSON serialization
+///   Both use the same JSON round-trip pattern; SQL Server stores them as text
+///   and EF Core handles serialization/deserialization transparently.
+///
+///   Run after switching provider:
+///     dotnet ef migrations add MigrateToSqlServer
+///     dotnet ef database update
 /// </summary>
 public class GedDbContext : DbContext
 {
     public GedDbContext(DbContextOptions<GedDbContext> options) : base(options) { }
 
-    public DbSet<DocumentEntity> Documents => Set<DocumentEntity>();
-    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
-    public DbSet<DocumentAcl> DocumentAcls { get; set; }
-    public DbSet<DocumentMetadataEntity> DocumentMetadata => Set<DocumentMetadataEntity>();
+    public DbSet<DocumentEntity>         Documents             => Set<DocumentEntity>();
+    public DbSet<OutboxMessage>          OutboxMessages        => Set<OutboxMessage>();
+    public DbSet<DocumentAcl>            DocumentAcls          { get; set; }
+    public DbSet<DocumentMetadataEntity> DocumentMetadata      => Set<DocumentMetadataEntity>();
+    public DbSet<DocumentGroup>          DocumentGroups        { get; set; }
+    public DbSet<DocumentGroupMember>    DocumentGroupMembers  { get; set; }
+    public DbSet<AppUser> Users { get; set; }
+    public DbSet<UserGroupAssignment>    UserGroupAssignments  { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -28,11 +42,87 @@ public class GedDbContext : DbContext
             e.Property(a => a.Permission).HasColumnName("permission");
             e.Property(a => a.GrantedAt).HasColumnName("granted_at");
             e.Property(a => a.GrantedBy).HasColumnName("granted_by");
-            e.Property(a => a.ExpiresAt).HasColumnName("expires_at");  // ← NEW
+            e.Property(a => a.ExpiresAt).HasColumnName("expires_at");
             e.HasIndex(a => new { a.DocumentId, a.UserId }).HasDatabaseName("ix_acl_doc_user");
         });
-    
-        // ── Documents table ──────────────────────────────────────────────────
+
+        // ── Users table ───────────────────────────────────────────────
+        modelBuilder.Entity<AppUser>(e =>
+        {
+            e.ToTable("users");
+            e.HasKey(u => u.Id);
+            e.Property(u => u.Id).HasColumnName("id");
+            e.Property(u => u.Username).HasColumnName("username").HasMaxLength(100).IsRequired();
+            e.Property(u => u.PasswordHash).HasColumnName("password_hash").IsRequired();
+            e.Property(u => u.FullName).HasColumnName("full_name").HasMaxLength(200);
+            e.Property(u => u.Email).HasColumnName("email").HasMaxLength(200);
+            e.Property(u => u.Role).HasColumnName("role").HasConversion<string>();
+            e.Property(u => u.IsActive).HasColumnName("is_active");
+            e.Property(u => u.CreatedAt).HasColumnName("created_at");
+            e.Property(u => u.LastLoginAt).HasColumnName("last_login_at");
+            e.Property(u => u.AllowedCategories)
+            .HasColumnName("allowed_categories")
+            .HasColumnType("nvarchar(max)")
+            .HasConversion(
+                v => v == null ? null : JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
+                v => v == null ? null : JsonSerializer.Deserialize<List<string>>(v, (JsonSerializerOptions?)null)
+            );
+            e.HasIndex(u => u.Username).IsUnique().HasDatabaseName("ix_users_username");
+        });
+
+        // ── DocumentGroup table ───────────────────────────────────────────────
+        modelBuilder.Entity<DocumentGroup>(e =>
+        {
+            e.ToTable("document_groups");
+            e.HasKey(g => g.Id);
+            e.Property(g => g.Id).HasColumnName("id");
+            e.Property(g => g.Name).HasColumnName("name").HasMaxLength(200).IsRequired();
+            e.Property(g => g.Description).HasColumnName("description").HasMaxLength(1000);
+            e.Property(g => g.Color).HasColumnName("color").HasMaxLength(20);
+            e.Property(g => g.Icon).HasColumnName("icon").HasMaxLength(10);
+            e.Property(g => g.Category).HasColumnName("category").HasMaxLength(100);
+            e.Property(g => g.CreatedBy).HasColumnName("created_by");
+            e.Property(g => g.CreatedAt).HasColumnName("created_at");
+            e.Property(g => g.UpdatedAt).HasColumnName("updated_at");
+            e.Property(g => g.IsActive).HasColumnName("is_active");
+            e.HasIndex(g => g.IsActive).HasDatabaseName("ix_document_groups_active");
+        });
+
+        // ── DocumentGroupMember table ─────────────────────────────────────────
+        modelBuilder.Entity<DocumentGroupMember>(e =>
+        {
+            e.ToTable("document_group_members");
+            e.HasKey(m => m.Id);
+            e.Property(m => m.Id).HasColumnName("id");
+            e.Property(m => m.GroupId).HasColumnName("group_id");
+            e.Property(m => m.DocumentId).HasColumnName("document_id");
+            e.Property(m => m.DefaultPermission).HasColumnName("default_permission");
+            e.Property(m => m.AddedAt).HasColumnName("added_at");
+            e.Property(m => m.AddedBy).HasColumnName("added_by");
+            e.HasIndex(m => new { m.GroupId, m.DocumentId })
+             .IsUnique()
+             .HasDatabaseName("ix_group_members_group_doc");
+        });
+
+        // ── UserGroupAssignment table ─────────────────────────────────────────
+        modelBuilder.Entity<UserGroupAssignment>(e =>
+        {
+            e.ToTable("user_group_assignments");
+            e.HasKey(a => a.Id);
+            e.Property(a => a.Id).HasColumnName("id");
+            e.Property(a => a.GroupId).HasColumnName("group_id");
+            e.Property(a => a.UserId).HasColumnName("user_id");
+            e.Property(a => a.Permission).HasColumnName("permission");
+            e.Property(a => a.AssignedAt).HasColumnName("assigned_at");
+            e.Property(a => a.AssignedBy).HasColumnName("assigned_by");
+            e.Property(a => a.ExpiresAt).HasColumnName("expires_at");
+            e.HasIndex(a => new { a.GroupId, a.UserId })
+             .IsUnique()
+             .HasDatabaseName("ix_user_group_assignments_group_user");
+            e.HasIndex(a => a.UserId).HasDatabaseName("ix_user_group_assignments_user");
+        });
+
+        // ── Documents table ───────────────────────────────────────────────────
         modelBuilder.Entity<DocumentEntity>(e =>
         {
             e.ToTable("documents");
@@ -59,15 +149,27 @@ public class GedDbContext : DbContext
             e.Property(d => d.Version).HasColumnName("version");
             e.Property(d => d.ParentDocumentId).HasColumnName("parent_document_id");
 
-            // Store Tags as a PostgreSQL text array
+            // Tags: SQL Server has no native array type.
+            // Store as JSON in nvarchar(max) — EF Core serializes/deserializes automatically.
+            // Was: .HasColumnType("text[]") on PostgreSQL.
             e.Property(d => d.Tags)
              .HasColumnName("tags")
-             .HasColumnType("text[]");
+             .HasColumnType("nvarchar(max)")
+             .HasConversion(
+                v => v == null
+                    ? null
+                    : System.Text.Json.JsonSerializer.Serialize(v, (System.Text.Json.JsonSerializerOptions?)null),
+                v => v == null
+                    ? null
+                    : System.Text.Json.JsonSerializer.Deserialize<List<string>>(v, (System.Text.Json.JsonSerializerOptions?)null)
+             );
 
-            // Store Metadata dict as JSONB for flexible querying
+            // Metadata: SQL Server has no jsonb type.
+            // Store as JSON in nvarchar(max) — same semantics, slightly different storage.
+            // Was: .HasColumnType("jsonb") on PostgreSQL.
             e.Property(d => d.Metadata)
              .HasColumnName("metadata")
-             .HasColumnType("jsonb")
+             .HasColumnType("nvarchar(max)")
              .HasConversion(
                 v => v == null
                     ? null
@@ -75,23 +177,22 @@ public class GedDbContext : DbContext
                 v => v == null
                     ? null
                     : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(v, (System.Text.Json.JsonSerializerOptions?)null)
-            );
+             );
 
-            // Indexes for common queries
+            // Indexes
             e.HasIndex(d => d.CreatedAt).HasDatabaseName("ix_documents_created_at");
             e.HasIndex(d => d.DocumentDate).HasDatabaseName("ix_documents_document_date");
             e.HasIndex(d => d.Category).HasDatabaseName("ix_documents_category");
             e.HasIndex(d => d.Status).HasDatabaseName("ix_documents_status");
             e.HasIndex(d => d.ContentType).HasDatabaseName("ix_documents_content_type");
 
-            // Relationship to metadata
             e.HasMany(d => d.DocumentMetadata)
              .WithOne(m => m.Document)
              .HasForeignKey(m => m.DocumentId)
              .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // ── DocumentMetadata table ───────────────────────────────────────────
+        // ── DocumentMetadata table ────────────────────────────────────────────
         modelBuilder.Entity<DocumentMetadataEntity>(e =>
         {
             e.ToTable("document_metadata");
@@ -108,7 +209,7 @@ public class GedDbContext : DbContext
             e.HasIndex(m => new { m.DocumentId, m.Key }).HasDatabaseName("ix_document_metadata_doc_key");
         });
 
-        // ── OutboxMessages table (for reliable RabbitMQ integration) ─────────
+        // ── OutboxMessages table ──────────────────────────────────────────────
         modelBuilder.Entity<OutboxMessage>(e =>
         {
             e.ToTable("outbox_messages");
@@ -122,9 +223,6 @@ public class GedDbContext : DbContext
             e.Property(m => m.RetryCount).HasColumnName("retry_count");
             e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");
         });
-    
-    
-    
     }
 }
 

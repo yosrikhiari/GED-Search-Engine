@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Authorization;
 using GED.Core.Models;
 using GED.Infrastructure.Services;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
 
 namespace GED.API.Controllers;
 
@@ -27,26 +29,43 @@ public class AuthController : ControllerBase
 
     // ── Public ────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Login with username + password. Returns a JWT token.
-    /// </summary>
-    [HttpPost("login")]
-    [AllowAnonymous]
-    public ActionResult<LoginResponse> Login([FromBody] LoginRequest request)
+[HttpPost("login")]
+[AllowAnonymous]
+public async Task<IActionResult> Login([FromBody] LoginRequest request)
+{
+    var result = _authService.Login(request);
+    if (result == null)
+        return Unauthorized(new { error = "Invalid username or password." });
+
+    var claims = new List<Claim>
     {
-        if (string.IsNullOrWhiteSpace(request.Username) ||
-            string.IsNullOrWhiteSpace(request.Password))
-            return BadRequest(new { error = "Username and password are required." });
+        new(ClaimTypes.Name,           result.Username),
+        new(ClaimTypes.Role,           result.Role.ToString()),
+        new("fullName",                result.FullName ?? result.Username)
+    };
+    var identity  = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+    var principal = new ClaimsPrincipal(identity);
 
-        var result = _authService.Login(request);
-        if (result == null)
-            return Unauthorized(new { error = "Invalid username or password." });
+    await HttpContext.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        principal,
+        new AuthenticationProperties { ExpiresUtc = result.ExpiresAt });
 
-        return Ok(result);
-    }
+    // Return user info (no token in the response body anymore)
+    return Ok(new { result.Username, result.FullName, result.Role, result.ExpiresAt });
+}
+
+
+[HttpPost("logout")]
+[Authorize]
+public async Task<IActionResult> Logout()
+{
+    await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    return Ok();
+}
 
     /// <summary>
-    /// Returns the current user's profile (from JWT claims).
+    /// Returns the current user's profile (from session cookie claims).
     /// </summary>
     [HttpGet("me")]
     [Authorize]

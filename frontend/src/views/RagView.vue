@@ -259,7 +259,6 @@ const sendMessage = async () => {
   loading.value = true
 
   try {
-    const token = localStorage.getItem('ged_token')
 
     const body = {
       query,
@@ -271,14 +270,7 @@ const sendMessage = async () => {
 
     logger.step('rag', 'Sending request to /api/rag/ask', body)
 
-    const response = await fetch('/api/rag/ask', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-      },
-      body: JSON.stringify(body)
-    })
+    const response = await rag.ask(body)
 
     logger.response('POST', '/api/rag/ask', response.status)
 

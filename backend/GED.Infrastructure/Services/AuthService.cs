@@ -1,9 +1,6 @@
 using GED.Core.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -26,9 +23,7 @@ namespace GED.Infrastructure.Services;
 public class AuthService
 {
     private readonly ILogger<AuthService> _logger;
-    private readonly string _jwtSecret;
-    private readonly string _jwtIssuer;
-    private readonly int _jwtExpiryHours;
+
     private readonly string _usersFilePath;
 
     // In-memory user store, backed by JSON file
@@ -38,60 +33,95 @@ public class AuthService
     public AuthService(ILogger<AuthService> logger, IConfiguration configuration)
     {
         _logger         = logger;
-        _jwtSecret = configuration["Auth:JwtSecret"]
-            ?? throw new InvalidOperationException(
-                "Auth:JwtSecret is not configured. " +
-                "Set via environment variable Auth__JwtSecret.");
-        _jwtIssuer      = configuration["Auth:JwtIssuer"] ?? "GED-SearchEngine";
-        _jwtExpiryHours = configuration.GetValue<int>("Auth:JwtExpiryHours", 8);
         _usersFilePath  = configuration["Auth:UsersFilePath"] ?? "/var/lib/ged/users.json";
 
         LoadUsers();
         EnsureDefaultAdmin();
     }
 
+
+    public AppUser? GetUserByToken(string token)
+{
+    lock (_lock)
+    {
+        if (_sessions.TryGetValue(token, out var entry))
+        {
+            if (entry.Expires > DateTime.UtcNow)
+                return entry.User;
+
+            // Expired — clean it up lazily
+            _sessions.Remove(token);
+        }
+        return null;
+    }
+}
+    // ── Log Out ─────────────────────────────────────────────────────────────────
+    public bool Logout(string token)
+{
+    lock (_lock)
+    {
+        return _sessions.Remove(token);
+    }
+}
+
+// Called periodically, or lazily on each login:
+private void PurgeExpiredSessions()
+{
+    var now = DateTime.UtcNow;
+    var expired = _sessions
+        .Where(kv => kv.Value.Expires < now)
+        .Select(kv => kv.Key)
+        .ToList();
+    foreach (var key in expired)
+        _sessions.Remove(key);
+}
+
+
     // ── Login ─────────────────────────────────────────────────────────────────
 
+    private readonly Dictionary<string, (AppUser User, DateTime Expires)> _sessions = new();
+
     public LoginResponse? Login(LoginRequest request)
+{
+    lock (_lock)
     {
-        lock (_lock)
+        PurgeExpiredSessions();
+
+        var user = _users.FirstOrDefault(u =>
+            u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)
+            && u.IsActive);
+
+        if (user == null)
         {
-            var user = _users.FirstOrDefault(u =>
-                u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)
-                && u.IsActive);
-
-            if (user == null)
-            {
-                _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
-                return null;
-            }
-
-            if (!VerifyPassword(request.Password, user.PasswordHash))
-            {
-                _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
-                return null;
-            }
-
-            user.LastLoginAt = DateTime.UtcNow;
-            SaveUsers();
-
-            var token   = GenerateJwtToken(user);
-            var expires = DateTime.UtcNow.AddHours(_jwtExpiryHours);
-
-            _logger.LogInformation(
-                "✅ User '{Username}' logged in (role={Role})",
-                user.Username, user.Role);
-
-            return new LoginResponse
-            {
-                Token     = token,
-                Username  = user.Username,
-                FullName  = user.FullName,
-                Role      = user.Role,
-                ExpiresAt = expires
-            };
+            _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
+            return null;
         }
+
+        if (!VerifyPassword(request.Password, user.PasswordHash))
+        {
+            _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
+            return null;
+        }
+
+        user.LastLoginAt = DateTime.UtcNow;
+        SaveUsers();
+
+        var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var expires      = DateTime.UtcNow.AddHours(8);
+        _sessions[sessionToken] = (user, expires);
+
+        _logger.LogInformation("✅ User '{Username}' logged in (role={Role})", user.Username, user.Role);
+
+        return new LoginResponse
+        {
+            Token     = sessionToken,
+            Username  = user.Username,
+            FullName  = user.FullName,
+            Role      = user.Role,
+            ExpiresAt = expires
+        };
     }
+}
 
     // ── User management ───────────────────────────────────────────────────────
 
@@ -175,39 +205,6 @@ public class AuthService
         }
     }
 
-    /// <summary>
-    /// Validate a JWT token and return the claims principal.
-    /// Returns null if the token is invalid or expired.
-    /// </summary>
-    public ClaimsPrincipal? ValidateToken(string token)
-    {
-        try
-        {
-            var tokenHandler = new JwtSecurityTokenHandler();
-            var key          = Encoding.UTF8.GetBytes(_jwtSecret);
-
-            var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
-            {
-                ValidateIssuerSigningKey = true,
-                IssuerSigningKey         = new SymmetricSecurityKey(key),
-                ValidateIssuer           = true,
-                ValidIssuer              = _jwtIssuer,
-                ValidateAudience         = false,
-                ValidateLifetime         = true,
-                ClockSkew                = TimeSpan.Zero
-            }, out _);
-
-            return principal;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Get the allowed categories for a user (null = all categories allowed).
-    /// </summary>
     public List<string>? GetAllowedCategories(string username)
     {
         lock (_lock)
@@ -219,35 +216,6 @@ public class AuthService
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
-
-    private string GenerateJwtToken(AppUser user)
-    {
-        var key         = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSecret));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var claims = new List<Claim>
-        {
-            new(ClaimTypes.NameIdentifier, user.Id.ToString()),
-            new(ClaimTypes.Name,           user.Username),
-            new(ClaimTypes.Role,           user.Role.ToString()),
-            new("fullName",                user.FullName ?? user.Username)
-        };
-
-        // Embed allowed categories into the token
-        if (user.AllowedCategories?.Any() == true)
-            claims.Add(new Claim("allowedCategories",
-                JsonSerializer.Serialize(user.AllowedCategories)));
-
-        var token = new JwtSecurityToken(
-            issuer:   _jwtIssuer,
-            claims:   claims,
-            expires:  DateTime.UtcNow.AddHours(_jwtExpiryHours),
-            signingCredentials: credentials
-        );
-
-        return new JwtSecurityTokenHandler().WriteToken(token);
-    }
-
     private static string HashPassword(string password)
     {
         // PBKDF2 with SHA-256, 100k iterations — secure without BCrypt dependency
