@@ -46,7 +46,7 @@ public class OcrWorkerService : BackgroundService
     private const int    RetryDelayMs = 5000;
 
     private const float DateConfidenceThreshold = 0.3f;
-    private const int   NativeTextMinChars      = 50;
+    private const int   NativeTextMinChars      = 300;
 
     public OcrWorkerService(
         IServiceProvider serviceProvider,

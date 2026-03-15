@@ -185,6 +185,9 @@ public class DocumentService : IDocumentService
             _db.Documents.Add(entity);
 
             // Queue OCR job via outbox pattern (same transaction = atomic)
+            // After — same logic, clearer comment
+            // Images → TesseractDirectOcrService, scanned PDFs → OcrmyPdfOcrService
+            // Both are routed inside OcrWorkerService.ProcessOcrJobAsync
             bool needsOcr = contentType.StartsWith("image/") || contentType == "application/pdf";
             if (needsOcr)
             {

@@ -11,6 +11,12 @@ namespace GED.Infrastructure.Services;
 
 public class OcrmyPdfOcrService : IOcrService
 {
+    // Add/replace the XML doc comment above it to say:
+    /// <summary>
+    /// OCR service for scanned PDF files only. Uses ocrmypdf (which internally
+    /// calls Tesseract) to add a searchable text layer to image-only PDFs.
+    /// For standalone image files (JPEG, PNG, etc.) use TesseractDirectOcrService.
+    /// </summary>
     private readonly ILogger<OcrmyPdfOcrService> _logger;
     private readonly IMessageQueueService _messageQueue;
     private readonly string _ocrmypdfPath;
@@ -58,55 +64,17 @@ public class OcrmyPdfOcrService : IOcrService
 
         try
         {
-            // Detect file type by reading the magic bytes header
-            documentStream.Position = 0;
-            var header = new byte[4];
-            await documentStream.ReadAsync(header, 0, 4, cancellationToken);
-            documentStream.Position = 0;
-
-            bool isPdf = header[0] == 0x25 && header[1] == 0x50
-                      && header[2] == 0x44 && header[3] == 0x46; // %PDF
-
-            // ── FIX: pass images directly to ocrmypdf with the correct extension ──
-            // ocrmypdf 13.x natively accepts JPEG, PNG, TIFF as input.
-            // The old approach wrapped the image in a PDF first via iText, which
-            // caused ocrmypdf to re-rasterize an already-rasterized image, often
-            // producing a corrupt or empty text layer.
-            // Passing the raw image file directly avoids this double-conversion.
-            string imageExtension = isPdf ? ".pdf" : DetectImageExtension(header);
             string tempBaseName = Guid.NewGuid().ToString("N");
-
-            inputPath  = Path.Combine(Path.GetTempPath(), $"ocr_in_{tempBaseName}{imageExtension}");
+            inputPath  = Path.Combine(Path.GetTempPath(), $"ocr_in_{tempBaseName}.pdf");
             outputPath = Path.Combine(Path.GetTempPath(), $"ocr_out_{tempBaseName}.pdf");
 
             // Write the stream to disk with the correct extension
             using (var fs = File.Create(inputPath))
                 await documentStream.CopyToAsync(fs, cancellationToken);
 
-            _logger.LogInformation(
-                "OCR input: {Path} ({Bytes} bytes, isPdf={IsPdf})",
-                inputPath, new FileInfo(inputPath).Length, isPdf);
 
-            // Build ocrmypdf arguments
-            //   PDFs  → --skip-text  (don't error if a text layer already exists)
-            //   Images → --image-dpi (ocrmypdf needs an explicit DPI hint for images
-            //            without embedded DPI metadata; 300 is a safe default for
-            //            document scans; 72 is used for screen-resolution images)
-            string args;
-            if (isPdf)
-            {
-                // --force-ocr: OCR every page, even if a text layer exists.
-                // --skip-text caused silent failures on scanned/image-only PDFs.
-                // --rotate-pages: auto-correct page orientation (common in scans)
-                // --deskew: straighten skewed pages
-                args = $"-l {lang} --force-ocr --rotate-pages --deskew " +
-                    $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
-            }
-            else
-            {
-                args = $"-l {lang} --image-dpi 300 --force-ocr --rotate-pages --deskew " +
-                    $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
-            }
+            string args = $"-l {lang} --force-ocr --rotate-pages --deskew " +
+                $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
 
             _logger.LogInformation("Running: {Exe} {Args}", _ocrmypdfPath, args);
 
@@ -270,25 +238,6 @@ public class OcrmyPdfOcrService : IOcrService
 
         return (process.ExitCode, await stdoutTask, await stderrTask);
     }
-
-    private static string DetectImageExtension(byte[] header)
-    {
-        // PNG:  89 50 4E 47
-        if (header[0] == 0x89 && header[1] == 0x50) return ".png";
-        // JPEG: FF D8
-        if (header[0] == 0xFF && header[1] == 0xD8) return ".jpg";
-        // TIFF: 49 49 (little-endian) or 4D 4D (big-endian)
-        if ((header[0] == 0x49 && header[1] == 0x49) ||
-            (header[0] == 0x4D && header[1] == 0x4D)) return ".tiff";
-        // BMP:  42 4D
-        if (header[0] == 0x42 && header[1] == 0x4D) return ".bmp";
-        // WebP: 52 49 46 46 (RIFF)
-        if (header[0] == 0x52 && header[1] == 0x49) return ".webp";
-
-        // Default: assume PNG — ocrmypdf will error with a clear message if wrong
-        return ".png";
-    }
-
     private void TryDelete(string? path)
     {
         if (path == null) return;

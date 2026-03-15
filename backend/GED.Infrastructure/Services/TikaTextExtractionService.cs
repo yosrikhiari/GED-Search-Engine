@@ -42,11 +42,7 @@ public class TikaTextExtractionService : ITextExtractionService
             "text/html",
             "text/xml",
             "application/xml",
-            "application/epub+zip",
-            "image/jpeg",
-            "image/png",
-            "image/tiff",
-            "image/gif"
+            "application/epub+zip"
         };
 
     public TikaTextExtractionService(

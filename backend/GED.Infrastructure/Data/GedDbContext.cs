@@ -4,19 +4,7 @@ using System.Text.Json;
 
 namespace GED.Infrastructure.Data;
 
-/// <summary>
-/// Entity Framework Core DbContext for SQL Server persistence.
-///
-/// Migration notes from PostgreSQL:
-///   • Tags:     was text[] (PG array) → now nvarchar(max) with JSON serialization
-///   • Metadata: was jsonb             → now nvarchar(max) with JSON serialization
-///   Both use the same JSON round-trip pattern; SQL Server stores them as text
-///   and EF Core handles serialization/deserialization transparently.
-///
-///   Run after switching provider:
-///     dotnet ef migrations add MigrateToSqlServer
-///     dotnet ef database update
-/// </summary>
+
 public class GedDbContext : DbContext
 {
     public GedDbContext(DbContextOptions<GedDbContext> options) : base(options) { }
@@ -151,7 +139,6 @@ public class GedDbContext : DbContext
 
             // Tags: SQL Server has no native array type.
             // Store as JSON in nvarchar(max) — EF Core serializes/deserializes automatically.
-            // Was: .HasColumnType("text[]") on PostgreSQL.
             e.Property(d => d.Tags)
              .HasColumnName("tags")
              .HasColumnType("nvarchar(max)")
@@ -166,7 +153,7 @@ public class GedDbContext : DbContext
 
             // Metadata: SQL Server has no jsonb type.
             // Store as JSON in nvarchar(max) — same semantics, slightly different storage.
-            // Was: .HasColumnType("jsonb") on PostgreSQL.
+
             e.Property(d => d.Metadata)
              .HasColumnName("metadata")
              .HasColumnType("nvarchar(max)")
