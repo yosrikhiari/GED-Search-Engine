@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
+using GED.Infrastructure.Plugins.Samples;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
@@ -37,7 +38,7 @@ builder.Services.AddControllers()
             new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
 
-// ── Rate Limiting (ByteByteGo: Token Bucket) ──────────────────────────────────
+// ── Rate Limiting ─────────────────────────────────────────────────────────────
 builder.Services.AddMemoryCache();
 builder.Services.Configure<IpRateLimitOptions>(options =>
 {
@@ -101,8 +102,6 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 // ── SQL Server / EF Core ──────────────────────────────────────────────────────
-// In docker-compose, set environment variable:
-//   ConnectionStrings__DefaultConnection=Server=ged-sqlserver;Database=ged_db;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True;
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Server=localhost;Database=ged_db;User Id=ged_user;Password=ged_pass;TrustServerCertificate=True;";
 
@@ -113,7 +112,7 @@ builder.Services.AddDbContext<GedDbContext>(options =>
     })
 );
 
-// ── Session Based Cookies ─────────────────────────────────────────────────────
+// ── Cookie authentication ─────────────────────────────────────────────────────
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -136,9 +135,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 builder.Services.AddAuthorization();
 
 // ── OpenSearch ────────────────────────────────────────────────────────────────
-// In docker-compose, set environment variable:
-//   OpenSearch__Url=http://ged-opensearch:9200
-var opensearchUrl = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
+var opensearchUrl      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
     .DisableDirectStreaming()
@@ -148,11 +145,7 @@ var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
 builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connectionSettings));
 
 // ── RabbitMQ ──────────────────────────────────────────────────────────────────
-// In docker-compose, set environment variables:
-//   RabbitMQ__Host=ged-rabbitmq
-//   RabbitMQ__Username=admin
-//   RabbitMQ__Password=admin123
-var rabbitMqHost = builder.Configuration["RabbitMQ:Host"] ?? "localhost";
+var rabbitMqHost = builder.Configuration["RabbitMQ:Host"]     ?? "localhost";
 var rabbitMqUser = builder.Configuration["RabbitMQ:Username"] ?? "admin";
 var rabbitMqPass = builder.Configuration["RabbitMQ:Password"] ?? "admin123";
 
@@ -164,9 +157,7 @@ builder.Services.AddSingleton<RabbitMqService>(sp =>
 builder.Services.AddSingleton<IMessageQueueService>(sp =>
     sp.GetRequiredService<RabbitMqService>());
 
-// ── Redis distributed cache ───────────────────────────────────────────────────
-// In docker-compose, set environment variable:
-//   Redis__ConnectionString=ged-redis:6379
+// ── Redis ─────────────────────────────────────────────────────────────────────
 var redisEnabled       = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
 var redisConnectionStr = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
 
@@ -185,9 +176,8 @@ else
     Log.Information("⚠️  Redis disabled — using in-memory distributed cache");
 }
 
-// ── Text Extraction: Tika (primary) + built-in fallback ──────────────────────
+// ── Text Extraction ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<TextExtractionService>();
-
 builder.Services.AddHttpClient<TikaTextExtractionService>();
 builder.Services.AddScoped<ITextExtractionService>(sp =>
 {
@@ -210,19 +200,16 @@ builder.Services.AddHttpClient<NlpService>(client =>
 .AddPolicyHandler(OllamaResiliencePolicies.Combined(timeoutSeconds: 30));
 builder.Services.AddScoped<INlpService>(sp => sp.GetRequiredService<NlpService>());
 
-builder.Services.AddHttpClient<DocumentDateExtractor>()
-    .AddPolicyHandler(ollamaPolicy);
+builder.Services.AddHttpClient<DocumentDateExtractor>().AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<DocumentDateExtractor>();
 
 builder.Services.AddHttpClient<OcrTextCleaningService>()
     .AddPolicyHandler(OllamaResiliencePolicies.ForOcrCleaning());
 builder.Services.AddScoped<OcrTextCleaningService>();
 
-builder.Services.AddHttpClient<OcrMetadataEnrichmentService>()
-    .AddPolicyHandler(ollamaPolicy);
+builder.Services.AddHttpClient<OcrMetadataEnrichmentService>().AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<OcrMetadataEnrichmentService>();
 
-// ── Chunking service ──────────────────────────────────────────────────────────
 builder.Services.AddScoped<DocumentChunkingService>();
 
 // ── Auth Service ──────────────────────────────────────────────────────────────
@@ -230,6 +217,8 @@ builder.Services.AddSingleton<AuthService>();
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
 
 // ── Search pipeline ───────────────────────────────────────────────────────────
+// OpenSearchService is Scoped so it can receive GedDbContext (also Scoped).
+// GedDbContext is auto-injected by the DI container — no manual wiring needed.
 builder.Services.AddScoped<OpenSearchService>();
 builder.Services.AddScoped<ISearchService>(sp =>
 {
@@ -241,8 +230,7 @@ builder.Services.AddScoped<ISearchService>(sp =>
 });
 
 // ── RAG Service ───────────────────────────────────────────────────────────────
-builder.Services.AddHttpClient<RagService>()
-    .AddPolicyHandler(ollamaPolicy);
+builder.Services.AddHttpClient<RagService>().AddPolicyHandler(ollamaPolicy);
 builder.Services.AddScoped<IRagService>(sp =>
     new RagService(
         sp.GetRequiredService<ISearchService>(),
@@ -274,10 +262,14 @@ builder.Services.AddHostedService(sp => new OcrWorkerService(
     sp.GetRequiredService<ILogger<OcrWorkerService>>(),
     rabbitMqHost, rabbitMqUser, rabbitMqPass
 ));
-
 builder.Services.AddHostedService<AutoReindexService>();
 builder.Services.AddHostedService<OutboxRelayService>();
 builder.Services.AddScoped<DocumentIngestionPipeline>();
+
+// ── Plugin System ──────────────────────────────────────────────────────────────
+builder.Services.AddSingleton<PluginRegistry>();
+builder.Services.AddSingleton<MultilingualOcrCleanerPlugin>();
+builder.Services.AddSingleton<DocumentSummarizerPlugin>();
 
 // ── Health Checks ─────────────────────────────────────────────────────────────
 var sqlConnectionStr = connectionString;
@@ -286,52 +278,28 @@ var rabbitHost       = rabbitMqHost;
 var rabbitUser       = rabbitMqUser;
 var rabbitPass       = rabbitMqPass;
 
-// Register a Lazy<IConnection> so the actual TCP handshake with RabbitMQ happens
-// on first use (/health poll), NOT at startup. This prevents the process from
-// crashing with exit code 1 when RabbitMQ isn't yet accepting connections.
-// Fully qualify RabbitMQ.Client.IConnection to avoid ambiguity with OpenSearch.Net.IConnection.
 builder.Services.AddSingleton(new Lazy<RabbitMQ.Client.IConnection>(() =>
 {
     var factory = new ConnectionFactory
     {
         Uri = new Uri($"amqp://{rabbitUser}:{rabbitPass}@{rabbitHost}")
     };
-    // CreateConnectionAsync returns Task<IConnection> — block here intentionally
-    // (Lazy<T> factory must be synchronous; this runs only once, lazily at first /health poll).
     return factory.CreateConnectionAsync().GetAwaiter().GetResult();
 }));
 
 builder.Services.AddHealthChecks()
-    .AddSqlServer(
-        sqlConnectionStr,
-        name: "sqlserver",
-        tags: new[] { "db", "critical" },
+    .AddSqlServer(sqlConnectionStr, name: "sqlserver", tags: new[] { "db", "critical" },
         timeout: TimeSpan.FromSeconds(3))
-    .AddRedis(
-        redisConnection,
-        name: "redis",
-        tags: new[] { "cache" },
+    .AddRedis(redisConnection, name: "redis", tags: new[] { "cache" },
         timeout: TimeSpan.FromSeconds(2))
-    // FIX 2: The original code called factory.CreateConnectionAsync().GetAwaiter().GetResult()
-    //         INSIDE the AddRabbitMQ lambda, which runs during DI registration — BEFORE the app
-    //         is built. If RabbitMQ isn't ready at that exact moment the process crashes (exit 1).
-    //
-    //         Fix: wrap the IConnection in a Lazy<T> singleton. The lambda is only executed the
-    //         first time /health is actually polled, not at startup.
-    .AddRabbitMQ(
-        sp => sp.GetRequiredService<Lazy<RabbitMQ.Client.IConnection>>().Value,
-        name: "rabbitmq",
-        tags: new[] { "messaging", "critical" },
+    .AddRabbitMQ(sp => sp.GetRequiredService<Lazy<RabbitMQ.Client.IConnection>>().Value,
+        name: "rabbitmq", tags: new[] { "messaging", "critical" },
         timeout: TimeSpan.FromSeconds(5));
 
 // =============================================================================
 var app = builder.Build();
 // =============================================================================
 
-// FIX 3: Run EF Core migrations automatically on startup so the DB schema is
-//         always in sync. The SQL Server container uses a healthcheck + depends_on
-//         so it should be ready, but the retry policy on UseSqlServer handles
-//         any remaining timing issues.
 try
 {
     using var scope = app.Services.CreateScope();
@@ -342,12 +310,31 @@ try
 }
 catch (Exception ex)
 {
-    // Log but don't crash — the retry policy on the DbContext handles transient failures.
-    Log.Error(ex, "❌ EF Core migration failed. The backend will still start; check DB connectivity.");
+    Log.Error(ex, "❌ EF Core migration failed.");
+}
+
+// ── Initialize Plugins ─────────────────────────────────────────────────────────
+try
+{
+    var pluginRegistry = app.Services.GetRequiredService<PluginRegistry>();
+
+    var ocrCleaner = app.Services.GetRequiredService<MultilingualOcrCleanerPlugin>();
+    var summarizer = app.Services.GetRequiredService<DocumentSummarizerPlugin>();
+
+    pluginRegistry.Register(ocrCleaner);
+    pluginRegistry.Register(summarizer);
+
+    await pluginRegistry.InitializeAllAsync();
+
+    Log.Information("📦 Plugin system initialized: {Count} plugins loaded",
+        pluginRegistry.Plugins.Count);
+}
+catch (Exception ex)
+{
+    Log.Error(ex, "❌ Plugin system initialization failed");
 }
 
 // ── OpenSearch index init ─────────────────────────────────────────────────────
-// Already wrapped in try/catch — safe to keep as-is.
 try
 {
     var client = app.Services.GetRequiredService<IOpenSearchClient>();
@@ -359,7 +346,7 @@ try
         PostData.String("{\"persistent\":{\"knn.algo_param.ef_search\":100}}")
     );
 
-    // ── ged-documents (main BM25 + embedding index) ───────────────────────────
+    // ── ged-documents ─────────────────────────────────────────────────────────
     var indexExists = await client.Indices.ExistsAsync("ged-documents");
     if (!indexExists.Exists)
     {
@@ -380,12 +367,18 @@ try
                         .Fields(f => f.Keyword(k => k.Name("keyword"))))
                     .Keyword(k => k.Name(n => n.Tags))
                     .Keyword(k => k.Name(n => n.ContentType))
-                    .Keyword(k => k.Name(n => n.FileName))
+                    .Text(t => t.Name(n => n.FileName).Analyzer("simple")
+                        .Fields(f => f.Keyword(k => k.Name("keyword"))))
                     .Keyword(k => k.Name(n => n.Status))
                     .Number(n => n.Name(nn => nn.FileSize).Type(NumberType.Long))
                     .Date(d => d.Name(n => n.CreatedAt))
                     .Date(d => d.Name(n => n.DocumentDate))
                     .Date(d => d.Name(n => n.ModifiedAt))
+                    // ── NEW: ACL fields for tag-based access control ───────────
+                    .Keyword(k => k.Name("accessLevel"))        // "open" | "restricted"
+                    .Keyword(k => k.Name("allowedUserIds"))     // list of user Guids
+                    .Keyword(k => k.Name("createdByUserId"))    // uploader username/id
+                    // ─────────────────────────────────────────────────────────
                     .KnnVector(k => k
                         .Name("embedding")
                         .Dimension(768)
@@ -404,15 +397,31 @@ try
         );
 
         Log.Information(createIndexResponse.IsValid
-            ? "✅ OpenSearch index 'ged-documents' created with kNN vector field"
+            ? "✅ OpenSearch index 'ged-documents' created (ACL fields included)"
             : "❌ Failed to create index: {Error}", createIndexResponse.DebugInformation);
     }
     else
     {
         Log.Information("OpenSearch index 'ged-documents' already exists — skipping creation");
+
+        // ── Add ACL fields to existing index via mapping update ───────────────
+        // Safe to call even if the fields already exist; OpenSearch is idempotent.
+        var putMappingResponse = await client.Indices.PutMappingAsync<DocumentIndexModel>(pm => pm
+            .Index("ged-documents")
+            .Properties(p => p
+                .Keyword(k => k.Name("accessLevel"))
+                .Keyword(k => k.Name("allowedUserIds"))
+                .Keyword(k => k.Name("createdByUserId"))
+            )
+        );
+
+        Log.Information(putMappingResponse.IsValid
+            ? "✅ ACL fields added/confirmed in 'ged-documents' mapping"
+            : "⚠️  Mapping update for ACL fields returned: {Error}",
+              putMappingResponse.DebugInformation);
     }
 
-    // ── ged-chunks (chunk-level RAG index) ────────────────────────────────────
+    // ── ged-chunks ────────────────────────────────────────────────────────────
     var chunksExists = await client.Indices.ExistsAsync("ged-chunks");
     if (!chunksExists.Exists)
     {

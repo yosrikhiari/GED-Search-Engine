@@ -13,13 +13,10 @@ namespace GED.Infrastructure.Services;
 /// <summary>
 /// RAG (Retrieval Augmented Generation) Service.
 ///
-/// Pipeline:
-///   1. Receive a natural-language user query
-///   2. Search the ged-chunks index for the top-N most relevant chunks (semantic KNN)
-///   3. Fall back to full-document BM25 search if chunks index is empty
-///   4. Build a context prompt from retrieved excerpts
-///   5. Call Ollama (local LLM) to generate a synthetic answer
-///   6. Return the answer + source documents with relevant excerpts
+/// The user's identity (UserId, UserRole, AllowedCategories) is forwarded to
+/// every internal SearchRequest so OpenSearch's ACL filter applies to RAG
+/// context retrieval as well — users can only get answers from documents they
+/// are allowed to see.
 /// </summary>
 public class RagService : IRagService
 {
@@ -57,21 +54,19 @@ public class RagService : IRagService
         _maxContextChars = configuration.GetValue<int>("RAG:MaxContextChars", 6000);
     }
 
-    // ── AskAsync (non-streaming, unchanged) ───────────────────────────────────
+    // ── AskAsync ──────────────────────────────────────────────────────────────
 
     public async Task<RagResponse> AskAsync(
         RagRequest request,
         CancellationToken cancellationToken = default)
     {
         if (!_enabled)
-        {
             return new RagResponse
             {
                 Answer  = "Le module IA est désactivé. Veuillez activer NLP:Enabled dans la configuration.",
                 Sources = new List<RagSource>(),
                 Query   = request.Query
             };
-        }
 
         var startTime = DateTime.UtcNow;
         _logger.LogInformation("🤖 RAG pipeline starting for query: '{Query}'", request.Query);
@@ -79,20 +74,16 @@ public class RagService : IRagService
         var (effectiveCategories, chunkHits, sources, contextBuilder, charsUsed, earlyExit) =
             await BuildContextAsync(request, cancellationToken);
 
-        if (earlyExit != null)
-            return earlyExit;
+        if (earlyExit != null) return earlyExit;
 
         if (!sources.Any())
-        {
             return new RagResponse
             {
                 Answer  = "Aucun document pertinent n'a été trouvé pour répondre à votre question.",
                 Sources = new List<RagSource>(),
                 Query   = request.Query
             };
-        }
 
-        // ── Generate answer via Ollama ────────────────────────────────────────
         string answer;
         try
         {
@@ -106,10 +97,8 @@ public class RagService : IRagService
         }
 
         var elapsed = (long)(DateTime.UtcNow - startTime).TotalMilliseconds;
-
-        _logger.LogInformation(
-            "✅ RAG pipeline completed in {Ms}ms: {SourceCount} sources, {Chars} chars answer",
-            elapsed, sources.Count, answer.Length);
+        _logger.LogInformation("✅ RAG pipeline completed in {Ms}ms: {SourceCount} sources",
+            elapsed, sources.Count);
 
         return new RagResponse
         {
@@ -122,7 +111,7 @@ public class RagService : IRagService
         };
     }
 
-    // ── AskStreamAsync (streaming) ────────────────────────────────────────────
+    // ── AskStreamAsync ────────────────────────────────────────────────────────
 
     public async IAsyncEnumerable<string> AskStreamAsync(
         RagRequest request,
@@ -137,20 +126,10 @@ public class RagService : IRagService
         var (_, _, sources, contextBuilder, _, earlyExit) =
             await BuildContextAsync(request, cancellationToken);
 
-        if (earlyExit != null)
-        {
-            yield return earlyExit.Answer;
-            yield break;
-        }
+        if (earlyExit != null) { yield return earlyExit.Answer; yield break; }
+        if (!sources.Any())   { yield return "Aucun document pertinent n'a été trouvé."; yield break; }
 
-        if (!sources.Any())
-        {
-            yield return "Aucun document pertinent n'a été trouvé.";
-            yield break;
-        }
-
-        var prompt = BuildPrompt(request.Query, contextBuilder.ToString(), request.Language);
-
+        var prompt      = BuildPrompt(request.Query, contextBuilder.ToString(), request.Language);
         var requestBody = new
         {
             model       = _llmModel,
@@ -160,12 +139,12 @@ public class RagService : IRagService
             options     = new { num_predict = 1024 }
         };
 
-       using var req = new HttpRequestMessage(HttpMethod.Post, _llmEndpoint)
+        using var req = new HttpRequestMessage(HttpMethod.Post, _llmEndpoint)
         {
             Content = JsonContent.Create(requestBody)
         };
 
-        string? fallbackAnswer = null;
+        string? fallbackAnswer  = null;
         HttpResponseMessage? response = null;
         try
         {
@@ -179,11 +158,7 @@ public class RagService : IRagService
             fallbackAnswer = BuildFallbackAnswer(sources);
         }
 
-        if (fallbackAnswer != null)
-        {
-            yield return fallbackAnswer;
-            yield break;
-        }
+        if (fallbackAnswer != null) { yield return fallbackAnswer; yield break; }
 
         await using var stream = await response!.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new System.IO.StreamReader(stream);
@@ -192,35 +167,25 @@ public class RagService : IRagService
         {
             var line = await reader.ReadLineAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(line)) continue;
-
             OllamaStreamChunk? chunk = null;
-            try { chunk = JsonSerializer.Deserialize<OllamaStreamChunk>(line); }
-            catch { continue; }
-
-            if (chunk?.Response != null)
-                yield return chunk.Response;
-
+            try { chunk = JsonSerializer.Deserialize<OllamaStreamChunk>(line); } catch { continue; }
+            if (chunk?.Response != null) yield return chunk.Response;
             if (chunk?.Done == true) break;
         }
     }
 
-    // ── Shared retrieval logic ────────────────────────────────────────────────
+    // ── Shared context builder ────────────────────────────────────────────────
 
-    /// <summary>
-    /// Runs ACL resolution, chunk search, context building.
-    /// Returns everything both AskAsync and AskStreamAsync need.
-    /// earlyExit is non-null when the caller should return immediately with that response.
-    /// </summary>
     private async Task<(
-        List<string>?      effectiveCategories,
+        List<string>?        effectiveCategories,
         List<ChunkSearchHit> chunkHits,
-        List<RagSource>    sources,
-        StringBuilder      contextBuilder,
-        int                charsUsed,
-        RagResponse?       earlyExit)>
+        List<RagSource>      sources,
+        StringBuilder        contextBuilder,
+        int                  charsUsed,
+        RagResponse?         earlyExit)>
         BuildContextAsync(RagRequest request, CancellationToken cancellationToken)
     {
-        // ── ACL ───────────────────────────────────────────────────────────────
+        // ── Category-based ACL ────────────────────────────────────────────────
         List<string>? allowedCategories = null;
         if (!string.IsNullOrEmpty(request.Username))
         {
@@ -246,9 +211,8 @@ public class RagService : IRagService
         try
         {
             chunkHits = await _openSearch.SearchChunksAsync(
-                request.Query,
-                topK:              _topK,
-                categories:        effectiveCategories,
+                request.Query, topK: _topK,
+                categories: effectiveCategories,
                 cancellationToken: cancellationToken);
 
             _logger.LogInformation("🔍 RAG chunk search: {Count} chunk hits", chunkHits.Count);
@@ -257,7 +221,7 @@ public class RagService : IRagService
             if (chunkHits.Any() && !hasConfidentChunks)
             {
                 _logger.LogWarning(
-                    "RAG: all {Count} chunks below confidence threshold {T} — returning low-confidence notice",
+                    "RAG: all {Count} chunks below confidence {T} — low-confidence notice",
                     chunkHits.Count, RagConfidenceThreshold);
 
                 return (effectiveCategories, chunkHits, new List<RagSource>(), new StringBuilder(), 0,
@@ -283,29 +247,22 @@ public class RagService : IRagService
         if (chunkHits.Any())
         {
             var seenDocIds = new HashSet<Guid>();
-
             foreach (var chunk in chunkHits)
             {
                 if (charsUsed >= _maxContextChars) break;
-
                 var remaining = _maxContextChars - charsUsed;
-                var text      = chunk.Text.Length > remaining
-                    ? chunk.Text[..remaining] + "…"
-                    : chunk.Text;
+                var text      = chunk.Text.Length > remaining ? chunk.Text[..remaining] + "…" : chunk.Text;
 
-                contextBuilder.AppendLine(
-                    $"--- Document : {chunk.Title} (extrait {chunk.ChunkIndex + 1}) ---");
+                contextBuilder.AppendLine($"--- Document : {chunk.Title} (extrait {chunk.ChunkIndex + 1}) ---");
                 if (chunk.DocumentDate.HasValue)
                     contextBuilder.AppendLine($"Date : {chunk.DocumentDate.Value:yyyy-MM-dd}");
                 if (!string.IsNullOrEmpty(chunk.Category))
                     contextBuilder.AppendLine($"Catégorie : {chunk.Category}");
                 contextBuilder.AppendLine(text);
                 contextBuilder.AppendLine();
-
                 charsUsed += text.Length + 80;
 
                 if (seenDocIds.Add(chunk.DocumentId))
-                {
                     sources.Add(new RagSource
                     {
                         DocumentId     = chunk.DocumentId,
@@ -318,18 +275,17 @@ public class RagService : IRagService
                         Excerpt        = text.Length > 400 ? text[..400] + "…" : text,
                         Highlights     = new List<string>()
                     });
-                }
             }
 
-            _logger.LogInformation(
-                "📄 Built chunk context: {DocCount} docs, {ChunkCount} chunks, {Chars} chars",
-                sources.Count, chunkHits.Count, charsUsed);
+            _logger.LogInformation("📄 Built chunk context: {DocCount} docs, {Chars} chars",
+                sources.Count, charsUsed);
         }
         else
         {
             // Full-document fallback
             _logger.LogInformation("⚠️  No chunk hits — falling back to full-document search");
 
+            // ── NEW: forward user identity so ACL filter applies here too ─────
             var searchRequest = new SearchRequest
             {
                 Query              = request.Query,
@@ -342,7 +298,11 @@ public class RagService : IRagService
                 ContentTypes       = request.ContentTypes,
                 FromDate           = request.FromDate,
                 ToDate             = request.ToDate,
-                DocumentIds        = request.DocumentIds
+                DocumentIds        = request.DocumentIds,
+                // ── ACL fields (NEW) ─────────────────────────────────────────
+                UserId                = request.UserId,
+                UserRole              = request.UserRole,
+                UserAllowedCategories = request.UserAllowedCategories
             };
 
             SearchResult searchResult;
@@ -366,7 +326,6 @@ public class RagService : IRagService
             }
 
             if (!searchResult.Documents.Any())
-            {
                 return (effectiveCategories, chunkHits, sources, contextBuilder, charsUsed,
                     new RagResponse
                     {
@@ -375,22 +334,17 @@ public class RagService : IRagService
                         Query                  = request.Query,
                         TotalDocumentsSearched = searchResult.TotalResults
                     });
-            }
 
             foreach (var doc in searchResult.Documents)
             {
                 var excerpt = ExtractBestExcerpt(doc);
                 if (string.IsNullOrWhiteSpace(excerpt)) continue;
-
                 var remaining = _maxContextChars - charsUsed;
                 if (remaining <= 100) break;
 
                 var scoreFraction = doc.Score > 0 ? Math.Min(doc.Score * 1.5f, 1.0f) : 0.5f;
                 var budget        = Math.Max((int)(remaining * scoreFraction), 300);
-
-                var truncated = excerpt.Length > budget
-                    ? excerpt[..budget] + "…"
-                    : excerpt;
+                var truncated     = excerpt.Length > budget ? excerpt[..budget] + "…" : excerpt;
 
                 contextBuilder.AppendLine($"--- Document {sources.Count + 1} : {doc.Title} ---");
                 if (doc.DocumentDate.HasValue)
@@ -399,7 +353,6 @@ public class RagService : IRagService
                     contextBuilder.AppendLine($"Catégorie : {doc.Category}");
                 contextBuilder.AppendLine(truncated);
                 contextBuilder.AppendLine();
-
                 charsUsed += truncated.Length + 100;
 
                 sources.Add(new RagSource
@@ -417,55 +370,69 @@ public class RagService : IRagService
                 });
             }
 
-            _logger.LogInformation(
-                "📄 Built full-doc context: {Count} sources, {Chars} chars",
+            _logger.LogInformation("📄 Built full-doc context: {Count} sources, {Chars} chars",
                 sources.Count, charsUsed);
         }
 
         return (effectiveCategories, chunkHits, sources, contextBuilder, charsUsed, null);
     }
 
-    // ── Prompt builder (shared by both methods) ───────────────────────────────
+    // ── Prompt builder ────────────────────────────────────────────────────────
 
     private string BuildPrompt(string query, string context, string language)
     {
         var lang = string.IsNullOrEmpty(language) ? "fr" : language.ToLower();
-        var langInstruction = lang switch
-        {
-            "en" => "Respond in English.",
-            "ar" => "أجب باللغة العربية.",
-            _    => "Réponds en français."
-        };
 
-        return $@"Tu es un assistant intelligent spécialisé dans la gestion électronique de documents (GED).
-Tu as accès aux extraits de documents suivants, récupérés depuis la base documentaire.
+        var (systemPrompt, formatInstructions, languageInstruction) = GetLanguageConfig(lang);
 
-DOCUMENTS PERTINENTS :
+        return $@"{systemPrompt}
+
+DOCUMENTS RETRIEVED FROM KNOWLEDGE BASE:
 {context}
 
-QUESTION DE L'UTILISATEUR :
+USER QUESTION:
 {query}
 
-INSTRUCTIONS :
-- Réponds de manière précise et synthétique en te basant UNIQUEMENT sur les documents fournis.
-- Si les documents ne contiennent pas suffisamment d'informations pour répondre, indique-le clairement.
-- Cite les documents pertinents dans ta réponse (exemple : ""Selon le document 1 (titre)..."").
-- Ne fabrique aucune information qui ne figure pas dans les documents.
-- {langInstruction}
+INSTRUCTIONS:
+- Answer precisely and concisely based ONLY on the provided documents.
+- If the documents don't contain enough information to answer, clearly state that.
+- Cite the relevant documents in your answer (e.g., ""According to Document 1 (title)..."").
+- Do NOT fabricate any information not present in the documents.
+- {languageInstruction}
 
-RÉPONSE :";
+{formatInstructions}
+
+ANSWER:";
+    }
+
+    private static (string systemPrompt, string formatInstructions, string languageInstruction) GetLanguageConfig(string lang)
+    {
+        return lang switch
+        {
+            "ar" => (
+                @"أنت مساعد ذكي متخصص في إدارة الوثائق الإلكترونية (GED).",
+                @"قدم إجابة موجزة ومنظمة.",
+                "أجب باللغة العربية."
+            ),
+            "en" => (
+                @"You are an intelligent assistant specialized in Electronic Document Management (GED).",
+                @"Provide a concise and well-organized answer.",
+                "Answer in English."
+            ),
+            _ => (
+                @"Tu es un assistant intelligent spécialisé dans la gestion électronique de documents (GED).",
+                @"Fournis une réponse concise et bien organisée.",
+                "Réponds en français."
+            )
+        };
     }
 
     // ── Non-streaming Ollama call ─────────────────────────────────────────────
 
     private async Task<string> GenerateAnswerAsync(
-        string query,
-        string context,
-        string language,
-        CancellationToken cancellationToken)
+        string query, string context, string language, CancellationToken cancellationToken)
     {
-        var prompt = BuildPrompt(query, context, language);
-
+        var prompt      = BuildPrompt(query, context, language);
         var requestBody = new
         {
             model       = _llmModel,
@@ -474,8 +441,6 @@ RÉPONSE :";
             temperature = 0.3,
             options     = new { num_predict = 1024 }
         };
-
-        _logger.LogDebug("Calling Ollama for RAG generation at {Endpoint}", _llmEndpoint);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(120));
@@ -513,16 +478,12 @@ RÉPONSE :";
     {
         if (doc.Highlights?.Any() == true)
             return string.Join(" … ", doc.Highlights.Take(3));
-
         if (!string.IsNullOrWhiteSpace(doc.OcrText))
             return doc.OcrText.Length > 2000 ? doc.OcrText[..2000] : doc.OcrText;
-
         if (!string.IsNullOrWhiteSpace(doc.ExtractedText))
             return doc.ExtractedText.Length > 2000 ? doc.ExtractedText[..2000] : doc.ExtractedText;
-
         if (!string.IsNullOrWhiteSpace(doc.Description))
             return doc.Description;
-
         return string.Empty;
     }
 
@@ -542,15 +503,6 @@ RÉPONSE :";
         }
         return sb.ToString();
     }
-
-    private static RagResponse ErrorResponse(string query, string message) => new()
-    {
-        Query   = query,
-        Answer  = message,
-        Sources = new List<RagSource>()
-    };
-
-    // ── Ollama response models ────────────────────────────────────────────────
 
     private class OllamaResponse
     {

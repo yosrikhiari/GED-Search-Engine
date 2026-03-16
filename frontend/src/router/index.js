@@ -56,6 +56,12 @@ router.beforeEach((to, _from, next) => {
     return
   }
 
+  // Redirect root path to correct dashboard based on role
+  if (to.path === '/' && user.role === 'Admin') {
+    next({ name: 'AdminDashboard' })
+    return
+  }
+
   if (to.meta.roles && isAuthenticated) {
     if (!to.meta.roles.includes(user.role)) {
       if (user.role === 'Admin') {

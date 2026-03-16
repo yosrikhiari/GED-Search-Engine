@@ -8,6 +8,12 @@ using System.Text.Json;
 
 namespace GED.API.Controllers;
 
+/// <summary>
+/// RAG controller.
+/// Injects the current user's identity (UserId, UserRole, AllowedCategories) into
+/// every RagRequest so the search layer can enforce ACL filters on the context
+/// retrieval step, exactly as it does for regular searches.
+/// </summary>
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
@@ -27,7 +33,32 @@ public class RagController : ControllerBase
         _logger      = logger;
     }
 
-    // ── POST /api/rag/ask (non-streaming, kept for backward compatibility) ────
+    // ── Helper: populate user identity on a RagRequest ────────────────────────
+
+    /// <summary>
+    /// Resolves the current user's full profile from the session cookie claims
+    /// and stores UserId / UserRole / UserAllowedCategories on the request.
+    /// These fields are [JsonIgnore] so they never come from the client body.
+    /// </summary>
+    private void InjectUserContext(RagRequest request)
+    {
+        var username = User.FindFirst(ClaimTypes.Name)?.Value;
+        var role     = User.FindFirst(ClaimTypes.Role)?.Value;
+
+        request.Username = username;
+        request.UserRole = role;
+
+        if (!string.IsNullOrEmpty(username))
+        {
+            var user = _authService.GetAllUsers()
+                .FirstOrDefault(u => u.Username == username);
+
+            request.UserId                = user?.Id.ToString();
+            request.UserAllowedCategories = user?.AllowedCategories;
+        }
+    }
+
+    // ── POST /api/rag/ask ─────────────────────────────────────────────────────
 
     [HttpPost("ask")]
     [ProducesResponseType(typeof(RagResponse), StatusCodes.Status200OK)]
@@ -40,13 +71,15 @@ public class RagController : ControllerBase
             if (string.IsNullOrWhiteSpace(request?.Query))
                 return BadRequest(new { error = "Query is required." });
 
-            request.Username = User.FindFirst(ClaimTypes.Name)?.Value;
+            // ── NEW ──────────────────────────────────────────────────────────
+            InjectUserContext(request);
 
             _logger.LogInformation(
-                "RAG request: query='{Query}', lang='{Lang}', categories={Categories}, user='{User}'",
+                "RAG request: query='{Query}', lang='{Lang}', categories={Categories}, user='{User}', role='{Role}'",
                 request.Query, request.Language,
                 request.Categories != null ? string.Join(",", request.Categories) : "none",
-                request.Username ?? "anonymous");
+                request.Username ?? "anonymous",
+                request.UserRole ?? "unknown");
 
             var result = await _ragService.AskAsync(request, HttpContext.RequestAborted);
             return Ok(result);
@@ -58,7 +91,7 @@ public class RagController : ControllerBase
         }
     }
 
-    // ── POST /api/rag/ask/stream (SSE streaming) ──────────────────────────────
+    // ── POST /api/rag/ask/stream ──────────────────────────────────────────────
 
     [HttpPost("ask/stream")]
     public async Task AskStream([FromBody] RagRequest request, CancellationToken cancellationToken)
@@ -69,11 +102,14 @@ public class RagController : ControllerBase
             return;
         }
 
-        request.Username = User.FindFirst(ClaimTypes.Name)?.Value;
+        // ── NEW ──────────────────────────────────────────────────────────────
+        InjectUserContext(request);
 
         _logger.LogInformation(
-            "RAG stream request: query='{Query}', lang='{Lang}', user='{User}'",
-            request.Query, request.Language, request.Username ?? "anonymous");
+            "RAG stream request: query='{Query}', lang='{Lang}', user='{User}', role='{Role}'",
+            request.Query, request.Language,
+            request.Username ?? "anonymous",
+            request.UserRole ?? "unknown");
 
         Response.Headers["Content-Type"]      = "text/event-stream";
         Response.Headers["Cache-Control"]     = "no-cache";
@@ -101,12 +137,5 @@ public class RagController : ControllerBase
     [HttpGet("health")]
     [AllowAnonymous]
     public IActionResult Health()
-    {
-        return Ok(new
-        {
-            status    = "healthy",
-            module    = "RAG",
-            timestamp = DateTime.UtcNow
-        });
-    }
+        => Ok(new { status = "healthy", module = "RAG", timestamp = DateTime.UtcNow });
 }

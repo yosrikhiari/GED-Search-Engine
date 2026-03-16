@@ -25,8 +25,28 @@ public class RagRequest
     /// <summary>Response language: "fr" (default), "en", "ar".</summary>
     public string Language { get; set; } = "fr";
 
+    // ── Identity fields — set by the controller, NEVER from the request body ──
+    // [JsonIgnore] ensures these are never deserialized from client input,
+    // preventing privilege escalation.
+
+    /// <summary>Username resolved from the session cookie — used for category-level ACL.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public string? Username { get; set; }
+
+    /// <summary>User Guid as a string — forwarded to the OpenSearch allowedUserIds filter.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? UserId { get; set; }
+
+    /// <summary>"Admin" | "Manager" | "User" | "ReadOnly" — Admin bypasses all ACL filters.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? UserRole { get; set; }
+
+    /// <summary>
+    /// Categories the user is allowed to access (from AppUser.AllowedCategories).
+    /// Null = no category restriction beyond explicit document grants.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public List<string>? UserAllowedCategories { get; set; }
 }
 
 // ── Response ──────────────────────────────────────────────────────────────────
@@ -45,7 +65,7 @@ public class RagResponse
     /// <summary>Total time for the RAG pipeline (search + generation).</summary>
     public long SearchTimeMs { get; set; }
 
-    /// <summary>Total number of documents in the index that matched.</summary>
+    /// <summary>Total number of documents that matched in the index.</summary>
     public int TotalDocumentsSearched { get; set; }
 
     /// <summary>True if retrieved chunks had sufficient confidence. False = low-confidence answer.</summary>
@@ -55,38 +75,17 @@ public class RagResponse
     public string? ModelUsed { get; set; }
 }
 
-/// <summary>
-/// A single document used as a source in the RAG response.
-/// </summary>
+/// <summary>A single document used as a source in the RAG response.</summary>
 public class RagSource
 {
-    public Guid DocumentId { get; set; }
-
-    public string Title { get; set; } = string.Empty;
-
-    public string? Category { get; set; }
-
-    public string FileName { get; set; } = string.Empty;
-
-    public string ContentType { get; set; } = string.Empty;
-
-    /// <summary>Document content date (e.g. contract effective date).</summary>
-    public DateTime? DocumentDate { get; set; }
-
-    /// <summary>Upload date.</summary>
-    public DateTime CreatedAt { get; set; }
-
-    /// <summary>Relevance score from OpenSearch (0–1).</summary>
-    public float RelevanceScore { get; set; }
-
-    /// <summary>The text excerpt that was fed to the LLM as context.</summary>
-    public string Excerpt { get; set; } = string.Empty;
-
-    /// <summary>OpenSearch highlights for this document.</summary>
+    public Guid      DocumentId    { get; set; }
+    public string    Title         { get; set; } = string.Empty;
+    public string?   Category      { get; set; }
+    public string    FileName      { get; set; } = string.Empty;
+    public string    ContentType   { get; set; } = string.Empty;
+    public DateTime? DocumentDate  { get; set; }
+    public DateTime  CreatedAt     { get; set; }
+    public float     RelevanceScore { get; set; }
+    public string    Excerpt       { get; set; } = string.Empty;
     public List<string> Highlights { get; set; } = new();
-
-    // Set by the controller from the JWT — never comes from the request body
-    [System.Text.Json.Serialization.JsonIgnore]
-    public string? Username { get; set; }
-
 }

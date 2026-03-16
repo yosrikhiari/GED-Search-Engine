@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using GED.Core.Interfaces;          // ← NEW: IDocumentService
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
@@ -9,45 +10,35 @@ using System.Security.Claims;
 namespace GED.API.Controllers;
 
 /// <summary>
-/// Document Group management — Admin only.
+/// Document Group management (Admin only).
 ///
-/// A "group" is a named bundle of documents (e.g. "RH – Contracts 2024").
-/// The admin can:
-///   - CRUD groups, add/remove documents from them
-///   - Assign a group to a user (expands to DocumentAcl rows automatically)
-///   - Revoke a group assignment (removes the expanded ACL rows)
-///   - Get a full access summary per user
-///
-/// Endpoints:
-///   GET    /api/groups                              → list all groups (with counts)
-///   POST   /api/groups                              → create group
-///   GET    /api/groups/{id}                         → group detail (docs + assignees)
-///   PUT    /api/groups/{id}                         → update group metadata
-///   DELETE /api/groups/{id}                         → deactivate group
-///   POST   /api/groups/{id}/documents               → add documents to group
-///   DELETE /api/groups/{id}/documents/{memberId}    → remove document from group
-///   POST   /api/groups/{id}/assign                  → assign group to user
-///   DELETE /api/groups/{id}/assignments/{assignId}  → revoke assignment
-///   GET    /api/groups/users/access-summary         → all users with their access
-///   GET    /api/groups/users/{userId}/access        → one user's full access
+/// After adding documents to a group (which also expands ACL rows for all
+/// current assignees), the newly added documents are re-indexed so their
+/// allowedUserIds field reflects the new grants immediately.
 /// </summary>
 [ApiController]
 [Route("api/groups")]
 [Authorize(Roles = "Admin")]
 public class DocumentGroupController : ControllerBase
 {
-    private readonly GedDbContext _db;
-    private readonly AuthService _authService;
-    private readonly ILogger<DocumentGroupController> _logger;
+    private readonly GedDbContext                       _db;
+    private readonly AuthService                        _authService;
+    private readonly IDocumentService                   _documentService; // ← NEW
+    private readonly ISearchService                     _searchService;   // ← NEW
+    private readonly ILogger<DocumentGroupController>   _logger;
 
     public DocumentGroupController(
-        GedDbContext db,
-        AuthService authService,
+        GedDbContext                  db,
+        AuthService                   authService,
+        IDocumentService              documentService,  // ← NEW
+        ISearchService                searchService,    // ← NEW
         ILogger<DocumentGroupController> logger)
     {
-        _db          = db;
-        _authService = authService;
-        _logger      = logger;
+        _db              = db;
+        _authService     = authService;
+        _documentService = documentService;              // ← NEW
+        _searchService   = searchService;                // ← NEW
+        _logger          = logger;
     }
 
     // ── List groups ───────────────────────────────────────────────────────────
@@ -55,11 +46,10 @@ public class DocumentGroupController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<List<DocumentGroupDto>>> GetGroups()
     {
-        var groups = await _db.DocumentGroups
+        var groups   = await _db.DocumentGroups
             .Where(g => g.IsActive)
             .OrderByDescending(g => g.CreatedAt)
             .ToListAsync();
-
         var groupIds = groups.Select(g => g.Id).ToList();
 
         var docCounts = await _db.DocumentGroupMembers
@@ -115,7 +105,6 @@ public class DocumentGroupController : ControllerBase
 
         _db.DocumentGroups.Add(group);
 
-        // Optionally seed documents
         if (req.DocumentIds?.Any() == true)
         {
             var validDocIds = await _db.Documents
@@ -124,7 +113,6 @@ public class DocumentGroupController : ControllerBase
                 .ToListAsync();
 
             foreach (var docId in validDocIds)
-            {
                 _db.DocumentGroupMembers.Add(new DocumentGroupMember
                 {
                     Id         = Guid.NewGuid(),
@@ -133,7 +121,6 @@ public class DocumentGroupController : ControllerBase
                     AddedAt    = DateTime.UtcNow,
                     AddedBy    = adminId.Value
                 });
-            }
         }
 
         await _db.SaveChangesAsync();
@@ -156,7 +143,7 @@ public class DocumentGroupController : ControllerBase
         });
     }
 
-    // ── Get single group (with documents + assignees) ─────────────────────────
+    // ── Get single group ──────────────────────────────────────────────────────
 
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<DocumentGroupDto>> GetGroup(Guid id)
@@ -165,11 +152,9 @@ public class DocumentGroupController : ControllerBase
         if (group == null || !group.IsActive) return NotFound();
 
         var members = await _db.DocumentGroupMembers
-            .Where(m => m.GroupId == id)
-            .ToListAsync();
-
-        var docIds = members.Select(m => m.DocumentId).Distinct().ToList();
-        var docs = await _db.Documents
+            .Where(m => m.GroupId == id).ToListAsync();
+        var docIds  = members.Select(m => m.DocumentId).Distinct().ToList();
+        var docs    = await _db.Documents
             .Where(d => docIds.Contains(d.Id))
             .Select(d => new { d.Id, d.Title, d.FileName, d.Category })
             .ToListAsync();
@@ -179,21 +164,20 @@ public class DocumentGroupController : ControllerBase
             .Where(a => a.GroupId == id)
             .OrderByDescending(a => a.AssignedAt)
             .ToListAsync();
-
         var allUsers = _authService.GetAllUsers().ToDictionary(u => u.Id);
 
         return Ok(new DocumentGroupDto
         {
-            Id          = group.Id,
-            Name        = group.Name,
-            Description = group.Description,
-            Color       = group.Color,
-            Icon        = group.Icon,
-            Category    = group.Category,
-            CreatedAt   = group.CreatedAt,
-            IsActive    = group.IsActive,
+            Id            = group.Id,
+            Name          = group.Name,
+            Description   = group.Description,
+            Color         = group.Color,
+            Icon          = group.Icon,
+            Category      = group.Category,
+            CreatedAt     = group.CreatedAt,
+            IsActive      = group.IsActive,
             DocumentCount = members.Count,
-            UserCount   = assignments.Count(a => a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow),
+            UserCount     = assignments.Count(a => a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow),
 
             Documents = members.Select(m =>
             {
@@ -228,7 +212,7 @@ public class DocumentGroupController : ControllerBase
         });
     }
 
-    // ── Update group metadata ─────────────────────────────────────────────────
+    // ── Update group ──────────────────────────────────────────────────────────
 
     [HttpPut("{id:guid}")]
     public async Task<IActionResult> UpdateGroup(Guid id, [FromBody] UpdateGroupRequest req)
@@ -280,8 +264,8 @@ public class DocumentGroupController : ControllerBase
             .ToListAsync();
 
         var newDocIds = req.DocumentIds.Except(existingDocIds).ToList();
-
-        if (!newDocIds.Any()) return Ok(new { message = "All documents already in group.", added = 0 });
+        if (!newDocIds.Any())
+            return Ok(new { message = "All documents already in group.", added = 0 });
 
         var validDocIds = await _db.Documents
             .Where(d => newDocIds.Contains(d.Id))
@@ -289,7 +273,6 @@ public class DocumentGroupController : ControllerBase
             .ToListAsync();
 
         foreach (var docId in validDocIds)
-        {
             _db.DocumentGroupMembers.Add(new DocumentGroupMember
             {
                 Id                = Guid.NewGuid(),
@@ -299,13 +282,25 @@ public class DocumentGroupController : ControllerBase
                 AddedAt           = DateTime.UtcNow,
                 AddedBy           = adminId.Value
             });
-        }
 
         group.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync();
 
-        // Propagate new documents to all existing active assignments
+        // Expand ACL rows to existing assignees
         await PropagateNewDocumentsToAssignments(id, validDocIds, adminId.Value);
+
+        // ── NEW: re-index each new document so allowedUserIds is up to date ───
+        foreach (var docId in validDocIds)
+        {
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null)
+            {
+                await _searchService.UpdateDocumentIndexAsync(doc);
+                _logger.LogInformation(
+                    "Re-indexed document {DocId} after adding to group {GroupId}",
+                    docId, id);
+            }
+        }
 
         return Ok(new { message = $"{validDocIds.Count} document(s) added.", added = validDocIds.Count });
     }
@@ -317,24 +312,24 @@ public class DocumentGroupController : ControllerBase
     {
         var member = await _db.DocumentGroupMembers
             .FirstOrDefaultAsync(m => m.Id == memberId && m.GroupId == id);
-
         if (member == null) return NotFound();
 
         _db.DocumentGroupMembers.Remove(member);
 
-        // Remove the ACL rows that were created by group assignments for this document
         var assignedUserIds = await _db.UserGroupAssignments
-            .Where(a => a.GroupId == id)
-            .Select(a => a.UserId)
-            .ToListAsync();
+            .Where(a => a.GroupId == id).Select(a => a.UserId).ToListAsync();
 
         var aclsToRemove = await _db.DocumentAcls
-            .Where(a => a.DocumentId == member.DocumentId
-                     && assignedUserIds.Contains(a.UserId))
+            .Where(a => a.DocumentId == member.DocumentId &&
+                        assignedUserIds.Contains(a.UserId))
             .ToListAsync();
 
         _db.DocumentAcls.RemoveRange(aclsToRemove);
         await _db.SaveChangesAsync();
+
+        // Re-index so the removed users disappear from allowedUserIds
+        var doc = await _documentService.GetDocumentByIdAsync(member.DocumentId);
+        if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
 
         return Ok(new { message = "Document removed from group." });
     }
@@ -358,16 +353,15 @@ public class DocumentGroupController : ControllerBase
         var user = _authService.GetUserById(req.UserId);
         if (user == null) return BadRequest(new { error = "User not found." });
 
-        // Upsert assignment
         var existing = await _db.UserGroupAssignments
             .FirstOrDefaultAsync(a => a.GroupId == id && a.UserId == req.UserId);
 
         if (existing != null)
         {
-            existing.Permission  = req.Permission;
-            existing.ExpiresAt   = req.ExpiresAt;
-            existing.AssignedAt  = DateTime.UtcNow;
-            existing.AssignedBy  = adminId.Value;
+            existing.Permission = req.Permission;
+            existing.ExpiresAt  = req.ExpiresAt;
+            existing.AssignedAt = DateTime.UtcNow;
+            existing.AssignedBy = adminId.Value;
         }
         else
         {
@@ -386,7 +380,7 @@ public class DocumentGroupController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        // Expand: create/update DocumentAcl rows for every document in this group
+        // Expand: create/update DocumentAcl rows for every doc in this group
         var docIds = await _db.DocumentGroupMembers
             .Where(m => m.GroupId == id)
             .Select(m => m.DocumentId)
@@ -421,10 +415,16 @@ public class DocumentGroupController : ControllerBase
 
         await _db.SaveChangesAsync();
 
+        // Re-index all affected documents
+        foreach (var docId in docIds)
+        {
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+        }
+
         _logger.LogInformation(
-            "Admin {Admin} assigned group '{Group}' to user {User} ({Permission}, expires: {Expires})",
-            adminId, group.Name, req.UserId, req.Permission,
-            req.ExpiresAt?.ToString("yyyy-MM-dd") ?? "never");
+            "Admin {Admin} assigned group '{Group}' to user {User} ({Permission})",
+            adminId, group.Name, req.UserId, req.Permission);
 
         return Ok(new GroupAssignmentDto
         {
@@ -439,21 +439,17 @@ public class DocumentGroupController : ControllerBase
         });
     }
 
-    // ── Revoke group assignment ───────────────────────────────────────────────
+    // ── Revoke assignment ─────────────────────────────────────────────────────
 
     [HttpDelete("{id:guid}/assignments/{assignmentId:guid}")]
     public async Task<IActionResult> RevokeAssignment(Guid id, Guid assignmentId)
     {
         var assignment = await _db.UserGroupAssignments
             .FirstOrDefaultAsync(a => a.Id == assignmentId && a.GroupId == id);
-
         if (assignment == null) return NotFound();
 
-        // Remove expanded ACL rows that came from this group assignment
         var docIds = await _db.DocumentGroupMembers
-            .Where(m => m.GroupId == id)
-            .Select(m => m.DocumentId)
-            .ToListAsync();
+            .Where(m => m.GroupId == id).Select(m => m.DocumentId).ToListAsync();
 
         var aclsToRemove = await _db.DocumentAcls
             .Where(a => a.UserId == assignment.UserId && docIds.Contains(a.DocumentId))
@@ -463,6 +459,13 @@ public class DocumentGroupController : ControllerBase
         _db.UserGroupAssignments.Remove(assignment);
         await _db.SaveChangesAsync();
 
+        // Re-index affected documents
+        foreach (var docId in docIds)
+        {
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+        }
+
         _logger.LogInformation(
             "Admin {Admin} revoked group assignment {AssignmentId} (group {GroupId}, user {UserId})",
             GetCurrentUserId(), assignmentId, id, assignment.UserId);
@@ -470,17 +473,14 @@ public class DocumentGroupController : ControllerBase
         return Ok(new { message = "Assignment revoked." });
     }
 
-    // ── All users access summary ───────────────────────────────────────────────
+    // ── Access summary ────────────────────────────────────────────────────────
 
     [HttpGet("users/access-summary")]
     public async Task<ActionResult<List<UserAccessSummaryDto>>> GetAllUsersAccessSummary()
     {
-        var allUsers = _authService.GetAllUsers();
-
+        var allUsers    = _authService.GetAllUsers();
         var assignments = await _db.UserGroupAssignments.ToListAsync();
-        var groups = await _db.DocumentGroups
-            .Where(g => g.IsActive)
-            .ToListAsync();
+        var groups      = await _db.DocumentGroups.Where(g => g.IsActive).ToListAsync();
         var groupLookup = groups.ToDictionary(g => g.Id);
 
         var docCounts = await _db.DocumentGroupMembers
@@ -488,17 +488,14 @@ public class DocumentGroupController : ControllerBase
             .Select(g => new { g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.Key, x => x.Count);
 
-        var directAcls = await _db.DocumentAcls.ToListAsync();
+        var directAcls         = await _db.DocumentAcls.ToListAsync();
         var groupAssignedDocIds = await _db.DocumentGroupMembers
-            .Select(m => new { m.GroupId, m.DocumentId })
-            .ToListAsync();
+            .Select(m => new { m.GroupId, m.DocumentId }).ToListAsync();
 
         var result = allUsers.Select(user =>
         {
             var userAssignments = assignments.Where(a => a.UserId == user.Id).ToList();
-
-            // Direct ACL grants = grants NOT covered by any group assignment for this user
-            var groupDocIds = groupAssignedDocIds
+            var groupDocIds     = groupAssignedDocIds
                 .Where(x => userAssignments.Any(a => a.GroupId == x.GroupId))
                 .Select(x => x.DocumentId)
                 .ToHashSet();
@@ -507,37 +504,26 @@ public class DocumentGroupController : ControllerBase
                 .Where(a => a.UserId == user.Id && !groupDocIds.Contains(a.DocumentId))
                 .Select(a => new DocumentAclDto
                 {
-                    Id         = a.Id,
-                    DocumentId = a.DocumentId,
-                    UserId     = a.UserId,
-                    Username   = user.Username,
-                    FullName   = user.FullName,
-                    Permission = a.Permission,
-                    GrantedAt  = a.GrantedAt,
-                    ExpiresAt  = a.ExpiresAt,
-                    IsActive   = a.IsActive
+                    Id = a.Id, DocumentId = a.DocumentId, UserId = a.UserId,
+                    Username = user.Username, FullName = user.FullName,
+                    Permission = a.Permission, GrantedAt = a.GrantedAt,
+                    ExpiresAt = a.ExpiresAt, IsActive = a.IsActive
                 }).ToList();
 
             return new UserAccessSummaryDto
             {
-                UserId   = user.Id,
-                Username = user.Username,
-                FullName = user.FullName,
-                Role     = user.Role,
-                IsActive = user.IsActive,
+                UserId   = user.Id, Username = user.Username,
+                FullName = user.FullName, Role = user.Role, IsActive = user.IsActive,
                 Groups   = userAssignments.Select(a =>
                 {
                     groupLookup.TryGetValue(a.GroupId, out var g);
                     return new UserGroupSummary
                     {
-                        AssignmentId  = a.Id,
-                        GroupId       = a.GroupId,
+                        AssignmentId  = a.Id, GroupId = a.GroupId,
                         GroupName     = g?.Name ?? "(deleted)",
-                        GroupColor    = g?.Color,
-                        GroupIcon     = g?.Icon,
+                        GroupColor    = g?.Color, GroupIcon = g?.Icon,
                         DocumentCount = docCounts.GetValueOrDefault(a.GroupId, 0),
-                        Permission    = a.Permission,
-                        AssignedAt    = a.AssignedAt,
+                        Permission    = a.Permission, AssignedAt = a.AssignedAt,
                         ExpiresAt     = a.ExpiresAt
                     };
                 }).ToList(),
@@ -557,10 +543,8 @@ public class DocumentGroupController : ControllerBase
         if (user == null) return NotFound();
 
         var assignments = await _db.UserGroupAssignments
-            .Where(a => a.UserId == userId)
-            .ToListAsync();
-
-        var groups = await _db.DocumentGroups.Where(g => g.IsActive).ToListAsync();
+            .Where(a => a.UserId == userId).ToListAsync();
+        var groups      = await _db.DocumentGroups.Where(g => g.IsActive).ToListAsync();
         var groupLookup = groups.ToDictionary(g => g.Id);
 
         var docCounts = await _db.DocumentGroupMembers
@@ -568,8 +552,7 @@ public class DocumentGroupController : ControllerBase
             .Select(g => new { g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.Key, x => x.Count);
 
-        var allAcls = await _db.DocumentAcls.Where(a => a.UserId == userId).ToListAsync();
-
+        var allAcls    = await _db.DocumentAcls.Where(a => a.UserId == userId).ToListAsync();
         var groupDocIds = await _db.DocumentGroupMembers
             .Where(m => assignments.Select(a => a.GroupId).Contains(m.GroupId))
             .Select(m => m.DocumentId)
@@ -579,37 +562,26 @@ public class DocumentGroupController : ControllerBase
             .Where(a => !groupDocIds.Contains(a.DocumentId))
             .Select(a => new DocumentAclDto
             {
-                Id         = a.Id,
-                DocumentId = a.DocumentId,
-                UserId     = a.UserId,
-                Username   = user.Username,
-                FullName   = user.FullName,
-                Permission = a.Permission,
-                GrantedAt  = a.GrantedAt,
-                ExpiresAt  = a.ExpiresAt,
-                IsActive   = a.IsActive
+                Id = a.Id, DocumentId = a.DocumentId, UserId = a.UserId,
+                Username = user.Username, FullName = user.FullName,
+                Permission = a.Permission, GrantedAt = a.GrantedAt,
+                ExpiresAt = a.ExpiresAt, IsActive = a.IsActive
             }).ToList();
 
         return Ok(new UserAccessSummaryDto
         {
-            UserId   = user.Id,
-            Username = user.Username,
-            FullName = user.FullName,
-            Role     = user.Role,
-            IsActive = user.IsActive,
+            UserId = user.Id, Username = user.Username,
+            FullName = user.FullName, Role = user.Role, IsActive = user.IsActive,
             Groups = assignments.Select(a =>
             {
                 groupLookup.TryGetValue(a.GroupId, out var g);
                 return new UserGroupSummary
                 {
-                    AssignmentId  = a.Id,
-                    GroupId       = a.GroupId,
+                    AssignmentId  = a.Id, GroupId = a.GroupId,
                     GroupName     = g?.Name ?? "(deleted)",
-                    GroupColor    = g?.Color,
-                    GroupIcon     = g?.Icon,
+                    GroupColor    = g?.Color, GroupIcon = g?.Icon,
                     DocumentCount = docCounts.GetValueOrDefault(a.GroupId, 0),
-                    Permission    = a.Permission,
-                    AssignedAt    = a.AssignedAt,
+                    Permission    = a.Permission, AssignedAt = a.AssignedAt,
                     ExpiresAt     = a.ExpiresAt
                 };
             }).ToList(),
@@ -618,8 +590,6 @@ public class DocumentGroupController : ControllerBase
     }
 
     // ── Change user role ──────────────────────────────────────────────────────
-    // Also exposed here for convenience alongside group management.
-    // (AuthController also has a PUT /api/auth/users/{id} that can do this)
 
     [HttpPatch("users/{userId:guid}/role")]
     public async Task<IActionResult> ChangeUserRole(Guid userId, [FromBody] ChangeRoleRequest req)
@@ -627,7 +597,6 @@ public class DocumentGroupController : ControllerBase
         var adminId = GetCurrentUserId();
         if (adminId == null) return Unauthorized();
 
-        // Prevent an admin from accidentally demoting themselves
         if (userId == adminId && req.Role != UserRole.Admin)
             return BadRequest(new { error = "You cannot change your own role." });
 
@@ -637,7 +606,7 @@ public class DocumentGroupController : ControllerBase
         var updateReq = new RegisterRequest
         {
             Username          = user.Username,
-            Password          = "",        // empty = no password change
+            Password          = "",
             FullName          = user.FullName,
             Email             = user.Email,
             Role              = req.Role,
@@ -647,8 +616,7 @@ public class DocumentGroupController : ControllerBase
         var (success, error) = _authService.UpdateUser(userId, updateReq);
         if (!success) return BadRequest(new { error });
 
-        _logger.LogInformation(
-            "Admin {Admin} changed role of user {User} to {Role}",
+        _logger.LogInformation("Admin {Admin} changed role of user {User} to {Role}",
             adminId, userId, req.Role);
 
         return Ok(new { message = $"Role updated to {req.Role}." });
@@ -662,18 +630,12 @@ public class DocumentGroupController : ControllerBase
         return Guid.TryParse(claim, out var id) ? id : null;
     }
 
-    /// <summary>
-    /// When new documents are added to a group, propagate ACL rows to all
-    /// currently-assigned users so they immediately get access.
-    /// </summary>
     private async Task PropagateNewDocumentsToAssignments(
-        Guid groupId,
-        List<Guid> newDocIds,
-        Guid adminId)
+        Guid groupId, List<Guid> newDocIds, Guid adminId)
     {
         var assignments = await _db.UserGroupAssignments
-            .Where(a => a.GroupId == groupId
-                     && (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+            .Where(a => a.GroupId == groupId &&
+                        (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
             .ToListAsync();
 
         foreach (var assignment in assignments)
@@ -681,10 +643,9 @@ public class DocumentGroupController : ControllerBase
             foreach (var docId in newDocIds)
             {
                 var existing = await _db.DocumentAcls
-                    .FirstOrDefaultAsync(a => a.DocumentId == docId && a.UserId == assignment.UserId);
-
+                    .FirstOrDefaultAsync(a => a.DocumentId == docId &&
+                                              a.UserId == assignment.UserId);
                 if (existing == null)
-                {
                     _db.DocumentAcls.Add(new DocumentAcl
                     {
                         Id         = Guid.NewGuid(),
@@ -695,7 +656,6 @@ public class DocumentGroupController : ControllerBase
                         GrantedBy  = adminId,
                         ExpiresAt  = assignment.ExpiresAt
                     });
-                }
             }
         }
 

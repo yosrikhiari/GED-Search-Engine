@@ -2,9 +2,11 @@ using OpenSearch.Client;
 using OpenSearch.Net;
 using GED.Core.Interfaces;
 using GED.Core.Models;
+using GED.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
 using CoreSearchRequest = GED.Core.Models.SearchRequest;
 
 namespace GED.Infrastructure.Services;
@@ -12,35 +14,34 @@ namespace GED.Infrastructure.Services;
 /// <summary>
 /// Hybrid search service: BM25 (keyword) + kNN (semantic vector) combined.
 ///
-/// Why hybrid?
-///   • BM25 is great for exact matches ("facture 2024", "contract PDF").
-///   • kNN semantic search handles multilingual queries — a French query finds
-///     English-titled documents because both share a semantic embedding space.
-///   • Combining both gives precision (BM25) + recall (semantic).
+/// Access control is enforced at query time via OpenSearch filters:
+///   • Admin → sees all documents (no filter injected)
+///   • Others → must satisfy at least one of:
+///       1. accessLevel == "open"
+///       2. allowedUserIds contains the current user's ID
+///       3. category is in the user's AllowedCategories list
 ///
-/// Scoring: hybridScore = 0.6 × bm25_normalized + 0.4 × cosine_similarity
-///
-/// Degradation: if Ollama is unavailable, embedding returns null and the service
-/// falls back to BM25-only. No exceptions, no downtime.
+/// ACL fields (allowedUserIds, accessLevel, createdByUserId) are written to
+/// OpenSearch at index time and kept in sync whenever ACL grants change.
 /// </summary>
 public class OpenSearchService : ISearchService
 {
-    private readonly IOpenSearchClient _client;
-    private readonly INlpService _nlpService;
-    private readonly ILogger<OpenSearchService> _logger;
+    private readonly IOpenSearchClient             _client;
+    private readonly INlpService                   _nlpService;
+    private readonly GedDbContext                  _db;          // ← NEW: for ACL lookups
+    private readonly ILogger<OpenSearchService>    _logger;
 
-    private const string DocumentIndex   = "ged-documents";
-    private const int    EmbeddingDim    = 768;   // nomic-embed-text output size
+    private const string DocumentIndex = "ged-documents";
+    private const int    EmbeddingDim  = 768;
+
     private readonly float _bm25Weight;
     private readonly float _semanticWeight;
-    // Minimum cosine similarity below which a semantic-only result is discarded
     private readonly float _semanticThreshold;
 
     // Maps FR/AR query words → stored English category values
     private static readonly Dictionary<string, string> CategoryAliases =
         new(StringComparer.OrdinalIgnoreCase)
     {
-        // French → English
         { "contrat",      "Contract"     }, { "contrats",     "Contract"     },
         { "facture",      "Invoice"      }, { "factures",     "Invoice"      },
         { "rapport",      "Report"       }, { "rapports",     "Report"       },
@@ -49,7 +50,6 @@ public class OpenSearchService : ISearchService
         { "devis",        "Invoice"      },
         { "note",         "Memo"         },
         { "présentation", "Presentation" }, { "presentation", "Presentation" },
-        // Arabic → English
         { "عقد",          "Contract"     }, { "عقود",         "Contract"     },
         { "فاتورة",       "Invoice"      }, { "فواتير",       "Invoice"      },
         { "تقرير",        "Report"       }, { "تقارير",       "Report"       },
@@ -58,19 +58,22 @@ public class OpenSearchService : ISearchService
         { "عرض",          "Presentation" },
     };
 
+    // ── Constructor ───────────────────────────────────────────────────────────
 
     public OpenSearchService(
-    IOpenSearchClient client,
-    INlpService nlpService,
-    ILogger<OpenSearchService> logger,
-    IConfiguration configuration)
+        IOpenSearchClient           client,
+        INlpService                 nlpService,
+        GedDbContext                db,             // ← NEW
+        ILogger<OpenSearchService>  logger,
+        IConfiguration              configuration)
     {
-        _client             = client;
-        _nlpService         = nlpService;
-        _logger             = logger;
-        _bm25Weight         = configuration.GetValue<float>("Search:Bm25Weight",        0.6f);
-        _semanticWeight     = configuration.GetValue<float>("Search:SemanticWeight",     0.4f);
-        _semanticThreshold  = configuration.GetValue<float>("Search:SemanticThreshold",  0.30f);
+        _client            = client;
+        _nlpService        = nlpService;
+        _db                = db;                    // ← NEW
+        _logger            = logger;
+        _bm25Weight        = configuration.GetValue<float>("Search:Bm25Weight",       0.6f);
+        _semanticWeight    = configuration.GetValue<float>("Search:SemanticWeight",    0.4f);
+        _semanticThreshold = configuration.GetValue<float>("Search:SemanticThreshold", 0.30f);
     }
 
     // ── SearchAsync (hybrid pipeline) ─────────────────────────────────────────
@@ -83,16 +86,13 @@ public class OpenSearchService : ISearchService
 
         try
         {
-            // ── Step 1: NLP understanding (fully local, <5ms) ─────────────────
             NaturalLanguageQuery? nlQuery = null;
             var processedQuery = request.Query;
 
             if (request.SearchType == GED.Core.Models.SearchType.Natural &&
                 !string.IsNullOrWhiteSpace(request.Query))
             {
-                nlQuery = await _nlpService.UnderstandQueryAsync(
-                    request.Query, cancellationToken);
-
+                nlQuery = await _nlpService.UnderstandQueryAsync(request.Query, cancellationToken);
                 processedQuery = nlQuery.ProcessedQuery;
 
                 _logger.LogInformation(
@@ -100,7 +100,6 @@ public class OpenSearchService : ISearchService
                     request.Query, nlQuery.DetectedLanguage,
                     string.Join(",", nlQuery.Keywords), nlQuery.IsUnderstood);
 
-                // Query is all stop-words — return empty immediately
                 if (!nlQuery.IsUnderstood)
                 {
                     return new SearchResult
@@ -116,13 +115,14 @@ public class OpenSearchService : ISearchService
                     };
                 }
 
-                // Apply NLP-extracted hard filters
                 ApplyNlpFilters(request, nlQuery);
 
-                // Generic "show all" detection
                 var lowerRaw = request.Query.ToLower().Trim();
-                var genericPhrases = new[] { "all documents", "show all", "list all", "get all",
-                                             "tous les documents", "كل الوثائق", "جميع الملفات" };
+                var genericPhrases = new[]
+                {
+                    "all documents", "show all", "list all", "get all",
+                    "tous les documents", "كل الوثائق", "جميع الملفات"
+                };
                 if (genericPhrases.Any(p => lowerRaw.Contains(p)) ||
                     (!nlQuery.Keywords.Any() && lowerRaw.Split(' ').All(w => w.Length <= 3)))
                 {
@@ -131,50 +131,36 @@ public class OpenSearchService : ISearchService
                 }
             }
 
-            // ── Step 2: Generate query embedding (Ollama, ~50-100ms) ──────────
-            // Run in parallel with BM25 to hide latency
-            var embeddingText  = string.IsNullOrWhiteSpace(processedQuery)
+            var embeddingText = string.IsNullOrWhiteSpace(processedQuery)
                 ? request.Query : processedQuery;
-            var embeddingTask  = string.IsNullOrWhiteSpace(embeddingText)
+            var embeddingTask = string.IsNullOrWhiteSpace(embeddingText)
                 ? Task.FromResult<float[]?>(null)
                 : _nlpService.GenerateEmbeddingAsync(embeddingText, cancellationToken);
 
-            // ── Step 3: BM25 search ───────────────────────────────────────────
-            var bm25Task = RunBm25SearchAsync(
-                request, processedQuery, nlQuery, cancellationToken);
+            var bm25Task = RunBm25SearchAsync(request, processedQuery, nlQuery, cancellationToken);
 
-            // Both run concurrently
             await Task.WhenAll(bm25Task, embeddingTask);
 
-            var bm25Response  = await bm25Task;
+            var bm25Response   = await bm25Task;
             var queryEmbedding = await embeddingTask;
 
-            // ── Step 4: Semantic / kNN search (if embedding available) ─────────
             List<(Guid Id, float Score)> semanticHits = new();
             var searchMode = SearchMode.BM25;
 
             if (queryEmbedding != null)
             {
-                semanticHits = await RunKnnSearchAsync(
-                    request, queryEmbedding, cancellationToken);
-
-                searchMode = (bm25Response?.Hits?.Any() == true) || semanticHits.Any()
-                    ? SearchMode.Hybrid
-                    : SearchMode.BM25;
+                semanticHits = await RunKnnSearchAsync(request, queryEmbedding, cancellationToken);
+                searchMode   = (bm25Response?.Hits?.Any() == true) || semanticHits.Any()
+                    ? SearchMode.Hybrid : SearchMode.BM25;
             }
 
-            // ── Step 5: Merge BM25 + semantic ─────────────────────────────────
             var documents = await MergeHybridResultsAsync(bm25Response, semanticHits, cancellationToken);
 
-            // ── Step 6: Determine IsUnderstood from results ───────────────────
-            // A query "understood" = NLP said OK AND we got at least one result.
-            // If both search modes returned 0, the query is likely too vague/gibberish.
-            var totalBm25 = (int)(bm25Response?.Total ?? 0);
+            var totalBm25    = (int)(bm25Response?.Total ?? 0);
             var isUnderstood = nlQuery?.IsUnderstood != false &&
                                (documents.Any() || totalBm25 > 0 ||
                                 !string.IsNullOrWhiteSpace(request.Query));
 
-            // ── Step 7: Normalize scores to 0–1 range ─────────────────────────
             if (documents.Any())
             {
                 var maxScore = documents.Max(d => d.Score);
@@ -265,23 +251,52 @@ public class OpenSearchService : ISearchService
     {
         try
         {
-            // Fetch more candidates (k = pageSize * 3) then filter/merge with BM25
             var k = Math.Min(request.PageSize * 3, 50);
 
             var response = await _client.SearchAsync<DocumentIndexModel>(s => s
                 .Index(DocumentIndex)
                 .Size(k)
                 .Query(q => q
-                    .Bool(b => b
-                        // Hard filter: only indexed documents
-                        .Filter(f => f.Term(t => t.Field("status").Value("Indexed")))
-                        // kNN vector similarity
-                        .Must(m => m.Knn(knn => knn
+                    .Bool(b =>
+                    {
+                        // ── Hard filters ──────────────────────────────────────
+                        var filters = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
+                        {
+                            fq => fq.Term(t => t.Field("status").Value("Indexed"))
+                        };
+
+                        // ── ACL filter for non-admins ─────────────────────────
+                        // NEW: same logic as BuildPrecisionQuery
+                        if (request.UserRole != "Admin" && request.UserId != null)
+                        {
+                            var userId = request.UserId;
+                            var cats   = request.UserAllowedCategories ?? new List<string>();
+
+                            var aclShould = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
+                            {
+                                s2 => s2.Term(t => t.Field("accessLevel").Value("open")),
+                                s2 => s2.Term(t => t.Field("allowedUserIds").Value(userId))
+                            };
+                            foreach (var cat in cats)
+                            {
+                                var c = cat;
+                                aclShould.Add(s2 => s2.Term(t => t.Field("category.keyword").Value(c)));
+                            }
+
+                            filters.Add(fq => fq.Bool(ab => ab
+                                .Should(aclShould.ToArray())
+                                .MinimumShouldMatch(1)));
+                        }
+
+                        b = b.Filter(filters.ToArray());
+
+                        b = b.Must(m => m.Knn(knn => knn
                             .Field("embedding")
                             .Vector(queryEmbedding)
-                            .K(k)
-                        ))
-                    )
+                            .K(k)));
+
+                        return b;
+                    })
                 ),
                 cancellationToken);
 
@@ -303,15 +318,8 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── Hybrid merge ──────────────────────────────────────────────────────────
+    // ── Hybrid merge (RRF) ────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Merges BM25 and semantic results using Reciprocal Rank Fusion (RRF).
-    ///
-    /// RRF: score(d) = Σ 1/(k + rank(d)) for each ranked list.
-    /// With k=60 this is robust to score scale differences between BM25 and cosine.
-    /// Documents from both lists are rewarded; documents from only one are penalized.
-    /// </summary>
     private async Task<List<DocumentSearchHit>> MergeHybridResultsAsync(
         ISearchResponse<DocumentIndexModel>? bm25Response,
         List<(Guid Id, float Score)> semanticHits,
@@ -341,7 +349,6 @@ public class OpenSearchService : ISearchService
                 missingIds.Add(id);
         }
 
-        // Fetch semantic-only hits that BM25 didn't return
         if (missingIds.Any())
         {
             var fetchResponse = await _client.MultiGetAsync(mg => mg
@@ -350,36 +357,32 @@ public class OpenSearchService : ISearchService
                 cancellationToken);
 
             foreach (var hit in fetchResponse.Hits.OfType<MultiGetHit<DocumentIndexModel>>()
-                        .Where(h => h.Found))
+                         .Where(h => h.Found))
             {
                 var doc = hit.Source;
-                if (doc == null) continue;
-
-                if (!Guid.TryParse(hit.Id, out var docId)) continue;
+                if (doc == null || !Guid.TryParse(hit.Id, out _)) continue;
 
                 var docHit = new DocumentSearchHit
                 {
-                    Id           = doc.Id,
-                    Title        = doc.Title,
-                    Description  = doc.Description,
-                    FileName     = doc.FileName,
-                    ContentType  = doc.ContentType,
-                    FileSize     = doc.FileSize,
-                    CreatedAt    = doc.CreatedAt,
-                    DocumentDate = doc.DocumentDate,
-                    ModifiedAt   = doc.ModifiedAt,
-                    Category     = doc.Category,
-                    Tags         = doc.Tags,
-                    Score        = 0f,   // will be overwritten by RRF score below
-                    Highlights   = null,
-                    Metadata     = doc.Metadata,
-                    OcrText      = doc.OcrText,
+                    Id            = doc.Id,
+                    Title         = doc.Title,
+                    Description   = doc.Description,
+                    FileName      = doc.FileName,
+                    ContentType   = doc.ContentType,
+                    FileSize      = doc.FileSize,
+                    CreatedAt     = doc.CreatedAt,
+                    DocumentDate  = doc.DocumentDate,
+                    ModifiedAt    = doc.ModifiedAt,
+                    Category      = doc.Category,
+                    Tags          = doc.Tags,
+                    Score         = 0f,
+                    Highlights    = null,
+                    Metadata      = doc.Metadata,
+                    OcrText       = doc.OcrText,
                     ExtractedText = doc.ExtractedText
                 };
-
                 hitMap.TryAdd(docHit.Id, docHit);
             }
-
         }
 
         return hitMap.Values
@@ -387,8 +390,8 @@ public class OpenSearchService : ISearchService
             .Select(d => { d.Score = scores.GetValueOrDefault(d.Id); return d; })
             .ToList();
     }
-    
-    // ── Index document with embedding ─────────────────────────────────────────
+
+    // ── Index document (with ACL snapshot) ───────────────────────────────────
 
     public async Task<bool> IndexDocumentAsync(
         Document document,
@@ -398,8 +401,18 @@ public class OpenSearchService : ISearchService
         {
             var indexModel = MapToIndexModel(document);
 
-            // Generate semantic embedding for the document
-            // Text = Title + Description + first 3000 chars of content (context window limit)
+            // ── NEW: fetch active ACL grants and embed them in the index doc ──
+            var aclUserIds = await _db.DocumentAcls
+                .Where(a => a.DocumentId == document.Id &&
+                            (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+                .Select(a => a.UserId.ToString())
+                .ToListAsync(cancellationToken);
+
+            indexModel.AllowedUserIds   = aclUserIds;
+            indexModel.CreatedByUserId  = document.CreatedBy;
+            indexModel.AccessLevel      = "open";
+
+            // Generate embedding
             var embeddingText = BuildEmbeddingText(document);
             if (!string.IsNullOrWhiteSpace(embeddingText))
             {
@@ -429,8 +442,9 @@ public class OpenSearchService : ISearchService
             if (response.IsValid)
             {
                 await _client.Indices.RefreshAsync(DocumentIndex, r => r, cancellationToken);
-                _logger.LogInformation("✅ Document {Id} indexed (embedding={HasEmb})",
-                    document.Id, indexModel.Embedding != null);
+                _logger.LogInformation(
+                    "✅ Document {Id} indexed (embedding={HasEmb}, aclUsers={AclCount})",
+                    document.Id, indexModel.Embedding != null, aclUserIds.Count);
                 return true;
             }
 
@@ -445,249 +459,214 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    /// <summary>
-    /// Builds the text used for embedding generation.
-    /// Priority: title (highest signal) + description + first 3000 chars of content.
-    /// Truncated to ~4000 chars total (nomic-embed-text context window).
-    /// </summary>
     private static string BuildEmbeddingText(Document document)
     {
         var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(document.Title))       parts.Add(document.Title);
+        if (!string.IsNullOrWhiteSpace(document.Description)) parts.Add(document.Description);
+        if (!string.IsNullOrWhiteSpace(document.Category))    parts.Add(document.Category);
 
-        if (!string.IsNullOrWhiteSpace(document.Title))
-            parts.Add(document.Title);
-
-        if (!string.IsNullOrWhiteSpace(document.Description))
-            parts.Add(document.Description);
-
-        if (!string.IsNullOrWhiteSpace(document.Category))
-            parts.Add(document.Category);
-
-        // Prefer OCR text (scanned docs) over extracted text (native PDFs)
         var content = !string.IsNullOrWhiteSpace(document.OcrText)
-            ? document.OcrText
-            : document.ExtractedText;
-
+            ? document.OcrText : document.ExtractedText;
         if (!string.IsNullOrWhiteSpace(content))
             parts.Add(content.Length > 3000 ? content[..3000] : content);
 
         return string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
     }
 
-    // ── Chunk-level indexing ──────────────────────────────────────────────────────
+    // ── Chunk-level indexing ──────────────────────────────────────────────────
 
-/// <summary>
-/// Embeds and indexes all chunks for a document into the ged-chunks index.
-/// Deletes any existing chunks for the document first (idempotent re-index).
-/// </summary>
-public async Task IndexChunksAsync(
-    Document document,
-    List<DocumentChunk> chunks,
-    CancellationToken cancellationToken = default)
-{
-    if (!chunks.Any()) return;
+    public async Task IndexChunksAsync(
+        Document document,
+        List<DocumentChunk> chunks,
+        CancellationToken cancellationToken = default)
+    {
+        if (!chunks.Any()) return;
 
-    // Delete existing chunks for this document (handles re-indexing case)
-    await DeleteChunksForDocumentAsync(document.Id, cancellationToken);
+        await DeleteChunksForDocumentAsync(document.Id, cancellationToken);
 
-    int indexed = 0;
+        int indexed = 0;
+        foreach (var chunk in chunks)
+        {
+            try
+            {
+                chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(
+                    chunk.Text, cancellationToken);
 
-    foreach (var chunk in chunks)
+                var chunkDoc = new
+                {
+                    document_id   = document.Id,
+                    chunk_id      = chunk.ChunkId,
+                    chunk_index   = chunk.ChunkIndex,
+                    text          = chunk.Text,
+                    title         = document.Title,
+                    category      = document.Category,
+                    document_date = document.DocumentDate,
+                    created_at    = document.CreatedAt,
+                    file_name     = document.FileName,
+                    content_type  = document.ContentType,
+                    tags          = document.Tags,
+                    embedding     = chunk.Embedding
+                };
+
+                var response = await _client.IndexAsync(
+                    chunkDoc,
+                    i => i.Index("ged-chunks").Id(chunk.ChunkId),
+                    cancellationToken);
+
+                if (response.IsValid) indexed++;
+                else
+                    _logger.LogWarning("Failed to index chunk {ChunkId}: {Error}",
+                        chunk.ChunkId, response.ServerError?.Error?.Reason);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error indexing chunk {ChunkId} — skipping", chunk.ChunkId);
+            }
+        }
+
+        _logger.LogInformation("✅ Indexed {Indexed}/{Total} chunks for document {DocId}",
+            indexed, chunks.Count, document.Id);
+    }
+
+    public async Task<List<ChunkSearchHit>> SearchChunksAsync(
+        string query,
+        int topK = 5,
+        List<string>? categories = null,
+        CancellationToken cancellationToken = default)
+    {
+        var queryEmbedding = await _nlpService.GenerateEmbeddingAsync(query, cancellationToken);
+        if (queryEmbedding == null || queryEmbedding.Length == 0)
+            return new List<ChunkSearchHit>();
+
+        var searchResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
+            .Index("ged-chunks")
+            .Size(topK)
+            .Query(q =>
+            {
+                var knn = q.Knn(k => k
+                    .Field("embedding")
+                    .Vector(queryEmbedding)
+                    .K(topK));
+
+                if (categories?.Any() == true)
+                    return q.Bool(b => b
+                        .Must(knn)
+                        .Filter(f => f.Terms(t => t
+                            .Field("category.keyword")
+                            .Terms(categories))));
+                return knn;
+            }),
+            cancellationToken);
+
+        if (!searchResponse.IsValid)
+        {
+            _logger.LogWarning("Chunk search failed: {Error}",
+                searchResponse.ServerError?.Error?.Reason);
+            return new List<ChunkSearchHit>();
+        }
+
+        return searchResponse.Hits.Select(h => new ChunkSearchHit
+        {
+            ChunkId      = h.Source.ChunkId,
+            DocumentId   = h.Source.DocumentId,
+            ChunkIndex   = h.Source.ChunkIndex,
+            Text         = h.Source.Text,
+            Title        = h.Source.Title,
+            Category     = h.Source.Category,
+            DocumentDate = h.Source.DocumentDate,
+            FileName     = h.Source.FileName,
+            ContentType  = h.Source.ContentType,
+            Tags         = h.Source.Tags,
+            Score        = (float)(h.Score ?? 0)
+        }).ToList();
+    }
+
+    private async Task DeleteChunksForDocumentAsync(Guid documentId, CancellationToken ct)
     {
         try
         {
-            // Get embedding for this chunk's text
-            chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(chunk.Text, cancellationToken);
-
-
-            var chunkDoc = new
-            {
-                document_id   = document.Id,
-                chunk_id      = chunk.ChunkId,
-                chunk_index   = chunk.ChunkIndex,
-                text          = chunk.Text,
-                title         = document.Title,
-                category      = document.Category,
-                document_date = document.DocumentDate,
-                created_at    = document.CreatedAt,
-                file_name     = document.FileName,
-                content_type  = document.ContentType,
-                tags          = document.Tags,
-                embedding     = chunk.Embedding
-            };
-
-            var response = await _client.IndexAsync(
-                chunkDoc,
-                i => i.Index("ged-chunks").Id(chunk.ChunkId),
-                cancellationToken);
-
-            if (response.IsValid)
-                indexed++;
-            else
-                _logger.LogWarning(
-                    "Failed to index chunk {ChunkId}: {Error}",
-                    chunk.ChunkId, response.ServerError?.Error?.Reason);
+            await _client.DeleteByQueryAsync<ChunkIndexModel>(d => d
+                .Index("ged-chunks")
+                .Query(q => q.Term(t => t.Field("document_id").Value(documentId.ToString()))),
+                ct);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Error indexing chunk {ChunkId} — skipping", chunk.ChunkId);
+            _logger.LogWarning(ex, "Failed to delete existing chunks for document {DocId}", documentId);
         }
     }
 
-    _logger.LogInformation(
-        "✅ Indexed {Indexed}/{Total} chunks for document {DocId}",
-        indexed, chunks.Count, document.Id);
-}
+    // ── NLP filter application ────────────────────────────────────────────────
 
-/// <summary>
-/// Searches the ged-chunks index using KNN vector search on the query embedding.
-/// Returns the top-K most relevant chunks with their parent document metadata.
-/// </summary>
-public async Task<List<ChunkSearchHit>> SearchChunksAsync(
-    string query,
-    int topK = 5,
-    List<string>? categories = null,
-    CancellationToken cancellationToken = default)
-{
-    var queryEmbedding = await _nlpService.GenerateEmbeddingAsync(query, cancellationToken);
-    if (queryEmbedding == null || queryEmbedding.Length == 0)
-        return new List<ChunkSearchHit>();
+    private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQuery)
+    {
+        if (nlQuery.ExtractedFilters == null || !nlQuery.ExtractedFilters.Any()) return;
 
-    // Build KNN query on chunks index
-    var searchResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
-        .Index("ged-chunks")
-        .Size(topK)
-        .Query(q =>
+        bool hasNonYearKeywords = nlQuery.Keywords
+            .Any(k => !System.Text.RegularExpressions.Regex.IsMatch(k, @"^\d{4}$"));
+
+        if (!hasNonYearKeywords)
         {
-            // KNN vector query
-            var knn = q.Knn(k => k
-                .Field("embedding")
-                .Vector(queryEmbedding)
-                .K(topK));
-
-            // Optionally filter by category
-            if (categories?.Any() == true)
+            if (nlQuery.ExtractedFilters.TryGetValue("fromDate", out var fromDate))
             {
-                return q.Bool(b => b
-                    .Must(knn)
-                    .Filter(f => f.Terms(t => t
-                        .Field("category.keyword")
-                        .Terms(categories))));
+                request.FromDate = DateTime.Parse(fromDate);
+                _logger.LogInformation("✅ NLP fromDate filter: {Date}", request.FromDate);
             }
-
-            return knn;
-        }),
-        cancellationToken);
-
-    if (!searchResponse.IsValid)
-    {
-        _logger.LogWarning(
-            "Chunk search failed: {Error}",
-            searchResponse.ServerError?.Error?.Reason);
-        return new List<ChunkSearchHit>();
-    }
-
-    return searchResponse.Hits.Select(h => new ChunkSearchHit
-    {
-        ChunkId      = h.Source.ChunkId,
-        DocumentId   = h.Source.DocumentId,
-        ChunkIndex   = h.Source.ChunkIndex,
-        Text         = h.Source.Text,
-        Title        = h.Source.Title,
-        Category     = h.Source.Category,
-        DocumentDate = h.Source.DocumentDate,
-        FileName     = h.Source.FileName,
-        ContentType  = h.Source.ContentType,
-        Tags         = h.Source.Tags,
-        Score        = (float)(h.Score ?? 0)
-    }).ToList();
-}
-
-private async Task DeleteChunksForDocumentAsync(
-    Guid documentId,
-    CancellationToken cancellationToken)
-{
-    try
-    {
-        await _client.DeleteByQueryAsync<ChunkIndexModel>(d => d
-            .Index("ged-chunks")
-            .Query(q => q.Term(t => t.Field("document_id").Value(documentId.ToString()))),
-            cancellationToken);
-    }
-    catch (Exception ex)
-    {
-        _logger.LogWarning(ex, "Failed to delete existing chunks for document {DocId}", documentId);
-    }
-}
-
-    // ── NLP filter application ─────────────────────────────────────────────────
-
-private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQuery)
-{
-    if (nlQuery.ExtractedFilters == null || !nlQuery.ExtractedFilters.Any()) return;
-
-    // Only apply year-based date filter when the year is the ONLY meaningful token.
-    // e.g. "2024" alone → date filter OK
-    // e.g. "contrats 2024" → year should boost relevance, NOT hard-filter (kills results)
-    bool hasNonYearKeywords = nlQuery.Keywords
-        .Any(k => !System.Text.RegularExpressions.Regex.IsMatch(k, @"^\d{4}$"));
-
-    if (!hasNonYearKeywords)
-    {
-        if (nlQuery.ExtractedFilters.TryGetValue("fromDate", out var fromDate))
-        {
-            request.FromDate = DateTime.Parse(fromDate);
-            _logger.LogInformation("✅ NLP fromDate filter: {Date}", request.FromDate);
-        }
-        if (nlQuery.ExtractedFilters.TryGetValue("toDate", out var toDate))
-        {
-            request.ToDate = DateTime.Parse(toDate);
-            _logger.LogInformation("✅ NLP toDate filter: {Date}", request.ToDate);
-        }
-    }
-    else
-    {
-        _logger.LogInformation(
-            "⏭️  Skipping year date filter — other keywords present ({KW})",
-            string.Join(", ", nlQuery.Keywords));
-    }
-
-    // Filetype filter — only apply as hard filter when it's the only token
-    // "pdf" alone → filter by ContentType
-    // "pdf contracts" → let BM25 handle it via text matching on FileName/Tags
-    if (nlQuery.ExtractedFilters.TryGetValue("filetype", out var fileType))
-    {
-        bool hasNonFiletypeKeywords = nlQuery.Keywords
-            .Any(k => !new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
-                .Contains(k.ToLower()));
-
-        if (!hasNonFiletypeKeywords)
-        {
-            var contentType = MapFileTypeToContentType(fileType);
-            if (!string.IsNullOrEmpty(contentType))
+            if (nlQuery.ExtractedFilters.TryGetValue("toDate", out var toDate))
             {
-                request.ContentTypes = new List<string> { contentType };
-                _logger.LogInformation("✅ NLP contentType filter: {Type}", contentType);
+                request.ToDate = DateTime.Parse(toDate);
+                _logger.LogInformation("✅ NLP toDate filter: {Date}", request.ToDate);
             }
         }
+        else
+        {
+            _logger.LogInformation(
+                "⏭️  Skipping year date filter — other keywords present ({KW})",
+                string.Join(", ", nlQuery.Keywords));
+        }
+
+        _logger.LogInformation("🔍 NLP ExtractedFilters: {Filters}", string.Join(", ", nlQuery.ExtractedFilters?.Select(kv => $"{kv.Key}={kv.Value}") ?? Array.Empty<string>()));
+        
+        if (nlQuery.ExtractedFilters.TryGetValue("filetype", out var fileType))
+        {
+            bool hasNonFiletypeKeywords = nlQuery.Keywords
+                .Any(k => !new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
+                    .Contains(k.ToLower()));
+
+            bool hasFiletypeKeyword = nlQuery.Keywords
+                .Any(k => new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
+                    .Contains(k.ToLower()));
+
+            if (!hasNonFiletypeKeywords && hasFiletypeKeyword && nlQuery.Keywords.Count == 1)
+            {
+                _logger.LogInformation("⏭️  Skipping filetype filter — only keyword is filetype '{KW}', will search instead", string.Join(", ", nlQuery.Keywords));
+            }
+            else if (!hasNonFiletypeKeywords)
+            {
+                var contentType = MapFileTypeToContentType(fileType);
+                if (!string.IsNullOrEmpty(contentType))
+                {
+                    request.ContentTypes = new List<string> { contentType };
+                    _logger.LogInformation("✅ NLP contentType filter: {Type}", contentType);
+                }
+            }
+        }
+
+        var categoryEntity = nlQuery.Entities.FirstOrDefault(e => e.StartsWith("CATEGORY:"));
+        if (categoryEntity != null && request.Categories == null)
+        {
+            var category = categoryEntity["CATEGORY:".Length..];
+            request.Categories = new List<string> { category };
+            _logger.LogInformation("✅ NLP category filter: {Cat}", category);
+        }
     }
 
-    // Category from entities — only if frontend didn't already set one
-    var categoryEntity = nlQuery.Entities
-        .FirstOrDefault(e => e.StartsWith("CATEGORY:"));
-    if (categoryEntity != null && request.Categories == null)
-    {
-        var category = categoryEntity["CATEGORY:".Length..];
-        request.Categories = new List<string> { category };
-        _logger.LogInformation("✅ NLP category filter: {Cat}", category);
-    }
-}
-    // ── NLP summary for the frontend banner ───────────────────────────────────
+    // ── NLP summary ───────────────────────────────────────────────────────────
 
     private static string? BuildNlpSummary(NaturalLanguageQuery? nlQuery)
     {
         if (nlQuery == null) return null;
-
         var parts = new List<string>();
 
         var category = nlQuery.Entities
@@ -712,7 +691,7 @@ private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQ
         return parts.Any() ? string.Join(" · ", parts) : null;
     }
 
-    // ── BM25 query builder (unchanged from original) ──────────────────────────
+    // ── BM25 query builder ────────────────────────────────────────────────────
 
     private QueryContainer BuildPrecisionQuery(
         QueryContainerDescriptor<DocumentIndexModel> q,
@@ -723,9 +702,41 @@ private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQ
         var shouldQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
         var filterQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
 
-        // ── Hard filters ─────────────────────────────────────────────────────
+        // ── Hard filter: only indexed documents ───────────────────────────────
         filterQueries.Add(fq => fq.Term(t => t.Field("status").Value("Indexed")));
 
+        // ── NEW: ACL filter for non-admin users ───────────────────────────────
+        // Admin bypasses this filter entirely — sees all documents.
+        // Everyone else must satisfy at least one of:
+        //   1. Document is explicitly open (accessLevel == "open")
+        //   2. User's ID is in allowedUserIds
+        //   3. Document's category is in the user's AllowedCategories list
+        if (request.UserRole != "Admin" && request.UserId != null)
+        {
+            var userId = request.UserId;
+            var cats   = request.UserAllowedCategories ?? new List<string>();
+
+            var aclShould = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
+            {
+                // Path 1 — document is open to all authenticated users
+                s => s.Term(t => t.Field("accessLevel").Value("open")),
+                // Path 2 — user has an explicit ACL grant
+                s => s.Term(t => t.Field("allowedUserIds").Value(userId))
+            };
+
+            // Path 3 — category-based access (user's AllowedCategories list)
+            foreach (var cat in cats)
+            {
+                var c = cat; // capture loop variable
+                aclShould.Add(s => s.Term(t => t.Field("category.keyword").Value(c)));
+            }
+
+            filterQueries.Add(fq => fq.Bool(b => b
+                .Should(aclShould.ToArray())
+                .MinimumShouldMatch(1)));
+        }
+
+        // ── Optional filters ──────────────────────────────────────────────────
         if (request.ContentTypes?.Any() == true)
             filterQueries.Add(ctq => ctq.Terms(t => t
                 .Field(d => d.ContentType).Terms(request.ContentTypes)));
@@ -762,13 +773,12 @@ private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQ
                 ).MinimumShouldMatch(1)));
 
         // ── Scoring queries ───────────────────────────────────────────────────
-if (!string.IsNullOrWhiteSpace(query))
+        if (!string.IsNullOrWhiteSpace(query))
         {
-            var cleanQuery   = query.Trim();
-            var normalized   = NormalizeSearchQuery(cleanQuery);
-            var variations   = GenerateQueryVariations(cleanQuery);
+            var cleanQuery = query.Trim();
+            var normalized = NormalizeSearchQuery(cleanQuery);
+            var variations = GenerateQueryVariations(cleanQuery);
 
-            // Add cross-language alias (e.g. "contrats" → "Contract")
             foreach (var token in cleanQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (CategoryAliases.TryGetValue(token, out var aliasedCategory))
                     variations.Add(aliasedCategory);
@@ -791,32 +801,24 @@ if (!string.IsNullOrWhiteSpace(query))
 
             shouldQueries.Add(sq => sq.MatchPhrasePrefix(mpp => mpp
                 .Field(d => d.Title).Query(cleanQuery).MaxExpansions(20).Boost(35.0)));
-
             shouldQueries.Add(sq => sq.Match(m => m
                 .Field(d => d.ExtractedText).Query(normalized).Operator(Operator.Or).MinimumShouldMatch("30%").Boost(10.0)));
             shouldQueries.Add(sq => sq.Match(m => m
                 .Field(d => d.OcrText).Query(normalized).Operator(Operator.Or).MinimumShouldMatch("30%").Boost(5.0)));
 
-            // Boost by NLP keywords (with cross-language aliases)
             if (nlQuery?.Keywords?.Any() == true)
             {
                 foreach (var kw in nlQuery.Keywords)
                 {
-                    // Skip pure year tokens — already handled via date filter or used as text boost
                     if (System.Text.RegularExpressions.Regex.IsMatch(kw, @"^\d{4}$"))
                     {
-                        // Still boost text fields that mention the year
-                        shouldQueries.Add(sq => sq.Match(m => m
-                            .Field(d => d.ExtractedText).Query(kw).Boost(8.0)));
-                        shouldQueries.Add(sq => sq.Match(m => m
-                            .Field(d => d.OcrText).Query(kw).Boost(4.0)));
-                        shouldQueries.Add(sq => sq.Match(m => m
-                            .Field(d => d.Title).Query(kw).Boost(6.0)));
+                        shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.ExtractedText).Query(kw).Boost(8.0)));
+                        shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.OcrText).Query(kw).Boost(4.0)));
+                        shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.Title).Query(kw).Boost(6.0)));
                         continue;
                     }
 
                     var kwVariations = GenerateQueryVariations(kw);
-                    // Add alias for this keyword too
                     if (CategoryAliases.TryGetValue(kw, out var kwAlias))
                         kwVariations.Add(kwAlias);
 
@@ -832,6 +834,7 @@ if (!string.IsNullOrWhiteSpace(query))
                 }
             }
         }
+
         var msm = CalculateMinimumShouldMatch(query, shouldQueries.Count);
 
         return q.Bool(b =>
@@ -846,7 +849,7 @@ if (!string.IsNullOrWhiteSpace(query))
         });
     }
 
-    // ── Helpers: normalize, variations, sort, aggregations ───────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static string NormalizeSearchQuery(string query)
     {
@@ -860,11 +863,10 @@ if (!string.IsNullOrWhiteSpace(query))
     private static List<string> GenerateQueryVariations(string query)
     {
         if (string.IsNullOrWhiteSpace(query)) return new();
-        var cleaned  = query.Trim();
-        var lower    = cleaned.ToLower();
-        var norm     = NormalizeSearchQuery(lower);
-        var cap      = char.ToUpper(lower[0]) + lower[1..];
-
+        var cleaned = query.Trim();
+        var lower   = cleaned.ToLower();
+        var norm    = NormalizeSearchQuery(lower);
+        var cap     = char.ToUpper(lower[0]) + lower[1..];
         return new[] { cleaned, norm, lower, cap, lower + "s" }
             .Distinct()
             .Where(v => !string.IsNullOrWhiteSpace(v))
@@ -895,36 +897,35 @@ if (!string.IsNullOrWhiteSpace(query))
     private static AggregationContainerDescriptor<DocumentIndexModel> BuildAggregations(
         AggregationContainerDescriptor<DocumentIndexModel> agg)
         => agg
-            .Terms("categories",     t => t.Field("category.keyword").Size(10))
-            .Terms("content_types",  t => t.Field(d => d.ContentType).Size(10))
-            .Terms("tags",           t => t.Field(d => d.Tags).Size(20))
-            .DateHistogram("created_dates", d => d.Field(doc => doc.CreatedAt).CalendarInterval(DateInterval.Month));
-
-    // ── Mapping helpers ───────────────────────────────────────────────────────
+            .Terms("categories",    t => t.Field("category.keyword").Size(10))
+            .Terms("content_types", t => t.Field(d => d.ContentType).Size(10))
+            .Terms("tags",          t => t.Field(d => d.Tags).Size(20))
+            .DateHistogram("created_dates", d => d
+                .Field(doc => doc.CreatedAt)
+                .CalendarInterval(DateInterval.Month));
 
     private static DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
     {
         var highlights = hit.Highlight?.Values.SelectMany(v => v).ToList() ?? new();
         var doc        = hit.Source;
-
         return new DocumentSearchHit
         {
-            Id          = doc.Id,
-            Title       = doc.Title,
-            Description = doc.Description,
-            FileName    = doc.FileName,
-            ContentType = doc.ContentType,
-            FileSize    = doc.FileSize,
-            CreatedAt   = doc.CreatedAt,
-            DocumentDate = doc.DocumentDate,
-            ModifiedAt  = doc.ModifiedAt,
-            Category    = doc.Category,
-            Tags        = doc.Tags,
-            Score       = (float)(hit.Score ?? 0),
-            Highlights  = highlights.Any() ? highlights : null,
-            Metadata    = doc.Metadata,
-            OcrText       = hit.Source.OcrText,
-            ExtractedText = hit.Source.ExtractedText,
+            Id            = doc.Id,
+            Title         = doc.Title,
+            Description   = doc.Description,
+            FileName      = doc.FileName,
+            ContentType   = doc.ContentType,
+            FileSize      = doc.FileSize,
+            CreatedAt     = doc.CreatedAt,
+            DocumentDate  = doc.DocumentDate,
+            ModifiedAt    = doc.ModifiedAt,
+            Category      = doc.Category,
+            Tags          = doc.Tags,
+            Score         = (float)(hit.Score ?? 0),
+            Highlights    = highlights.Any() ? highlights : null,
+            Metadata      = doc.Metadata,
+            OcrText       = doc.OcrText,
+            ExtractedText = doc.ExtractedText,
         };
     }
 
@@ -946,6 +947,7 @@ if (!string.IsNullOrWhiteSpace(query))
             Tags          = document.Tags,
             Category      = document.Category,
             Metadata      = SanitizeMetadata(document.Metadata)
+            // AllowedUserIds and CreatedByUserId are set in IndexDocumentAsync after the DB query
         };
 
     private static Dictionary<string, object>? SanitizeMetadata(Dictionary<string, object>? metadata)
@@ -976,15 +978,15 @@ if (!string.IsNullOrWhiteSpace(query))
     private static string MapFileTypeToContentType(string fileType)
         => fileType.ToLower() switch
         {
-            "pdf"  => "application/pdf",
-            "doc"  => "application/msword",
-            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "xls"  => "application/vnd.ms-excel",
-            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pdf"         => "application/pdf",
+            "doc"         => "application/msword",
+            "docx"        => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xls"         => "application/vnd.ms-excel",
+            "xlsx"        => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "jpg" or "jpeg" => "image/jpeg",
-            "png"  => "image/png",
-            "txt"  => "text/plain",
-            _      => string.Empty
+            "png"         => "image/png",
+            "txt"         => "text/plain",
+            _             => string.Empty
         };
 
     private Dictionary<string, List<FacetValue>> ExtractFacets(
@@ -994,7 +996,11 @@ if (!string.IsNullOrWhiteSpace(query))
         foreach (var agg in aggregations)
             if (agg.Value is BucketAggregate ba)
                 facets[agg.Key] = ba.Items.OfType<KeyedBucket<object>>()
-                    .Select(b => new FacetValue { Value = b.Key?.ToString() ?? "", Count = (int)(b.DocCount ?? 0) })
+                    .Select(b => new FacetValue
+                    {
+                        Value = b.Key?.ToString() ?? "",
+                        Count = (int)(b.DocCount ?? 0)
+                    })
                     .ToList();
         return facets;
     }
@@ -1030,15 +1036,29 @@ if (!string.IsNullOrWhiteSpace(query))
     {
         try
         {
-            // Generate embeddings in parallel (max 4 concurrent Ollama calls)
-            var docs         = documents.ToList();
-            var indexModels  = new List<DocumentIndexModel>(docs.Count);
-            var semaphore    = new SemaphoreSlim(4, 4);
+            var docs        = documents.ToList();
+            var indexModels = new List<DocumentIndexModel>(docs.Count);
+            var semaphore   = new SemaphoreSlim(4, 4);
+
+            // ── NEW: batch-fetch ACLs for all documents in one query ──────────
+            var docIds = docs.Select(d => d.Id).ToList();
+            var allAcls = await _db.DocumentAcls
+                .Where(a => docIds.Contains(a.DocumentId) &&
+                            (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+                .GroupBy(a => a.DocumentId)
+                .ToDictionaryAsync(
+                    g => g.Key,
+                    g => g.Select(a => a.UserId.ToString()).ToList(),
+                    cancellationToken);
 
             var tasks = docs.Select(async doc =>
             {
                 var model         = MapToIndexModel(doc);
                 var embeddingText = BuildEmbeddingText(doc);
+
+                // Attach ACL snapshot
+                model.AllowedUserIds  = allAcls.GetValueOrDefault(doc.Id) ?? new List<string>();
+                model.CreatedByUserId = doc.CreatedBy;
 
                 await semaphore.WaitAsync(cancellationToken);
                 try
@@ -1080,13 +1100,12 @@ if (!string.IsNullOrWhiteSpace(query))
     {
         try
         {
-            // Try semantic "more like this" via the embedding first
             var docResponse = await _client.GetAsync<DocumentIndexModel>(
                 documentId.ToString(), g => g.Index(DocumentIndex), cancellationToken);
 
             if (docResponse.Found && docResponse.Source.Embedding != null)
             {
-                var embedding = docResponse.Source.Embedding;
+                var embedding   = docResponse.Source.Embedding;
                 var knnResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
                     .Index(DocumentIndex)
                     .Size(count + 1)
@@ -1103,17 +1122,16 @@ if (!string.IsNullOrWhiteSpace(query))
                     .Take(count)
                     .Select(h => new DocumentSuggestion
                     {
-                        DocumentId     = h.Source.Id,
-                        Title          = h.Source.Title,
+                        DocumentId      = h.Source.Id,
+                        Title           = h.Source.Title,
                         SimilarityScore = (float)(h.Score ?? 0),
-                        Reason         = "Semantic similarity"
+                        Reason          = "Semantic similarity"
                     })
                     .ToList();
 
                 if (semanticSuggestions.Any()) return semanticSuggestions;
             }
 
-            // Fallback to MoreLikeThis
             var mltResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
                 .Index(DocumentIndex)
                 .Size(count + 1)
@@ -1142,61 +1160,80 @@ if (!string.IsNullOrWhiteSpace(query))
     }
 }
 
+// ── Index document model ──────────────────────────────────────────────────────
+
 /// <summary>
 /// OpenSearch index document model.
-/// The <c>Embedding</c> field is mapped as a knn_vector in Program.cs index setup.
+/// Embedding is mapped as knn_vector in Program.cs.
+/// AllowedUserIds / AccessLevel / CreatedByUserId are the ACL fields used for
+/// query-time row-level security — no JWT required.
 /// </summary>
 public class DocumentIndexModel
 {
-    public Guid Id { get; set; }
-    public string Title { get; set; } = string.Empty;
+    public Guid    Id          { get; set; }
+    public string  Title       { get; set; } = string.Empty;
     public string? Description { get; set; }
-    public string FileName { get; set; } = string.Empty;
-    public string ContentType { get; set; } = string.Empty;
-    public long FileSize { get; set; }
-    public DateTime CreatedAt { get; set; }
+    public string  FileName    { get; set; } = string.Empty;
+    public string  ContentType { get; set; } = string.Empty;
+    public long    FileSize    { get; set; }
+    public DateTime  CreatedAt    { get; set; }
     public DateTime? DocumentDate { get; set; }
-    public DateTime? ModifiedAt { get; set; }
-    public string Status { get; set; } = "Indexed";
+    public DateTime? ModifiedAt   { get; set; }
+    public string  Status       { get; set; } = "Indexed";
     public string? ExtractedText { get; set; }
-    public string? OcrText { get; set; }
-    public List<string>? Tags { get; set; }
-    public string? Category { get; set; }
+    public string? OcrText       { get; set; }
+    public List<string>?              Tags     { get; set; }
+    public string?                    Category { get; set; }
     public Dictionary<string, object>? Metadata { get; set; }
 
-    /// <summary>
-    /// 768-dimensional nomic-embed-text vector.
-    /// Stored as a knn_vector field in OpenSearch for approximate nearest-neighbor search.
-    /// Null for documents indexed before the semantic search feature was enabled.
-    /// </summary>
+    /// <summary>768-dim nomic-embed-text vector for kNN search.</summary>
     public float[]? Embedding { get; set; }
+
+    // ── ACL fields (NEW) ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Guids (as strings) of users who have been explicitly granted access.
+    /// Populated at index time from DocumentAcl table. Updated whenever ACL changes.
+    /// </summary>
+    public List<string> AllowedUserIds { get; set; } = new();
+
+    /// <summary>
+    /// "open"       = visible to every authenticated user
+    /// "restricted" = only users in AllowedUserIds, admins, or matching-category users
+    /// </summary>
+    public string AccessLevel { get; set; } = "restricted";
+
+    /// <summary>Username of the user who uploaded the document.</summary>
+    public string? CreatedByUserId { get; set; }
 }
-// ── Chunk index model ─────────────────────────────────────────────────────────
+
+// ── Chunk models ──────────────────────────────────────────────────────────────
 
 public class ChunkIndexModel
 {
-    public Guid DocumentId { get; set; }
-    public string ChunkId { get; set; } = string.Empty;
-    public int ChunkIndex { get; set; }
-    public string Text { get; set; } = string.Empty;
-    public string Title { get; set; } = string.Empty;
-    public string? Category { get; set; }
+    public Guid      DocumentId   { get; set; }
+    public string    ChunkId      { get; set; } = string.Empty;
+    public int       ChunkIndex   { get; set; }
+    public string    Text         { get; set; } = string.Empty;
+    public string    Title        { get; set; } = string.Empty;
+    public string?   Category     { get; set; }
     public DateTime? DocumentDate { get; set; }
-    public string FileName { get; set; } = string.Empty;
-    public string ContentType { get; set; } = string.Empty;
-    public List<string>? Tags { get; set; }
+    public string    FileName     { get; set; } = string.Empty;
+    public string    ContentType  { get; set; } = string.Empty;
+    public List<string>? Tags     { get; set; }
 }
+
 public class ChunkSearchHit
 {
-    public string   ChunkId      { get; set; } = string.Empty;
-    public Guid     DocumentId   { get; set; }
-    public int      ChunkIndex   { get; set; }
-    public string   Text         { get; set; } = string.Empty;
-    public string   Title        { get; set; } = string.Empty;
-    public string?  Category     { get; set; }
+    public string    ChunkId      { get; set; } = string.Empty;
+    public Guid      DocumentId   { get; set; }
+    public int       ChunkIndex   { get; set; }
+    public string    Text         { get; set; } = string.Empty;
+    public string    Title        { get; set; } = string.Empty;
+    public string?   Category     { get; set; }
     public DateTime? DocumentDate { get; set; }
-    public string   FileName     { get; set; } = string.Empty;
-    public string   ContentType  { get; set; } = string.Empty;
-    public List<string>? Tags    { get; set; }
-    public float    Score        { get; set; }
+    public string    FileName     { get; set; } = string.Empty;
+    public string    ContentType  { get; set; } = string.Empty;
+    public List<string>? Tags     { get; set; }
+    public float     Score        { get; set; }
 }

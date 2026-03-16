@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using GED.Core.Interfaces;          // ← NEW: ISearchService, IDocumentService
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
@@ -9,53 +10,47 @@ using System.Security.Claims;
 namespace GED.API.Controllers;
 
 /// <summary>
-/// Document ACL (Access Control List) controller.
+/// Document ACL controller.
 ///
-/// Allows admins to grant/revoke per-document access for specific users,
-/// with optional time-limited expiry.
-///
-/// Admin endpoints:
-///   GET    /api/documents/{docId}/acl          → list who has access
-///   POST   /api/documents/{docId}/acl          → grant access to a user
-///   DELETE /api/documents/{docId}/acl/{aclId}  → revoke a specific grant
-///   GET    /api/documents/my-access            → list documents current user can access
+/// After every grant or revoke the affected document is re-indexed so that
+/// OpenSearch's allowedUserIds field stays in sync with the DB immediately.
+/// No eventual-consistency lag: access takes effect on the very next search.
 /// </summary>
 [ApiController]
 [Route("api/documents")]
 [Authorize]
 public class DocumentAclController : ControllerBase
 {
-    private readonly GedDbContext _db;
-    private readonly AuthService _authService;
-    private readonly ILogger<DocumentAclController> _logger;
+    private readonly GedDbContext                       _db;
+    private readonly AuthService                        _authService;
+    private readonly ISearchService                     _searchService;   // ← NEW
+    private readonly IDocumentService                   _documentService; // ← NEW
+    private readonly ILogger<DocumentAclController>     _logger;
 
     public DocumentAclController(
-        GedDbContext db,
-        AuthService authService,
+        GedDbContext                   db,
+        AuthService                    authService,
+        ISearchService                 searchService,    // ← NEW
+        IDocumentService               documentService,  // ← NEW
         ILogger<DocumentAclController> logger)
     {
-        _db          = db;
-        _authService = authService;
-        _logger      = logger;
+        _db              = db;
+        _authService     = authService;
+        _searchService   = searchService;                // ← NEW
+        _documentService = documentService;              // ← NEW
+        _logger          = logger;
     }
 
-    // ── Admin: list access grants for a document ───────────────────────────────
+    // ── Admin: list ACL entries for a document ────────────────────────────────
 
-    /// <summary>
-    /// Get all ACL entries for a document (who has access, and until when).
-    /// Admin only.
-    /// </summary>
     [HttpGet("{documentId:guid}/acl")]
     [Authorize(Roles = "Admin")]
     public async Task<ActionResult<List<DocumentAclDto>>> GetAcl(Guid documentId)
     {
-        var acls = await _db.DocumentAcls
+        var acls     = await _db.DocumentAcls
             .Where(a => a.DocumentId == documentId)
             .ToListAsync();
-
-        // Resolve user info from AuthService (users are stored in JSON, not in EF)
-        var allUsers = _authService.GetAllUsers()
-            .ToDictionary(u => u.Id);
+        var allUsers = _authService.GetAllUsers().ToDictionary(u => u.Id);
 
         var result = acls.Select(a =>
         {
@@ -77,15 +72,8 @@ public class DocumentAclController : ControllerBase
         return Ok(result);
     }
 
-    // ── Admin: grant access ────────────────────────────────────────────────────
+    // ── Admin: grant access ───────────────────────────────────────────────────
 
-    /// <summary>
-    /// Grant a user access to a document (permanent or time-limited).
-    /// Admin only.
-    ///
-    /// Body: { "userId": "...", "permission": "Read", "expiresAt": null }
-    /// Set expiresAt to a future date for time-limited access, or null for permanent.
-    /// </summary>
     [HttpPost("{documentId:guid}/acl")]
     [Authorize(Roles = "Admin")]
     public async Task<ActionResult<DocumentAclDto>> GrantAccess(
@@ -95,17 +83,14 @@ public class DocumentAclController : ControllerBase
         var adminId = GetCurrentUserId();
         if (adminId == null) return Unauthorized();
 
-        // Validate expiry
         if (request.ExpiresAt.HasValue && request.ExpiresAt.Value <= DateTime.UtcNow)
             return BadRequest(new { error = "ExpiresAt must be in the future." });
 
-        // Check if an ACL entry already exists for this user+document
         var existing = await _db.DocumentAcls
             .FirstOrDefaultAsync(a => a.DocumentId == documentId && a.UserId == request.UserId);
 
         if (existing != null)
         {
-            // Update existing entry
             existing.Permission = request.Permission;
             existing.ExpiresAt  = request.ExpiresAt;
             existing.GrantedAt  = DateTime.UtcNow;
@@ -113,7 +98,7 @@ public class DocumentAclController : ControllerBase
         }
         else
         {
-            var acl = new DocumentAcl
+            _db.DocumentAcls.Add(new DocumentAcl
             {
                 Id         = Guid.NewGuid(),
                 DocumentId = documentId,
@@ -122,13 +107,21 @@ public class DocumentAclController : ControllerBase
                 GrantedAt  = DateTime.UtcNow,
                 GrantedBy  = adminId.Value,
                 ExpiresAt  = request.ExpiresAt
-            };
-            _db.DocumentAcls.Add(acl);
+            });
         }
 
         await _db.SaveChangesAsync();
 
-        // Resolve user info from AuthService
+        // ── NEW: re-index the document so allowedUserIds is updated in OpenSearch ──
+        var doc = await _documentService.GetDocumentByIdAsync(documentId);
+        if (doc != null)
+        {
+            await _searchService.UpdateDocumentIndexAsync(doc);
+            _logger.LogInformation(
+                "Re-indexed document {DocId} after ACL grant for user {UserId}",
+                documentId, request.UserId);
+        }
+
         var user = _authService.GetUserById(request.UserId);
 
         _logger.LogInformation(
@@ -150,12 +143,8 @@ public class DocumentAclController : ControllerBase
         });
     }
 
-    // ── Admin: revoke access ───────────────────────────────────────────────────
+    // ── Admin: revoke access ──────────────────────────────────────────────────
 
-    /// <summary>
-    /// Revoke a specific ACL entry (remove user's access to a document).
-    /// Admin only.
-    /// </summary>
     [HttpDelete("{documentId:guid}/acl/{aclId:guid}")]
     [Authorize(Roles = "Admin")]
     public async Task<IActionResult> RevokeAccess(Guid documentId, Guid aclId)
@@ -168,26 +157,29 @@ public class DocumentAclController : ControllerBase
         _db.DocumentAcls.Remove(acl);
         await _db.SaveChangesAsync();
 
-        _logger.LogInformation(
-            "ACL entry {AclId} revoked for document {DocId}", aclId, documentId);
+        // ── NEW: re-index so the removed user is cleared from allowedUserIds ──
+        var doc = await _documentService.GetDocumentByIdAsync(documentId);
+        if (doc != null)
+        {
+            await _searchService.UpdateDocumentIndexAsync(doc);
+            _logger.LogInformation(
+                "Re-indexed document {DocId} after ACL revoke (entry {AclId})",
+                documentId, aclId);
+        }
 
+        _logger.LogInformation("ACL entry {AclId} revoked for document {DocId}", aclId, documentId);
         return Ok(new { message = "Access revoked." });
     }
 
     // ── User: list my accessible documents ────────────────────────────────────
 
-    /// <summary>
-    /// Get all documents the current user has been explicitly granted access to.
-    /// Returns only active (non-expired) grants.
-    /// </summary>
     [HttpGet("my-access")]
     public async Task<ActionResult<List<object>>> GetMyAccessibleDocuments()
     {
         var userId = GetCurrentUserId();
         if (userId == null) return Unauthorized();
 
-        var now = DateTime.UtcNow;
-
+        var now    = DateTime.UtcNow;
         var grants = await _db.DocumentAcls
             .Where(a => a.UserId == userId.Value
                      && (a.ExpiresAt == null || a.ExpiresAt > now))
@@ -211,7 +203,7 @@ public class DocumentAclController : ControllerBase
                     grant.Permission,
                     grant.GrantedAt,
                     grant.ExpiresAt,
-                    IsPermanent = grant.ExpiresAt == null,
+                    IsPermanent   = grant.ExpiresAt == null,
                     ExpiresInDays = grant.ExpiresAt.HasValue
                         ? (int)(grant.ExpiresAt.Value - now).TotalDays
                         : (int?)null
@@ -222,7 +214,7 @@ public class DocumentAclController : ControllerBase
         return Ok(result);
     }
 
-    // ── Helper ─────────────────────────────────────────────────────────────────
+    // ── Helper ────────────────────────────────────────────────────────────────
 
     private Guid? GetCurrentUserId()
     {

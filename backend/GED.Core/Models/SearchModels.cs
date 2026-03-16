@@ -13,6 +13,9 @@ public class SearchRequest
     public DateTime? FromDate { get; set; }
     public DateTime? ToDate { get; set; }
     public Dictionary<string, object>? Filters { get; set; }
+    public string? UserId       { get; set; }  // Guid string
+    public string? UserRole     { get; set; }  // "Admin" | "Manager" | "User" | "ReadOnly"
+    public List<string>? UserAllowedCategories { get; set; }
     public SortField SortBy { get; set; } = SortField.Relevance;
     public bool SortDescending { get; set; } = true;
     public bool IncludeOcrContent { get; set; } = true;
