@@ -77,15 +77,7 @@
                 </div>
               </div>
             </div>
-            <button
-              @click="ragMode = !ragMode; ragAnswer = ''; ragSources = []; attachedDocIds = []; showDocPicker = false"
-              :class="['rag-toggle-btn', { active: ragMode }]"
-              title="Mode Assistant IA"
-            >
-              ✨ {{ ragMode ? 'Elise active' : 'Ask Elise' }}
-            </button>
-
-            <button v-if="ragMode" @click="openDocPicker" class="elise-attach-btn">
+            <button @click="openDocPicker" class="elise-attach-btn" :class="{ 'has-attachments': attachedDocIds.length > 0 }">
               📎 {{ attachedDocIds.length ? attachedDocIds.length + ' joint(s)' : 'Joindre' }}
             </button>
 
@@ -131,7 +123,7 @@
                   <div class="picker-modal-footer">
                     <span class="picker-modal-count">{{ attachedDocIds.length }} sélectionné(s)</span>
                     <button @click="attachedDocIds = []" class="picker-modal-clear-btn">Tout désélectionner</button>
-                    <button @click="showDocPicker = false" class="picker-modal-confirm-btn">Confirmer</button>
+                    <button @click="confirmAttachments" class="picker-modal-confirm-btn">Confirmer</button>
                   </div>
                 </div>
               </div>
@@ -169,7 +161,7 @@
 
           <div class="quick-searches">
             <span class="quick-label">Essayez :</span>
-            <button v-for="s in quickSearches" :key="s" @click="searchQuery = s; performSearch()" class="quick-btn">{{ s }}</button>
+            <button v-for="s in quickSearches" :key="s" @click="searchQuery = s; handleSearch()" class="quick-btn">{{ s }}</button>
           </div>
 
           <button @click="showFilters = !showFilters" class="filters-toggle">
@@ -652,63 +644,66 @@
     </div>
 
     <!-- ══════════════════════════════════════════════════════════════════
-         UPLOAD MODAL
+          UPLOAD MODAL (Batch Import)
     ══════════════════════════════════════════════════════════════════ -->
     <div v-if="showUploadModal" class="modal-overlay" @click.self="closeUploadModal">
-      <div class="modal-content">
+      <div class="modal-content modal-large">
         <div class="modal-header">
-          <h2>Importer un document</h2>
+          <h2>Importer des documents (Batch)</h2>
           <button @click="closeUploadModal" class="modal-close">✕</button>
         </div>
         <div class="modal-body-upload">
-          <div class="upload-area" @click="$refs.fileInput.click()" @dragover.prevent @drop.prevent="onDrop">
-            <input ref="fileInput" type="file" @change="handleFileSelect" class="file-input"
+          <div class="upload-area batch-upload-area" @click="$refs.fileInput.click()" @dragover.prevent @drop.prevent="onDropMultiple">
+            <input ref="fileInput" type="file" @change="handleFileSelectMultiple" class="file-input" multiple
               accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tiff,.txt"/>
-            <div v-if="!selectedFile" class="upload-prompt">
+            <div v-if="selectedFiles.length === 0" class="upload-prompt">
               <svg class="upload-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
               </svg>
-              <p>Cliquez ou glissez un fichier ici</p>
-              <p class="upload-hint">PDF, Word, Excel, Images (max 100 Mo)</p>
+              <p>Cliquez ou glissez plusieurs fichiers ici</p>
+              <p class="upload-hint">PDF, Word, Excel, Images (max 100 Mo par fichier)</p>
             </div>
-            <div v-else class="file-preview" @click.stop>
-              <span style="font-size:2.5rem">{{ getFileIcon(selectedFile.type) }}</span>
-              <div>
-                <p style="font-weight:600">{{ selectedFile.name }}</p>
-                <p style="font-size:.8rem;color:#6b7280">{{ formatFileSize(selectedFile.size) }}</p>
+            <div v-else class="files-preview-list">
+              <div v-for="(file, index) in selectedFiles" :key="index" class="file-preview-item">
+                <span class="file-icon">{{ getFileIcon(file.type) }}</span>
+                <div class="file-info">
+                  <p class="file-name">{{ file.name }}</p>
+                  <p class="file-size">{{ formatFileSize(file.size) }}</p>
+                </div>
+                <button @click.stop="removeFile(index)" class="file-remove-btn">✕</button>
               </div>
-              <button @click="clearFile" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:1.2rem">✕</button>
             </div>
           </div>
-          <div class="form-group">
-            <label class="form-label">Titre</label>
-            <input v-model="uploadData.title" type="text" placeholder="Titre du document" class="form-input"/>
+          
+          <div v-if="selectedFiles.length > 0" class="batch-category-section">
+            <p class="batch-info">Tous les fichiers utiliseront les mêmes paramètres ci-dessous :</p>
+            <div class="form-group">
+              <label class="form-label">Catégorie <span style="color:#ef4444">*</span></label>
+              <select v-model="uploadData.category" class="filter-select" :class="{ 'input-error': !uploadData.category }">
+                <option value="">— Sélectionner —</option>
+                <option value="Invoice">📄 Facture</option>
+                <option value="Contract">📜 Contrat</option>
+                <option value="Report">📊 Rapport</option>
+                <option value="Letter">✉️ Courrier</option>
+                <option value="Memo">📝 Mémo</option>
+                <option value="Presentation">📽️ Présentation</option>
+                <option value="Spreadsheet">📈 Tableur</option>
+                <option value="Image">🖼️ Image</option>
+                <option value="Other">📎 Autre</option>
+              </select>
+            </div>
           </div>
-          <div class="form-group">
-            <label class="form-label">Catégorie <span style="color:#ef4444">*</span></label>
-            <select v-model="uploadData.category" class="filter-select" :class="{ 'input-error': !uploadData.category && selectedFile }">
-              <option value="">— Sélectionner —</option>
-              <option value="Invoice">📄 Facture</option>
-              <option value="Contract">📜 Contrat</option>
-              <option value="Report">📊 Rapport</option>
-              <option value="Letter">✉️ Courrier</option>
-              <option value="Memo">📝 Mémo</option>
-              <option value="Presentation">📽️ Présentation</option>
-              <option value="Spreadsheet">📈 Tableur</option>
-              <option value="Image">🖼️ Image</option>
-              <option value="Other">📎 Autre</option>
-            </select>
-          </div>
+
           <div class="modal-actions">
-            <button @click="uploadDocument" :disabled="!selectedFile || uploading || !uploadData.category" class="upload-submit">
-              <span v-if="!uploading">Importer</span>
+            <button @click="uploadDocuments" :disabled="selectedFiles.length === 0 || uploading || !uploadData.category" class="upload-submit">
+              <span v-if="!uploading">Importer {{ selectedFiles.length }} fichier(s)</span>
               <span v-else class="loading-text">
                 <svg class="spinner" fill="none" viewBox="0 0 24 24">
                   <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                   <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                 </svg>
-                Envoi…
+                Envoi en cours... {{ uploadProgress }}/{{ selectedFiles.length }}
               </span>
             </button>
             <button @click="closeUploadModal" class="cancel-btn">Annuler</button>
@@ -720,7 +715,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { format } from 'date-fns'
 import { logger } from '../logger.js'
@@ -742,6 +737,10 @@ const authHeaders = () => {
   return t ? { Authorization: `Bearer ${t}` } : {}
 }
 const logout = () => { localStorage.clear(); router.push('/login') }
+
+onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+})
 
 // ── Role permissions ───────────────────────────────────────────────────────────
 const canUpload = computed(() => ['Manager', 'User'].includes(user.value?.role))
@@ -766,6 +765,7 @@ const searchResults = ref(null)
 const filters       = reactive({ category:'', contentType:'', dateFrom:'', dateTo:'', ocrStatus:'', service:'' })
 const quickSearches = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents']
 const ragMode       = ref(false)   // toggle: false = normal search, true = RAG
+const ragModeForced = ref(false)   // true if user explicitly forced RAG mode
 const ragAnswer     = ref('')
 const ragSources    = ref([])
 const ragLoading    = ref(false)
@@ -780,6 +780,104 @@ const filteredPickerDocs = computed(() =>
     ? pickerDocs.value.filter(d => d.title.toLowerCase().includes(pickerSearch.value.toLowerCase()))
     : pickerDocs.value
 )
+
+// ── Contextual RAG detection (Multilingual: Arabic, French, English) ────────────────
+const ragTriggerReason = ref(null)
+
+// Check if query contains specific indexed terms (categories, tags, etc.)
+const hasIndexedTerms = (query) => {
+  const q = query.toLowerCase()
+  
+  // Categories (French)
+  if (/\b(facture|factures|contrat|contrats|rapport|rapports|courrier|mémo|memos|présentation|présentations|tableur|tableurs|image|images|autre)\b/.test(q)) return true
+  // Categories (English)
+  if (/\b(invoice|invoices|contract|contracts|report|reports|letter|memo|memos|presentation|presentations|spreadsheet|spreadsheets|image|images|other)\b/.test(q)) return true
+  // Categories (Arabic)
+  if (/\b(عقد|عقود|تقرير|تقارير|صورة|صور)\b/.test(q)) return true
+  
+  // Services (French)
+  if (/\b(finance|rh|ressources humaines|juridique|commercial|informatique|direction|autre)\b/.test(q)) return true
+  // Services (English)
+  if (/\b(finance|hr|human resources|legal|commercial|it|technology|direction|other)\b/.test(q)) return true
+  
+  // File extensions
+  if (/\b(pdf|doc|docx|xls|xlsx|ppt|pptx|jpg|jpeg|png|txt)\b/.test(q)) return true
+  
+  // Tags (starts with #)
+  if (/#\w+/.test(q)) return true
+  
+  // Specific date formats
+  if (/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(q) || /\b\d{4}-\d{2}-\d{2}\b/.test(q)) return true
+  
+  return false
+}
+
+const isQuestion = (query) => {
+  if (!query) return false
+  const q = query.trim()
+  const qlc = q.toLowerCase()
+  
+  // If query has specific indexed terms, use normal search
+  if (hasIndexedTerms(q)) {
+    return false
+  }
+  
+  // Explicit question patterns
+  if (q.includes('?')) {
+    ragTriggerReason.value = 'Question détectée'
+    return true
+  }
+  
+  // Check for Arabic script presence
+  const isArabic = /[\u0600-\u06FF]/.test(q)
+  
+  // ─── ARABIC ─────────────────────────────────────────────────────────────────────
+  if (isArabic) {
+    // Arabic interrogatives - clear question words
+    if (/\b(ما|من|أين|كيف|لماذا|متى|هل|كم|أي|أيش|ليش|وش|وين|شو|ليش|أيش|ليهما|لمن|لمَن|في أي|على أي|أي من|ما الذي|ما هي|من الذي|من هم|كيف يمكن|ما شأن|ما أمر|ما السبب|هل يمكن|هل يوجد)\b/.test(q)) {
+      ragTriggerReason.value = 'Question arabe détectée'
+      return true
+    }
+    // Arabic AI requests (summarize, explain, etc.)
+    if (/\b(لخص|ملخص|فاهم|اشرح|Explain|Summarize|Summarise|احصل على ملخص|دعني اعرف|ما المعلومات)\b/.test(q)) {
+      ragTriggerReason.value = 'Demande IA arabe détectée'
+      return true
+    }
+  }
+   
+  ragTriggerReason.value = null
+  return false
+}
+
+const toggleRagMode = (fromShortcut = false) => {
+  ragMode.value = !ragMode.value
+  ragModeForced.value = ragMode.value
+  ragAnswer.value = ''
+  ragSources.value = []
+  if (!ragMode.value) {
+    ragTriggerReason.value = null
+  } else if (fromShortcut) {
+    ragTriggerReason.value = 'Activé via raccourci clavier'
+  }
+}
+
+// Confirm attachments - automatically triggers RAG mode
+const confirmAttachments = () => {
+  showDocPicker.value = false
+  if (attachedDocIds.value.length > 0) {
+    ragMode.value = true
+    ragModeForced.value = true
+    ragTriggerReason.value = 'Document(s) joint(s) à la conversation'
+  }
+}
+
+// Keyboard shortcut: Ctrl+Shift+R to toggle RAG mode
+const handleKeydown = (e) => {
+  if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+    e.preventDefault()
+    toggleRagMode(true)
+  }
+}
 
 const fetchPickerDocs = async () => {
   pickerLoading.value = true
@@ -842,7 +940,7 @@ const selectSuggestion = (dir) => {
 }
 
 const applyAutocomplete = (sug) => {
-  searchQuery.value = sug; showAutocomplete.value = false; performSearch()
+  searchQuery.value = sug; showAutocomplete.value = false; handleSearch()
 }
 
 // ── Expanded summaries set ─────────────────────────────────────────────────────
@@ -859,7 +957,7 @@ const hasActiveFilters = computed(() =>
 )
 const resetFilters = () => {
   Object.assign(filters, { category:'', contentType:'', dateFrom:'', dateTo:'', ocrStatus:'', service:'' })
-  if (searched.value) performSearch()
+  if (searched.value) handleSearch()
 }
 
 // ── Viewer state ───────────────────────────────────────────────────────────────
@@ -876,10 +974,11 @@ const suggestions        = ref([])
 const suggestionsLoading = ref(false)
 const suggestionsCache   = new Map()
 
-// ── Upload state ───────────────────────────────────────────────────────────────
+// ── Upload state (Batch) ───────────────────────────────────────────────────────
 const showUploadModal = ref(false)
-const selectedFile    = ref(null)
+const selectedFiles    = ref([])
 const uploading       = ref(false)
+const uploadProgress  = ref(0)
 const uploadData      = reactive({ title:'', category:'' })
 
 // ── Computed ───────────────────────────────────────────────────────────────────
@@ -1021,12 +1120,12 @@ const closeDocumentViewer = () => {
   documentUrl.value = null; documentContent.value = null; ocrStatus.value = null; suggestions.value = []
 }
 
-const searchByTag = (tag) => { closeDocumentViewer(); searchQuery.value = tag; performSearch() }
+const searchByTag = (tag) => { closeDocumentViewer(); searchQuery.value = tag; handleSearch() }
 
 const deleteDoc = async (doc) => {
   if (!confirm(`Supprimer "${doc.title}" ? Cette action est irréversible.`)) return
   const r = await fetch(`/api/documents/${doc.id}`, { method:'DELETE', headers:{ ...authHeaders(), 'Content-Type':'application/json' } })
-  if (r.ok) { closeDocumentViewer(); performSearch() }
+  if (r.ok) { closeDocumentViewer(); handleSearch() }
   else alert('Erreur lors de la suppression.')
 }
 
@@ -1049,8 +1148,19 @@ const buildSearchBody = (page = 1) => ({
 })
 
 const handleSearch = () => {
+  const query = searchQuery.value.trim()
+  
+  // Auto-detect: if not explicitly forced, check if query looks like a question
+  if (!ragModeForced.value && query) {
+    if (isQuestion(query)) {
+      ragMode.value = true
+    } else {
+      ragMode.value = false
+    }
+  }
+  
   if (ragMode.value) return askRag()
-  performSearch()
+  searchDocuments()
 }
 
 const askRag = async () => {
@@ -1133,11 +1243,6 @@ const performSearch = async () => {
       nlpInterpretation.value = data.nlpSummary
     }
 
-    // Optionally log which mode was used (helpful during development)
-    if (data.searchMode) {
-      console.debug(`[Search] mode=${data.searchMode}, lang=${data.detectedLanguage}, docs=${data.totalResults}`)
-    }
-
   } catch (err) {
     console.error('[Search] Network error:', err)
     searchError.value = 'Erreur réseau. Vérifiez que le backend est démarré.'
@@ -1163,34 +1268,74 @@ const goToPage = async (page) => {
     searchLoading.value = false }
 }
 
-// ── Upload ─────────────────────────────────────────────────────────────────────
-const handleFileSelect = (e) => {
-  const f = e.target.files[0]; if (!f) return
-  selectedFile.value = f; uploadData.title = f.name.replace(/\.[^/.]+$/, '')
+// ── Upload (Batch) ───────────────────────────────────────────────────────────────
+const handleFileSelectMultiple = (e) => {
+  const files = Array.from(e.target.files)
+  if (files.length > 0) {
+    selectedFiles.value = files
+  }
 }
-const onDrop = (e) => {
-  const f = e.dataTransfer.files[0]; if (!f) return
-  selectedFile.value = f; uploadData.title = f.name.replace(/\.[^/.]+$/, '')
+const onDropMultiple = (e) => {
+  const files = Array.from(e.dataTransfer.files)
+  if (files.length > 0) {
+    selectedFiles.value = files
+  }
 }
-const clearFile = () => {
-  selectedFile.value = null; uploadData.title = ''; uploadData.category = ''
+const removeFile = (index) => {
+  selectedFiles.value.splice(index, 1)
   const inp = document.querySelector('.file-input'); if (inp) inp.value = ''
 }
-const closeUploadModal = () => { showUploadModal.value = false; clearFile() }
+const clearFiles = () => {
+  selectedFiles.value = []
+  uploadData.title = ''
+  uploadData.category = ''
+  const inp = document.querySelector('.file-input'); if (inp) inp.value = ''
+}
+const closeUploadModal = () => { showUploadModal.value = false; clearFiles() }
 
-const uploadDocument = async () => {
-  if (!selectedFile.value || !uploadData.category) return
+const uploadDocuments = async () => {
+  if (selectedFiles.value.length === 0 || !uploadData.category) return
   uploading.value = true
+  uploadProgress.value = 0
+  let successCount = 0
+  let errorCount = 0
+  
   try {
-    const form = new FormData()
-    form.append('file',     selectedFile.value)
-    form.append('title',    uploadData.title || selectedFile.value.name)
-    form.append('category', uploadData.category)
-    const r = await fetch('/api/documents/upload', { method:'POST', headers:{ Authorization:`Bearer ${localStorage.getItem('ged_token')}` }, body: form })
-    if (r.ok) { closeUploadModal(); alert('Document importé et indexé !'); if (searchResults.value) performSearch() }
-    else { const err = await r.json().catch(()=>({error:`HTTP ${r.status}`})); alert(`Échec de l'import : ${err.error}`) }
-  } catch { alert("Erreur réseau lors de l'import.") }
-  finally { uploading.value = false }
+    for (let i = 0; i < selectedFiles.value.length; i++) {
+      const file = selectedFiles.value[i]
+      const form = new FormData()
+      form.append('file', file)
+      form.append('title', file.name.replace(/\.[^/.]+$/, ''))
+      form.append('category', uploadData.category)
+      
+      const r = await fetch('/api/documents/upload', { 
+        method: 'POST', 
+        headers: { Authorization: `Bearer ${localStorage.getItem('ged_token')}` }, 
+        body: form 
+      })
+      
+      if (r.ok) {
+        successCount++
+      } else {
+        errorCount++
+      }
+      uploadProgress.value = i + 1
+    }
+    
+    if (successCount > 0) {
+      closeUploadModal()
+      alert(`${successCount} document(s) importé(s) avec succès !${errorCount > 0 ? `\n${errorCount} échecs.` : ''}`)
+      if (searchResults.value) handleSearch()
+    } else {
+      alert('Échec de l\'import de tous les fichiers.')
+    }
+  } catch { 
+    alert("Erreur réseau lors de l'import.") 
+  }
+  finally { 
+    uploading.value = false 
+    uploadProgress.value = 0
+  }
 }
 </script>
 
@@ -1489,6 +1634,20 @@ const uploadDocument = async () => {
    UPLOAD MODAL
 ══════════════════════════════════════════════════════════════════════════════ */
 .modal-content { background:white; border-radius:14px; box-shadow:0 25px 50px rgba(0,0,0,.2); max-width:42rem; width:100%; max-height:90vh; overflow-y:auto; padding:2rem; }
+.modal-large { max-width:56rem; }
+
+.batch-upload-area { min-height:200px; }
+.files-preview-list { display:flex; flex-direction:column; gap:.5rem; max-height:300px; overflow-y:auto; }
+.file-preview-item { display:flex; align-items:center; gap:.75rem; padding:.6rem .75rem; background:#f9fafb; border-radius:8px; border:1px solid #e5e7eb; }
+.file-preview-item .file-icon { font-size:1.5rem; }
+.file-preview-item .file-info { flex:1; min-width:0; }
+.file-preview-item .file-name { font-weight:500; color:#1f2937; font-size:.875rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-preview-item .file-size { font-size:.75rem; color:#6b7280; }
+.file-remove-btn { background:none; border:none; color:#ef4444; cursor:pointer; font-size:1rem; padding:.25rem; border-radius:4px; }
+.file-remove-btn:hover { background:#fee2e2; }
+
+.batch-category-section { margin-top:1rem; padding-top:1rem; border-top:1px solid #e5e7eb; }
+.batch-info { font-size:.8rem; color:#6b7280; margin-bottom:.75rem; }
 .modal-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:1.5rem; }
 .modal-header h2 { font-size:1.25rem; font-weight:700; color:#111827; }
 .modal-close { background:none; border:none; color:#9ca3af; cursor:pointer; font-size:1.2rem; padding:.2rem .5rem; border-radius:5px; }
@@ -1516,10 +1675,7 @@ const uploadDocument = async () => {
 
 
 /* ── RAG toggle button ── */
-.rag-toggle-btn { padding:.8rem 1rem; border:2px solid #e5e7eb; border-radius:9px; background:white; color:#6b7280; font-size:.85rem; font-weight:600; cursor:pointer; transition:all .2s; white-space:nowrap; }
-.rag-toggle-btn.active { background:linear-gradient(135deg,#1a2b4a,#2563eb); border-color:transparent; color:white; }
-.rag-toggle-btn.active::before { content:''; }
-/* ── RAG answer panel ── */
+.rag-trigger-badge { font-size:.65rem; padding:.15rem .4rem; background:rgba(255,255,255,0.2); border-radius:4px; font-weight:500; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* ── Elise answer panel identity ─────────────────────────────── */
 .rag-answer-panel { background:white; border:2px solid #e8edff; border-radius:14px; padding:0; overflow:hidden; }
 
@@ -1617,6 +1773,7 @@ const uploadDocument = async () => {
 .elise-attach-wrapper { position: relative; }
 .elise-attach-btn { padding: .65rem .9rem; border: 2px dashed #a5b4fc; border-radius: 9px; background: #f5f3ff; color: #4f46e5; font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
 .elise-attach-btn:hover { background: #ede9fe; border-color: #6366f1; }
+.elise-attach-btn.has-attachments { background: #e0e7ff; border-color: #4f46e5; border-style: solid; }
 .elise-doc-picker { position: absolute; top: calc(100% + 8px); left: 0; z-index: 100; background: white; border: 1.5px solid #e0e7ff; border-radius: 12px; padding: 1rem; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.1); }
 .picker-label { font-size: .78rem; font-weight: 600; color: #6b7280; margin: 0 0 .6rem; }
 .picker-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: .3rem; }

@@ -23,12 +23,6 @@ const routes = [
   {
     path: '/search',
     redirect: '/'
-  },
-  {
-    path: '/rag',
-    name: 'RAG',
-    component: () => import('../views/RagView.vue'),
-    meta: { requiresAuth: true }
   }
 ]
 
