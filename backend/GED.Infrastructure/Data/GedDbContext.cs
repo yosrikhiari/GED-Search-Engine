@@ -24,12 +24,12 @@ public class GedDbContext : DbContext
         modelBuilder.Entity<DocumentAcl>(e => {
             e.ToTable("document_acls");
             e.HasKey(a => a.Id);
-            e.Property(a => a.Id).HasColumnName("id");
-            e.Property(a => a.DocumentId).HasColumnName("document_id");
-            e.Property(a => a.UserId).HasColumnName("user_id");
+            e.Property(a => a.Id).HasColumnName("id").HasColumnType("uniqueidentifier");
+            e.Property(a => a.DocumentId).HasColumnName("document_id").HasColumnType("uniqueidentifier");
+            e.Property(a => a.UserId).HasColumnName("user_id").HasColumnType("uniqueidentifier");
             e.Property(a => a.Permission).HasColumnName("permission");
             e.Property(a => a.GrantedAt).HasColumnName("granted_at");
-            e.Property(a => a.GrantedBy).HasColumnName("granted_by");
+            e.Property(a => a.GrantedBy).HasColumnName("granted_by").HasColumnType("uniqueidentifier");
             e.Property(a => a.ExpiresAt).HasColumnName("expires_at");
             e.HasIndex(a => new { a.DocumentId, a.UserId }).HasDatabaseName("ix_acl_doc_user");
         });
@@ -97,12 +97,12 @@ public class GedDbContext : DbContext
         {
             e.ToTable("user_group_assignments");
             e.HasKey(a => a.Id);
-            e.Property(a => a.Id).HasColumnName("id");
-            e.Property(a => a.GroupId).HasColumnName("group_id");
-            e.Property(a => a.UserId).HasColumnName("user_id");
+            e.Property(a => a.Id).HasColumnName("id").HasColumnType("uniqueidentifier");
+            e.Property(a => a.GroupId).HasColumnName("group_id").HasColumnType("uniqueidentifier");
+            e.Property(a => a.UserId).HasColumnName("user_id").HasColumnType("uniqueidentifier");
             e.Property(a => a.Permission).HasColumnName("permission");
             e.Property(a => a.AssignedAt).HasColumnName("assigned_at");
-            e.Property(a => a.AssignedBy).HasColumnName("assigned_by");
+            e.Property(a => a.AssignedBy).HasColumnName("assigned_by").HasColumnType("uniqueidentifier");
             e.Property(a => a.ExpiresAt).HasColumnName("expires_at");
             e.HasIndex(a => new { a.GroupId, a.UserId })
              .IsUnique()

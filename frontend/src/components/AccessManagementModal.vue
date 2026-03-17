@@ -553,7 +553,7 @@ const apiFetch = async (path, opts = {}) => {
   const token = localStorage.getItem('ged_token')
   const headers = { ...(opts.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) }
   if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json'
-  return fetch(path, { ...opts, headers })
+  return fetch(path, { ...opts, headers, credentials: 'include' })
 }
 
 const props = defineProps({
@@ -712,17 +712,20 @@ const loadRights = async () => {
   } finally { loadingRights.value = false }
 }
 
-// ── FIX: Use POST /api/search/query instead of GET /api/documents ────────────
+// ── Load all accessible documents for picker ─────────────────────────────────
 const loadAllDocs = async (query = '') => {
   loadingDocs.value = true
   try {
+    // When no query, use empty string to get all accessible documents
+    // The backend search will apply ACL filters based on current user
+    const searchQuery = query.trim() ? query.trim() : ''
     const res = await apiFetch('/api/search/query', {
       method: 'POST',
       body: JSON.stringify({
-        query:      query.trim() || '*',
-        searchType: 0,
+        query:      searchQuery,
+        searchType: 0, // Natural search
         page:       1,
-        pageSize:   200,
+        pageSize:   1000, // Get all accessible docs
       })
     })
     if (res.ok) {
@@ -749,7 +752,9 @@ const onPickerSearch = () => {
 // ── Picker open/close ─────────────────────────────────────────────────────────
 const toggleAddDocs = async () => {
   showAddDocs.value = !showAddDocs.value
-  if (showAddDocs.value && !allDocs.value.length) {
+  if (showAddDocs.value) {
+    // Always reload docs when opening picker to get fresh list
+    allDocs.value = []
     await loadAllDocs()
   }
 }

@@ -210,9 +210,15 @@ public class RagService : IRagService
         List<ChunkSearchHit> chunkHits = new();
         try
         {
+            var userRole = request.UserRole ?? _userContext.GetType()
+                .GetProperty("Role")?.GetValue(_userContext)?.ToString() ?? "User";
+            
             chunkHits = await _openSearch.SearchChunksAsync(
                 request.Query, topK: _topK,
                 categories: effectiveCategories,
+                userId: request.UserId ?? request.Username,
+                userRole: userRole,
+                userAllowedCategories: effectiveCategories,
                 cancellationToken: cancellationToken);
 
             _logger.LogInformation("🔍 RAG chunk search: {Count} chunk hits", chunkHits.Count);

@@ -178,25 +178,25 @@ services:
       - ASPNETCORE_URLS=http://+:8080
       # FIX 3: Password must match SA_PASSWORD set on the sqlserver service above (GedPass_2024!).
       #         The original value 'YourStrong@Passw0rd' caused login failures.
-      - ConnectionStrings__DefaultConnection=Server=ged-sqlserver;Database=ged_db;User Id=sa;Password=GedPass_2024!;TrustServerCertificate=True;
-      - OpenSearch__Url=http://ged-opensearch:9200
-      - RabbitMQ__Host=ged-rabbitmq
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=ged_db;User Id=sa;Password=GedPass_2024!;TrustServerCertificate=True;
+      - OpenSearch__Url=http://opensearch:9200
+      - RabbitMQ__Host=rabbitmq
       - RabbitMQ__Port=5672
       - RabbitMQ__Username=admin
       - RabbitMQ__Password=admin123
       - Redis__Enabled=true
-      - Redis__ConnectionString=ged-redis:6379
+      - Redis__ConnectionString=redis:6379
       - Redis__SearchCacheTtlSeconds=120
       - NLP__Enabled=true
-      - NLP__LlmApiEndpoint=http://ged-ollama:11434/api/generate
-      - NLP__EmbedApiEndpoint=http://ged-ollama:11434/api/embed
+      - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
+      - NLP__EmbedApiEndpoint=http://ollama:11434/api/embed
       - NLP__Model=llama3.2
       - NLP__EmbedModel=nomic-embed-text
       - Embeddings__Enabled=true
       - Embeddings__Model=nomic-embed-text
       - Embeddings__Dimensions=768
       - Tika__Enabled=true
-      - Tika__Url=http://ged-tika:9998
+      - Tika__Url=http://tika:9998
       - OCR__TessDataPath=/usr/share/tesseract-ocr/5/tessdata
       - OCR__OcrmypdfPath=ocrmypdf
       - OCR__TesseractPath=tesseract

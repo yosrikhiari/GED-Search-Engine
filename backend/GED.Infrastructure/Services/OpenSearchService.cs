@@ -401,16 +401,18 @@ public class OpenSearchService : ISearchService
         {
             var indexModel = MapToIndexModel(document);
 
-            // ── NEW: fetch active ACL grants and embed them in the index doc ──
+            // ── ACL: fetch active ACL grants and embed them in the index doc ──
             var aclUserIds = await _db.DocumentAcls
                 .Where(a => a.DocumentId == document.Id &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
                 .Select(a => a.UserId.ToString())
                 .ToListAsync(cancellationToken);
 
+            // If there are ACL grants, the document is restricted to those users
+            // If no ACL grants, the document is open to everyone
             indexModel.AllowedUserIds   = aclUserIds;
             indexModel.CreatedByUserId  = document.CreatedBy;
-            indexModel.AccessLevel      = "open";
+            indexModel.AccessLevel      = aclUserIds.Count > 0 ? "restricted" : "open";
 
             // Generate embedding
             var embeddingText = BuildEmbeddingText(document);
@@ -485,6 +487,16 @@ public class OpenSearchService : ISearchService
 
         await DeleteChunksForDocumentAsync(document.Id, cancellationToken);
 
+        // ── ACL: fetch active ACL grants and embed them in chunk docs ───────────
+        var aclUserIds = await _db.DocumentAcls
+            .Where(a => a.DocumentId == document.Id &&
+                        (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+            .Select(a => a.UserId.ToString())
+            .ToListAsync(cancellationToken);
+
+        var accessLevel = aclUserIds.Count > 0 ? "restricted" : "open";
+        var createdByUserId = document.CreatedBy;
+
         int indexed = 0;
         foreach (var chunk in chunks)
         {
@@ -495,18 +507,22 @@ public class OpenSearchService : ISearchService
 
                 var chunkDoc = new
                 {
-                    document_id   = document.Id,
-                    chunk_id      = chunk.ChunkId,
-                    chunk_index   = chunk.ChunkIndex,
-                    text          = chunk.Text,
-                    title         = document.Title,
-                    category      = document.Category,
-                    document_date = document.DocumentDate,
-                    created_at    = document.CreatedAt,
-                    file_name     = document.FileName,
-                    content_type  = document.ContentType,
-                    tags          = document.Tags,
-                    embedding     = chunk.Embedding
+                    document_id    = document.Id,
+                    chunk_id       = chunk.ChunkId,
+                    chunk_index    = chunk.ChunkIndex,
+                    text           = chunk.Text,
+                    title          = document.Title,
+                    category       = document.Category,
+                    document_date  = document.DocumentDate,
+                    created_at     = document.CreatedAt,
+                    file_name      = document.FileName,
+                    content_type   = document.ContentType,
+                    tags           = document.Tags,
+                    embedding      = chunk.Embedding,
+                    // ── ACL fields (denormalized from parent document) ──────────
+                    allowedUserIds = aclUserIds,
+                    accessLevel    = accessLevel,
+                    createdByUserId = createdByUserId
                 };
 
                 var response = await _client.IndexAsync(
@@ -533,6 +549,9 @@ public class OpenSearchService : ISearchService
         string query,
         int topK = 5,
         List<string>? categories = null,
+        string? userId = null,
+        string? userRole = null,
+        List<string>? userAllowedCategories = null,
         CancellationToken cancellationToken = default)
     {
         var queryEmbedding = await _nlpService.GenerateEmbeddingAsync(query, cancellationToken);
@@ -541,20 +560,61 @@ public class OpenSearchService : ISearchService
 
         var searchResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
             .Index("ged-chunks")
-            .Size(topK)
+            .Size(topK * 2) // Get more results before filtering
             .Query(q =>
             {
                 var knn = q.Knn(k => k
                     .Field("embedding")
                     .Vector(queryEmbedding)
-                    .K(topK));
+                    .K(topK * 2));
 
+                // Build filters list
+                var filters = new List<Func<QueryContainerDescriptor<ChunkIndexModel>, QueryContainer>>();
+
+                // Category filter
                 if (categories?.Any() == true)
-                    return q.Bool(b => b
-                        .Must(knn)
-                        .Filter(f => f.Terms(t => t
-                            .Field("category.keyword")
-                            .Terms(categories))));
+                {
+                    filters.Add(f => f.Terms(t => t
+                        .Field("category.keyword")
+                        .Terms(categories)));
+                }
+
+                // ── ACL filter for non-admins ─────────────────────────────────────
+                // Same 3-path ACL logic as BuildPrecisionQuery:
+                //   1. Document is open (accessLevel == "open")
+                //   2. User's ID is in allowedUserIds
+                //   3. Document's category is in user's AllowedCategories
+                if (userRole != "Admin" && userId != null)
+                {
+                    var cats = userAllowedCategories ?? new List<string>();
+
+                    var aclShould = new List<Func<QueryContainerDescriptor<ChunkIndexModel>, QueryContainer>>
+                    {
+                        // Path 1 — chunk is open to all authenticated users
+                        s => s.Term(t => t.Field("accessLevel").Value("open")),
+                        // Path 2 — user has an explicit ACL grant
+                        s => s.Term(t => t.Field("allowedUserIds").Value(userId))
+                    };
+
+                    // Path 3 — category-based access (user's AllowedCategories list)
+                    foreach (var cat in cats)
+                    {
+                        var c = cat;
+                        aclShould.Add(s => s.Term(t => t.Field("category.keyword").Value(c)));
+                    }
+
+                    filters.Add(fq => fq.Bool(b => b
+                        .Should(aclShould.ToArray())
+                        .MinimumShouldMatch(1)));
+                }
+                else if (userRole != "Admin")
+                {
+                    // Non-admin user with no userId provided — deny all
+                    filters.Add(fq => fq.Term(t => t.Field("accessLevel").Value("__impossible__")));
+                }
+
+                if (filters.Any())
+                    return q.Bool(b => b.Must(knn).Filter(filters.ToArray()));
                 return knn;
             }),
             cancellationToken);
@@ -566,7 +626,8 @@ public class OpenSearchService : ISearchService
             return new List<ChunkSearchHit>();
         }
 
-        return searchResponse.Hits.Select(h => new ChunkSearchHit
+        // Return top K results (ACL filtering is now done at query time)
+        var results = searchResponse.Hits.Select(h => new ChunkSearchHit
         {
             ChunkId      = h.Source.ChunkId,
             DocumentId   = h.Source.DocumentId,
@@ -580,6 +641,8 @@ public class OpenSearchService : ISearchService
             Tags         = h.Source.Tags,
             Score        = (float)(h.Score ?? 0)
         }).ToList();
+
+        return results.Take(topK).ToList();
     }
 
     private async Task DeleteChunksForDocumentAsync(Guid documentId, CancellationToken ct)
@@ -835,16 +898,47 @@ public class OpenSearchService : ISearchService
             }
         }
 
-        var msm = CalculateMinimumShouldMatch(query, shouldQueries.Count);
+        // Use dis_max for better performance and more predictable relevance
+        // Instead of flat bool.should with many queries
+        if (shouldQueries.Any())
+        {
+            // Split into two tiers: high-boost exact matches vs lower-boost fuzzy matches
+            var exactMatches = shouldQueries.Take(10).ToList();
+            var fuzzyMatches = shouldQueries.Skip(10).ToList();
+
+            return q.Bool(b =>
+            {
+                var bq = b;
+                if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
+
+                // Use dis_max for the top queries (exact matches)
+                if (exactMatches.Any())
+                {
+                    bq = bq.Should(m => m.DisMax(dm => dm
+                        .Queries(exactMatches.ToArray())
+                        .TieBreaker(0.3)));
+                }
+
+                // Add remaining queries as optional with lower weight
+                if (fuzzyMatches.Any())
+                {
+                    bq = bq.Should(fuzzyMatches.ToArray())
+                        .MinimumShouldMatch(1);
+                }
+                else if (!exactMatches.Any())
+                {
+                    bq = bq.Should(m => m.MatchAll());
+                }
+
+                return bq;
+            });
+        }
 
         return q.Bool(b =>
         {
             var bq = b;
             if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
-            if (shouldQueries.Any())
-                bq = bq.Should(shouldQueries.ToArray()).MinimumShouldMatch(msm);
-            else
-                bq = bq.Must(m => m.MatchAll());
+            bq = bq.Must(m => m.MatchAll());
             return bq;
         });
     }
@@ -1042,14 +1136,19 @@ public class OpenSearchService : ISearchService
 
             // ── NEW: batch-fetch ACLs for all documents in one query ──────────
             var docIds = docs.Select(d => d.Id).ToList();
-            var allAcls = await _db.DocumentAcls
+            
+            // First fetch all ACLs as raw data to avoid EF Core Guid issues
+            var allAclRows = await _db.DocumentAcls
                 .Where(a => docIds.Contains(a.DocumentId) &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+                .Select(a => new { a.DocumentId, a.UserId })
+                .ToListAsync(cancellationToken);
+                
+            var allAcls = allAclRows
                 .GroupBy(a => a.DocumentId)
-                .ToDictionaryAsync(
+                .ToDictionary(
                     g => g.Key,
-                    g => g.Select(a => a.UserId.ToString()).ToList(),
-                    cancellationToken);
+                    g => g.Select(a => a.UserId.ToString()).ToList());
 
             var tasks = docs.Select(async doc =>
             {
@@ -1221,6 +1320,11 @@ public class ChunkIndexModel
     public string    FileName     { get; set; } = string.Empty;
     public string    ContentType  { get; set; } = string.Empty;
     public List<string>? Tags     { get; set; }
+
+    // ── ACL fields (denormalized from parent document) ─────────────────────────
+    public List<string> AllowedUserIds { get; set; } = new();
+    public string AccessLevel { get; set; } = "restricted";
+    public string? CreatedByUserId { get; set; }
 }
 
 public class ChunkSearchHit

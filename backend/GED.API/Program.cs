@@ -79,7 +79,8 @@ builder.Services.AddCors(options =>
         policy.WithOrigins("http://localhost:3000", "http://localhost:5173")
               .AllowAnyMethod()
               .AllowAnyHeader()
-              .AllowCredentials();
+              .AllowCredentials()
+              .SetPreflightMaxAge(TimeSpan.FromMinutes(10));
     });
 });
 
@@ -118,8 +119,11 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     {
         options.Cookie.Name     = "ged_session";
         options.Cookie.HttpOnly = true;
-        options.Cookie.SameSite = SameSiteMode.Strict;
+        // options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.Path = "/";
+        options.Cookie.Domain = null;
         options.ExpireTimeSpan  = TimeSpan.FromHours(8);
+        options.SlidingExpiration = true;
         options.Events.OnRedirectToLogin = ctx =>
         {
             ctx.Response.StatusCode = 401;
@@ -136,11 +140,19 @@ builder.Services.AddAuthorization();
 
 // ── OpenSearch ────────────────────────────────────────────────────────────────
 var opensearchUrl      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
+var isDevelopment = builder.Environment.IsDevelopment();
+
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
-    .DisableDirectStreaming()
-    .EnableDebugMode()
     .PrettyJson();
+
+// Only enable debug mode in development (memory-intensive)
+if (isDevelopment)
+{
+    connectionSettings
+        .DisableDirectStreaming()
+        .EnableDebugMode();
+}
 
 builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connectionSettings));
 

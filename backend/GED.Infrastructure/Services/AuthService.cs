@@ -116,6 +116,7 @@ private void PurgeExpiredSessions()
         return new LoginResponse
         {
             Token     = sessionToken,
+            UserId   = user.Id,
             Username  = user.Username,
             FullName  = user.FullName,
             Role      = user.Role,

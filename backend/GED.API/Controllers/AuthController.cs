@@ -39,6 +39,7 @@ public async Task<IActionResult> Login([FromBody] LoginRequest request)
 
     var claims = new List<Claim>
     {
+        new(ClaimTypes.NameIdentifier, result.UserId.ToString()),
         new(ClaimTypes.Name,           result.Username),
         new(ClaimTypes.Role,           result.Role.ToString()),
         new("fullName",                result.FullName ?? result.Username)

@@ -18,6 +18,18 @@
 --   ON CONFLICT DO NOTHING → IF NOT EXISTS (...) INSERT
 -- ============================================================================
 
+-- Drop existing tables with potentially wrong schema (VARCHAR instead of UNIQUEIDENTIFIER)
+IF OBJECT_ID('dbo.document_acls', 'U') IS NOT NULL
+    DROP TABLE dbo.document_acls;
+
+IF OBJECT_ID('dbo.user_group_assignments', 'U') IS NOT NULL
+    DROP TABLE dbo.user_group_assignments;
+
+IF OBJECT_ID('dbo.document_group_members', 'U') IS NOT NULL
+    DROP TABLE dbo.document_group_members;
+
+GO
+
 -- ─── documents ───────────────────────────────────────────────────────────────
 IF OBJECT_ID('dbo.documents', 'U') IS NULL
 BEGIN
@@ -75,7 +87,7 @@ BEGIN
         user_id      UNIQUEIDENTIFIER  NOT NULL,
         permission   INT               NOT NULL DEFAULT 0,
         granted_at   DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
-        granted_by   NVARCHAR(200),
+        granted_by   UNIQUEIDENTIFIER  NOT NULL,
         expires_at   DATETIME2
     );
 END

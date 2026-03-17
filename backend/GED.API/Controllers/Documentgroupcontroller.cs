@@ -87,7 +87,13 @@ public class DocumentGroupController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<DocumentGroupDto>> CreateGroup([FromBody] CreateGroupRequest req)
     {
+        var name = User.Identity?.Name;
+        var isAuth = User.Identity?.IsAuthenticated;
+        var roles = User.Claims.Where(c => c.Type == ClaimTypes.Role).Select(c => c.Value).ToList();
+        _logger.LogInformation("CreateGroup AUTH: User={User}, IsAuth={IsAuth}, Roles={Roles}", name, isAuth, string.Join(",", roles));
+
         var adminId = GetCurrentUserId();
+        _logger.LogInformation("CreateGroup: adminId={AdminId}", adminId);
         if (adminId == null) return Unauthorized();
 
         var group = new DocumentGroup
@@ -98,7 +104,7 @@ public class DocumentGroupController : ControllerBase
             Color       = req.Color ?? "#2563eb",
             Icon        = req.Icon ?? "📁",
             Category    = req.Category,
-            CreatedBy   = adminId.Value,
+            CreatedBy   = adminId ?? Guid.Empty,
             CreatedAt   = DateTime.UtcNow,
             IsActive    = true
         };
@@ -124,6 +130,7 @@ public class DocumentGroupController : ControllerBase
         }
 
         await _db.SaveChangesAsync();
+        _logger.LogInformation("CreateGroup: SaveChangesAsync completed, group.Id={GroupId}", group.Id);
 
         _logger.LogInformation("Admin {Admin} created document group '{Name}' ({Id})",
             adminId, group.Name, group.Id);
@@ -479,18 +486,22 @@ public class DocumentGroupController : ControllerBase
     public async Task<ActionResult<List<UserAccessSummaryDto>>> GetAllUsersAccessSummary()
     {
         var allUsers    = _authService.GetAllUsers();
+        
+        // Fetch all data first, then process in memory
         var assignments = await _db.UserGroupAssignments.ToListAsync();
         var groups      = await _db.DocumentGroups.Where(g => g.IsActive).ToListAsync();
         var groupLookup = groups.ToDictionary(g => g.Id);
 
-        var docCounts = await _db.DocumentGroupMembers
+        // Get doc counts per group with a simpler query
+        var allMembers = await _db.DocumentGroupMembers.ToListAsync();
+        var docCounts = allMembers
             .GroupBy(m => m.GroupId)
-            .Select(g => new { g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.Key, x => x.Count);
+            .ToDictionary(g => g.Key, g => g.Count());
 
-        var directAcls         = await _db.DocumentAcls.ToListAsync();
-        var groupAssignedDocIds = await _db.DocumentGroupMembers
-            .Select(m => new { m.GroupId, m.DocumentId }).ToListAsync();
+        var directAcls = await _db.DocumentAcls.ToListAsync();
+        var groupAssignedDocIds = allMembers
+            .Select(m => new { m.GroupId, m.DocumentId })
+            .ToList();
 
         var result = allUsers.Select(user =>
         {
