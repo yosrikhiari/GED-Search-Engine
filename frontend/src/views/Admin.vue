@@ -1026,6 +1026,8 @@
     <AccessManagementModal
       v-if="showAccessModal"
       :initial-tab="accessModalTab"
+      :initial-groups="accessGroups"
+      :initial-access-summary="accessSummaryData"
       @close="showAccessModal = false"
       @saved="onAccessSaved"
     />
@@ -1916,6 +1918,7 @@ const showAccessModal = ref(false)
 const accessModalTab   = ref('groups') 
 const accessLoading    = ref(false)
 const accessGroups     = ref([])
+const accessSummaryData = ref([])  // Raw access summary for modal
 const accessStats      = reactive({ groups: 0, activeGrants: 0, expiredGrants: 0 })
 const savingUser     = ref(false)
 const userError      = ref('')
@@ -1931,25 +1934,31 @@ const openAccessModal = (tab = 'groups') => {
 }
 /** Appelé quand le modal AccessManagementModal émet @saved (création/révocation) */
 const onAccessSaved = () => {
+  showAccessModal.value = false  // Close modal to show updated data
   loadAccessDashboard()
 }
 
-/** Charge les données légères pour l'aperçu de la section Accès */
-const loadAccessDashboard = async () => {
-  accessLoading.value = true
+/** Charge les groupes pour l'aperçu */
+const loadGroups = async () => {
   try {
-    // Groupes
     const gRes = await fetch('/api/groups', { headers: authHeader() })
     if (gRes.ok) {
       const gs = await gRes.json()
       accessGroups.value = gs
       accessStats.groups = gs.length
     }
+  } catch (e) {
+    console.warn('[Access] Groups error:', e)
+  }
+}
 
-    // Résumé accès par utilisateur
+/** Charge les droits d'accès */
+const loadRights = async () => {
+  try {
     const rRes = await fetch('/api/groups/users/access-summary', { headers: authHeader() })
     if (rRes.ok) {
       const summary = await rRes.json()
+      accessSummaryData.value = summary  // Store raw data for modal
       let active = 0, expired = 0
       for (const u of summary) {
         for (const g of (u.groups || [])) active++
@@ -1957,19 +1966,27 @@ const loadAccessDashboard = async () => {
           d.isActive ? active++ : expired++
         }
       }
-      accessStats.activeGrants  = active
+      accessStats.activeGrants = active
       accessStats.expiredGrants = expired
     }
   } catch (e) {
-    console.warn('[Access Dashboard] Load error:', e)
-  } finally {
-    accessLoading.value = false
+    console.warn('[Access] Summary error:', e)
   }
 }
 
-// Charger lors du switch vers l'onglet access
-watch(activeTab, (tab) => {
-  if (tab === 'access') loadAccessDashboard()
+/** Charge les données légères pour l'aperçu de la section Accès */
+const loadAccessDashboard = async () => {
+  accessLoading.value = true
+  await loadGroups()
+  await loadRights()
+  accessLoading.value = false
+}
+
+// Load when switching to access tab - always refresh to ensure data is current
+watch(activeTab, async (tab) => {
+  if (tab === 'access') {
+    await loadAccessDashboard()
+  }
 })
 
 const fetchUsers = async () => {
@@ -2161,6 +2178,8 @@ onMounted(async () => {
   await fetchDocuments()
   await fetchUsers()
   await fetchStats()
+  await loadGroups()
+  await loadRights()
   window.addEventListener('keydown', handleKeydown)
 })
 </script>

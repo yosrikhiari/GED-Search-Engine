@@ -557,7 +557,9 @@ const apiFetch = async (path, opts = {}) => {
 }
 
 const props = defineProps({
-  initialTab: { type: String, default: 'groups' }
+  initialTab: { type: String, default: 'groups' },
+  initialGroups: { type: Array, default: () => [] },
+  initialAccessSummary: { type: Array, default: () => [] }
 })
 const emit = defineEmits(['close', 'saved'])
 
@@ -685,6 +687,11 @@ const roleDefs = [
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 const loadGroups = async () => {
+  // Use pre-loaded data if available
+  if (props.initialGroups.length > 0) {
+    groups.value = props.initialGroups
+    return
+  }
   loadingGroups.value = true
   try {
     const res = await groupsApi.list()
@@ -705,6 +712,11 @@ const loadUsers = async () => {
 }
 
 const loadRights = async () => {
+  // Use pre-loaded data if available
+  if (props.initialAccessSummary.length > 0) {
+    usersRights.value = props.initialAccessSummary
+    return
+  }
   loadingRights.value = true
   try {
     const res = await groupsApi.accessSummary()
@@ -917,11 +929,12 @@ const changeRole = async (u) => {
 watch(activeTab, async (tab) => {
   if (tab === 'rights' && !usersRights.value.length) await loadRights()
   if (tab === 'roles'  && !allUsers.value.length)    await loadUsers()
-})
+}, { immediate: true })
 
 onMounted(async () => {
   await loadGroups()
   await loadUsers()
+  await loadRights()
 })
 </script>
 
