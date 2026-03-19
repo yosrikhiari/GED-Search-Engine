@@ -6,11 +6,26 @@ using System.Net.Http.Headers;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Text extraction using Apache Tika Server (REST API).
+/// Text extraction using Apache Tika Server (REST API), with built-in fallback.
 ///
-/// Uses the Accept: text/plain header to receive plain text instead of XHTML.
-/// Includes defensive XML/HTML stripping for any residual markup.
-/// Timeout is applied per request to handle corrupt files.
+/// <para>
+/// This service is the primary <see cref="ITextExtractionService"/> implementation
+/// registered in DI. It attempts extraction via Tika Server first, then falls back
+/// to <see cref="TextExtractionService"/> (built-in parsers) if Tika is unavailable,
+/// disabled, or returns an error.
+/// </para>
+/// 
+/// <para>
+/// Tika supports: PDF, DOC/DOCX, XLSX, PPTX, RTF, HTML, XML, EPUB, plain text.
+/// Fallback covers: PDF (iText), DOCX, XLSX, plain text.
+/// If both fail, the pipeline continues without extracted text.
+/// </para>
+/// 
+/// <para>
+/// This service handles synchronous text extraction during upload.
+/// For scanned/image documents, OCR runs asynchronously in <see cref="OcrWorkerService"/>.
+/// Documents with 100+ chars of native text skip OCR entirely.
+/// </para>
 /// </summary>
 public class TikaTextExtractionService : ITextExtractionService
 {

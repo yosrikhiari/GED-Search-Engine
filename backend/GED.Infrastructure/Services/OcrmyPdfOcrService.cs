@@ -9,18 +9,51 @@ using System.Text;
 
 namespace GED.Infrastructure.Services;
 
+/// <summary>
+/// OCR service for scanned PDF files using ocrmypdf (which internally calls Tesseract).
+/// 
+/// <para>
+/// This service adds a searchable text layer to image-only PDFs by:
+/// <list type="number">
+///   <item>
+///     Running ocrmypdf with --force-ocr to process image pages
+///   </item>
+///   <item>
+///     Using iText to extract text from the resulting searchable PDF
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// For standalone image files (JPEG, PNG, etc.) use <see cref="TesseractDirectOcrService"/>.
+/// For native PDF text extraction, the <see cref="OcrWorkerService"/> skips this service entirely.
+/// </para>
+/// 
+/// <para>
+/// Supported ocrmypdf exit codes:
+/// <list type="bullet">
+///   <item>0 = success</item>
+///   <item>6 = skipped (PDF already has text, only with --skip-text)</item>
+///   <item>1-5, 8-9, 15 = various error conditions (logged and thrown)</item>
+/// </list>
+/// </para>
+/// </summary>
 public class OcrmyPdfOcrService : IOcrService
 {
-    // Add/replace the XML doc comment above it to say:
-    /// <summary>
-    /// OCR service for scanned PDF files only. Uses ocrmypdf (which internally
-    /// calls Tesseract) to add a searchable text layer to image-only PDFs.
-    /// For standalone image files (JPEG, PNG, etc.) use TesseractDirectOcrService.
-    /// </summary>
     private readonly ILogger<OcrmyPdfOcrService> _logger;
     private readonly IMessageQueueService _messageQueue;
+
+    /// <summary>
+    /// Path to the ocrmypdf executable.
+    /// </summary>
     private readonly string _ocrmypdfPath;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="OcrmyPdfOcrService"/>.
+    /// </summary>
+    /// <param name="logger">Logger for OCR events.</param>
+    /// <param name="messageQueue">Message queue for job queuing (not used in direct processing).</param>
+    /// <param name="ocrmypdfPath">Path to ocrmypdf executable. Defaults to "ocrmypdf" (PATH lookup).</param>
     public OcrmyPdfOcrService(
         ILogger<OcrmyPdfOcrService> logger,
         IMessageQueueService messageQueue,
@@ -31,6 +64,7 @@ public class OcrmyPdfOcrService : IOcrService
         _ocrmypdfPath = ocrmypdfPath;
     }
 
+    /// <inheritdoc />
     public async Task<Guid> QueueOcrJobAsync(
         Guid documentId,
         string? language = null,
@@ -49,6 +83,16 @@ public class OcrmyPdfOcrService : IOcrService
         return jobId;
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Processes a PDF document by:
+    /// <list type="number">
+    ///   <item>Writing input stream to a temporary file</item>
+    ///   <item>Running ocrmypdf with --force-ocr --rotate-pages --deskew</item>
+    ///   <item>Extracting text from the output PDF using iText</item>
+    ///   <item>Cleaning up temporary files</item>
+    /// </list>
+    /// </remarks>
     public async Task<OcrResult> ProcessDocumentAsync(
         Guid documentId,
         Stream documentStream,
@@ -64,6 +108,7 @@ public class OcrmyPdfOcrService : IOcrService
 
         try
         {
+            // Create temporary files with UUID names to avoid conflicts
             string tempBaseName = Guid.NewGuid().ToString("N");
             inputPath  = Path.Combine(Path.GetTempPath(), $"ocr_in_{tempBaseName}.pdf");
             outputPath = Path.Combine(Path.GetTempPath(), $"ocr_out_{tempBaseName}.pdf");
@@ -72,7 +117,12 @@ public class OcrmyPdfOcrService : IOcrService
             using (var fs = File.Create(inputPath))
                 await documentStream.CopyToAsync(fs, cancellationToken);
 
-
+            // Build ocrmypdf command line arguments
+            // -l: language pack(s)
+            // --force-ocr: always run OCR even on image-only pages
+            // --rotate-pages: automatically correct page rotation
+            // --deskew: correct skewed pages
+            // --output-type pdf: output searchable PDF
             string args = $"-l {lang} --force-ocr --rotate-pages --deskew " +
                 $"--output-type pdf \"{inputPath}\" \"{outputPath}\"";
 
@@ -86,11 +136,11 @@ public class OcrmyPdfOcrService : IOcrService
                 stdout.Length > 500 ? stdout[..500] : stdout,
                 stderr.Length > 500 ? stderr[..500] : stderr);
 
+            // Handle ocrmypdf exit codes
             // Exit codes:
             //   0  = success
             //   6  = skipped (PDF already has text, only with --skip-text)
             //   10 = missing input file (should not happen)
-            // Replace the current exit code check block:
             if (exitCode != 0 && exitCode != 6)
             {
                 // Map common ocrmypdf exit codes to readable messages
@@ -102,7 +152,7 @@ public class OcrmyPdfOcrService : IOcrService
                     4  => "missing dependency (ghostscript/tesseract not installed?)",
                     5  => "input PDF is encrypted",
                     8  => "input PDF is damaged or invalid",
-                    9  => "output file already has OCR and --skip-text was used",
+                    9  => "input PDF already has OCR and --skip-text was used",
                     15 => "tesseract failed (language pack missing?)",
                     _ => "unknown error"
                 };
@@ -111,7 +161,7 @@ public class OcrmyPdfOcrService : IOcrService
                     "ocrmypdf exited {Code} ({Reason}) for document {DocId}. stderr: {Stderr}",
                     exitCode, reason, documentId, stderr);
 
-                // THROW so OcrWorkerService.MarkOcrFailedAsync gets called
+                // Throw so OcrWorkerService.MarkOcrFailedAsync gets called
                 throw new InvalidOperationException(
                     $"ocrmypdf exit {exitCode} ({reason}): {(stderr.Length > 300 ? stderr[..300] : stderr)}");
             }
@@ -154,7 +204,6 @@ public class OcrmyPdfOcrService : IOcrService
                 ProcessingTime = DateTime.UtcNow - startTime
             };
         }
-        // In ProcessDocumentAsync, replace the outer catch block:
         catch (Exception ex)
         {
             _logger.LogError(ex, "OCR failed for document {DocumentId}", documentId);
@@ -163,20 +212,32 @@ public class OcrmyPdfOcrService : IOcrService
         }
         finally
         {
+            // Clean up temporary files
             TryDelete(inputPath);
             TryDelete(outputPath);
         }
     }
 
-    // IOcrService members not used by OcrWorkerService directly
+    /// <inheritdoc />
+    /// <remarks>
+    /// Note: This method is not used by OcrWorkerService directly.
+    /// The worker uses <see cref="ProcessDocumentAsync"/> instead.
+    /// </remarks>
     public Task<OcrJob?> GetOcrJobStatusAsync(Guid jobId, CancellationToken ct = default)
         => Task.FromResult<OcrJob?>(null);
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Note: This method is not used by OcrWorkerService directly.
+    /// </remarks>
     public Task<List<OcrJob>> GetPendingJobsAsync(int count = 10, CancellationToken ct = default)
         => Task.FromResult(new List<OcrJob>());
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Extracts text from all pages of a PDF using iText.
+    /// </summary>
+    /// <param name="pdfPath">Path to the PDF file.</param>
+    /// <returns>Tuple of full text and per-page results.</returns>
     private static (string text, List<PageOcrResult> pages) ExtractTextFromPdf(string pdfPath)
     {
         using var reader = new PdfReader(pdfPath);
@@ -196,13 +257,20 @@ public class OcrmyPdfOcrService : IOcrService
             {
                 PageNumber = i,
                 Text = pageText.Trim(),
-                Confidence = 1.0f
+                Confidence = 1.0f  // iText text extraction assumes perfect accuracy
             });
         }
 
         return (sb.ToString(), pages);
     }
 
+    /// <summary>
+    /// Runs an external process and captures stdout/stderr.
+    /// </summary>
+    /// <param name="exe">Executable path.</param>
+    /// <param name="args">Command line arguments.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Tuple of exit code, stdout, and stderr.</returns>
     private static async Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
         string exe, string args, CancellationToken ct)
     {
@@ -224,6 +292,7 @@ public class OcrmyPdfOcrService : IOcrService
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
+        // 5 minute timeout for OCR processing
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         using var linked  = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
         try
@@ -238,6 +307,11 @@ public class OcrmyPdfOcrService : IOcrService
 
         return (process.ExitCode, await stdoutTask, await stderrTask);
     }
+
+    /// <summary>
+    /// Attempts to delete a temporary file, logging warnings on failure.
+    /// </summary>
+    /// <param name="path">Path to the file to delete.</param>
     private void TryDelete(string? path)
     {
         if (path == null) return;

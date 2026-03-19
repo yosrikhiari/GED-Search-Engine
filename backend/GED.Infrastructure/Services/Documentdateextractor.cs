@@ -9,16 +9,41 @@ using System.Text.Json.Serialization;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// ✨ IMPROVED VERSION - Better date extraction with enhanced prompting and parsing
+/// Extracts document dates using a local LLM (Ollama).
+/// 
+/// This service analyzes document text to identify the primary date (e.g., effective date
+/// for contracts, invoice date for invoices) and returns it in a structured format with
+/// confidence scores.
+/// 
+/// The extraction is asynchronous and runs after initial document upload, ensuring the
+/// user experience isn't blocked by potentially slow LLM calls.
 /// </summary>
 public class DocumentDateExtractor
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<DocumentDateExtractor> _logger;
+
+    /// <summary>
+    /// Ollama API endpoint for date extraction requests.
+    /// </summary>
     private readonly string? _llmEndpoint;
+
+    /// <summary>
+    /// Ollama model name for date extraction.
+    /// </summary>
     private readonly string? _llmModel;
+
+    /// <summary>
+    /// Whether the date extraction service is enabled.
+    /// </summary>
     private readonly bool _enabled;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="DocumentDateExtractor"/>.
+    /// </summary>
+    /// <param name="httpClient">HTTP client for Ollama API calls.</param>
+    /// <param name="logger">Logger for extraction events.</param>
+    /// <param name="configuration">Application configuration with NLP:* settings.</param>
     public DocumentDateExtractor(
         HttpClient httpClient,
         ILogger<DocumentDateExtractor> logger,
@@ -32,6 +57,20 @@ public class DocumentDateExtractor
         _enabled = configuration.GetValue<bool>("NLP:Enabled", true);
     }
 
+    /// <summary>
+    /// Extracts the primary date from a document's text content.
+    /// </summary>
+    /// <param name="content">Document text content to analyze.</param>
+    /// <param name="fileName">Original filename for context.</param>
+    /// <param name="category">Document category (e.g., "Invoice", "Contract").</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns><see cref="DocumentDateInfo"/> with extracted date, or null if extraction failed.</returns>
+    /// <remarks>
+    /// Uses category-specific prompts to improve date detection accuracy:
+    /// - Contracts: looks for "Effective Date" or "entered into as of"
+    /// - Invoices: looks for "Invoice Date"
+    /// Returns null if NLP is disabled or content is empty.
+    /// </remarks>
     public async Task<DocumentDateInfo?> ExtractDocumentDateAsync(
         string content,
         string fileName,
@@ -45,12 +84,12 @@ public class DocumentDateExtractor
 
         try
         {
-            // Take first 3000 characters
+            // Take first 3000 characters for efficient processing
             var preview = content.Length > 3000 
                 ? content.Substring(0, 3000) + "..." 
                 : content;
 
-            // ⭐ CRITICAL FIX: Much simpler, clearer prompt
+            // Build category-specific prompt for better date extraction
             var prompt = $@"Extract the main date from this {category} document.
 
 DOCUMENT TEXT:
@@ -71,7 +110,7 @@ If no date found:
             _logger.LogInformation("🗓️ Extracting document date for {Category}: {FileName}", 
                 category, fileName);
 
-            // Call LLM
+            // Call LLM for date extraction
             var response = await CallLlmAsync(prompt, cancellationToken);
             
             if (string.IsNullOrWhiteSpace(response))
@@ -89,6 +128,12 @@ If no date found:
         }
     }
 
+    /// <summary>
+    /// Calls the Ollama API for date extraction.
+    /// </summary>
+    /// <param name="prompt">The extraction prompt.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>LLM response text, or null on error.</returns>
     private async Task<string?> CallLlmAsync(string prompt, CancellationToken cancellationToken)
     {
         try
@@ -128,30 +173,34 @@ If no date found:
         }
     }
 
+    /// <summary>
+    /// Parses the LLM response into a <see cref="DocumentDateInfo"/> object.
+    /// Uses multiple parsing strategies to handle different response formats.
+    /// </summary>
+    /// <param name="response">Raw LLM response text.</param>
+    /// <returns>Parsed <see cref="DocumentDateInfo"/>, or null on parse failure.</returns>
     private DocumentDateInfo? ParseDateResponse(string response)
     {
         try
         {
-            // ⭐ CRITICAL FIX: Better cleaning of LLM response
+            // Clean the LLM response (remove markdown, extract JSON)
             var cleaned = CleanJsonResponse(response);
             
             _logger.LogInformation("🧹 Cleaned JSON: {Cleaned}", cleaned);
 
-            // ⭐ NEW: Try multiple parsing strategies
-            
-            // Strategy 1: Try parsing as simple format
+            // Strategy 1: Try parsing simple format {"date":"2024-12-01","confidence":0.9}
             if (TryParseSimpleFormat(cleaned, out var simpleResult))
             {
                 return simpleResult;
             }
 
-            // Strategy 2: Try parsing as detailed format
+            // Strategy 2: Try parsing detailed format with all fields
             if (TryParseDetailedFormat(cleaned, out var detailedResult))
             {
                 return detailedResult;
             }
 
-            // Strategy 3: Try to extract date with regex as fallback
+            // Strategy 3: Fallback to regex extraction for YYYY-MM-DD patterns
             if (TryExtractDateWithRegex(response, out var regexResult))
             {
                 return regexResult;
@@ -168,8 +217,11 @@ If no date found:
     }
 
     /// <summary>
-    /// ⭐ NEW: Clean JSON response from LLM
+    /// Cleans JSON response by removing markdown code fences and extracting
+    /// only the JSON object from potentially mixed output.
     /// </summary>
+    /// <param name="response">Raw LLM response.</param>
+    /// <returns>Cleaned JSON string.</returns>
     private string CleanJsonResponse(string response)
     {
         if (string.IsNullOrWhiteSpace(response))
@@ -195,7 +247,7 @@ If no date found:
     }
 
     /// <summary>
-    /// ⭐ NEW: Try parsing simple format: {"date":"2024-12-01","confidence":0.9}
+    /// Parses simple date format: {"date":"2024-12-01","confidence":0.9}
     /// </summary>
     private bool TryParseSimpleFormat(string json, out DocumentDateInfo? result)
     {
@@ -242,7 +294,7 @@ If no date found:
     }
 
     /// <summary>
-    /// ⭐ NEW: Try parsing detailed format: {"documentDate":"2024-12-01","confidence":0.9,"dateType":"...","explanation":"..."}
+    /// Parses detailed date format with all optional fields.
     /// </summary>
     private bool TryParseDetailedFormat(string json, out DocumentDateInfo? result)
     {
@@ -274,7 +326,7 @@ If no date found:
     }
 
     /// <summary>
-    /// ⭐ NEW: Fallback - extract date using regex
+    /// Fallback extraction using regex to find YYYY-MM-DD patterns.
     /// </summary>
     private bool TryExtractDateWithRegex(string response, out DocumentDateInfo? result)
     {
@@ -307,30 +359,50 @@ If no date found:
         }
     }
 
+    /// <summary>
+    /// Ollama API response wrapper.
+    /// </summary>
     private class OllamaResponse
     {
+        /// <summary>
+        /// The generated text response from Ollama.
+        /// </summary>
         public string? Response { get; set; }
     }
 }
 
 /// <summary>
-/// Information about a document's extracted date
+/// Information about a document's extracted date.
 /// </summary>
 public class DocumentDateInfo
 {
+    /// <summary>
+    /// The extracted date in UTC.
+    /// </summary>
     [JsonPropertyName("documentDate")]
     public DateTime? DocumentDate { get; set; }
     
+    /// <summary>
+    /// Confidence score (0.0 to 1.0) indicating extraction reliability.
+    /// </summary>
     [JsonPropertyName("confidence")]
     public float Confidence { get; set; }
     
+    /// <summary>
+    /// How the date was extracted (e.g., "extracted", "regex_extracted", "none").
+    /// </summary>
     [JsonPropertyName("dateType")]
     public string DateType { get; set; } = "unknown";
     
+    /// <summary>
+    /// Human-readable explanation of how the date was found.
+    /// </summary>
     [JsonPropertyName("explanation")]
     public string? Explanation { get; set; }
 
-    // ⭐ NEW: Support alternate property name
+    /// <summary>
+    /// Alternative property name for date (used when LLM returns "date" instead of "documentDate").
+    /// </summary>
     [JsonPropertyName("date")]
     public string? DateString
     {

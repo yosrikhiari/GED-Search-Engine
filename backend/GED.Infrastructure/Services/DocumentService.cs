@@ -10,8 +10,44 @@ using System.Text.RegularExpressions;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// DocumentService backed by PostgreSQL via EF Core.
-/// Replaces the previous flat JSON file implementation.
+/// Core document management service backed by PostgreSQL via Entity Framework Core.
+/// 
+/// <para>
+/// Responsibilities:
+/// <list type="bullet">
+///   <item>
+///     <term>CRUD Operations</term>
+///     <description>
+///       Upload, read, update, and delete documents with associated metadata.
+///     </description>
+///   </item>
+///   <item>
+///     <term>File Storage</term>
+///     <description>
+///       Persists uploaded files to the local filesystem with content-addressable naming.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Text Enrichment</term>
+///     <description>
+///       Delegates text extraction, description generation, and tag creation to
+///       <see cref="DocumentIngestionPipeline"/> for separation of concerns.
+///     </description>
+///   </item>
+///   <item>
+///     <term>OCR Job Queuing</term>
+///     <description>
+///       Uses the outbox pattern to reliably queue OCR jobs to RabbitMQ within
+///       the same transaction as document creation (atomic operation).
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// File naming: Files are stored with UUID-based names to prevent conflicts and
+/// enable content-addressable retrieval. The original filename is preserved in metadata.
+/// </para>
 /// </summary>
 public class DocumentService : IDocumentService
 {
@@ -19,32 +55,53 @@ public class DocumentService : IDocumentService
     private readonly IStorageService _storageService;
     private readonly ITextExtractionService _textExtractionService;
     private readonly DocumentDateExtractor? _dateExtractor;
-    private readonly DocumentIngestionPipeline _ingestionPipeline;  // ✅ Already injected
 
+    /// <summary>
+    /// Handles all enrichment steps (text extraction, description, tags).
+    /// Separated from persistence for testability and single responsibility.
+    /// </summary>
+    private readonly DocumentIngestionPipeline _ingestionPipeline;
+
+    /// <summary>
+    /// Entity Framework database context for document persistence.
+    /// </summary>
     private readonly GedDbContext _db;
+
+    /// <summary>
+    /// Base directory path for file storage.
+    /// </summary>
     private readonly string _basePath;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="DocumentService"/>.
+    /// </summary>
+    /// <param name="logger">Logger for service events.</param>
+    /// <param name="storageService">Service for file storage operations.</param>
+    /// <param name="textExtractionService">Service for extracting text from documents.</param>
+    /// <param name="db">Entity Framework database context.</param>
+    /// <param name="ingestionPipeline">Pipeline for document enrichment steps.</param>
+    /// <param name="dateExtractor">Optional LLM-based date extractor.</param>
+    /// <param name="configuration">Application configuration.</param>
     public DocumentService(
         ILogger<DocumentService> logger,
         IStorageService storageService,
         ITextExtractionService textExtractionService,
         GedDbContext db,
-        DocumentIngestionPipeline ingestionPipeline,  // ✅ Already in constructor
+        DocumentIngestionPipeline ingestionPipeline,
         DocumentDateExtractor? dateExtractor = null,
         IConfiguration? configuration = null)
     {
         _logger = logger;
         _storageService = storageService;
         _textExtractionService = textExtractionService;
-        _ingestionPipeline = ingestionPipeline;  // ✅ Already assigned
+        _ingestionPipeline = ingestionPipeline;
         _db = db;
         _dateExtractor = dateExtractor;
         _basePath = configuration?["Document:StoragePath"] ?? "/var/lib/ged/documents";
         Directory.CreateDirectory(_basePath);
     }
 
-    // ── Read ─────────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<Document?> GetDocumentByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         try
@@ -63,6 +120,7 @@ public class DocumentService : IDocumentService
         }
     }
 
+    /// <inheritdoc />
     public async Task<List<Document>> GetDocumentsByIdsAsync(
         IEnumerable<Guid> ids,
         CancellationToken cancellationToken = default)
@@ -85,8 +143,7 @@ public class DocumentService : IDocumentService
         }
     }
 
-    // ── Upload ────────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<Document> UploadDocumentAsync(
         Stream fileStream,
         string fileName,
@@ -99,10 +156,12 @@ public class DocumentService : IDocumentService
         {
             var documentId = Guid.NewGuid();
             var fileExtension = Path.GetExtension(fileName);
+
+            // Use UUID as filename to prevent conflicts and enable content-addressable storage
             var storedFileName = $"{documentId}{fileExtension}";
             var filePath = Path.Combine(_basePath, storedFileName);
 
-            // ── 1. Save file & compute hash ──────────────────────────────────
+            // ── 1. Save file & compute SHA-256 hash ─────────────────────────
             byte[] fileBytes;
             using (var ms = new MemoryStream())
             {
@@ -129,7 +188,7 @@ public class DocumentService : IDocumentService
             // ── 4. EXTRACT DOCUMENT DATE (optional fallback if pipeline doesn't do it) ──
             DateTime? documentDate = ingestion.DocumentDate;
             
-            // Optional: If pipeline doesn't extract date, try legacy extractor
+            // Attempt date extraction if pipeline didn't provide one and extractor is available
             if (documentDate == null && _dateExtractor != null && !string.IsNullOrWhiteSpace(ingestion.ExtractedText))
             {
                 try
@@ -156,7 +215,7 @@ public class DocumentService : IDocumentService
                 }
             }
 
-            // ── 5. Build & persist EF entity ─────────────────────────────────
+            // ── 5. Build & persist EF entity ────────────────────────────────
             var uploadTime = DateTime.UtcNow;
 
             var entity = new DocumentEntity
@@ -186,8 +245,7 @@ public class DocumentService : IDocumentService
 
             _db.Documents.Add(entity);
 
-            // Queue OCR job via outbox pattern (same transaction = atomic)
-            // After — same logic, clearer comment
+            // ── 6. Queue OCR job via outbox pattern ─────────────────────────
             // Images → TesseractDirectOcrService, scanned PDFs → OcrmyPdfOcrService
             // Both are routed inside OcrWorkerService.ProcessOcrJobAsync
             bool needsOcr = contentType.StartsWith("image/") || contentType == "application/pdf";
@@ -210,6 +268,7 @@ public class DocumentService : IDocumentService
                 _logger.LogInformation("📬 Outbox OCR job queued for document {Id}", documentId);
             }
 
+            // Single transaction: document + outbox message + optional OCR job
             await _db.SaveChangesAsync(cancellationToken);
 
             _logger.LogInformation(
@@ -226,8 +285,7 @@ public class DocumentService : IDocumentService
         }
     }
 
-    // ── Update ────────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<Document> UpdateDocumentAsync(
         Guid id,
         Document document,
@@ -257,8 +315,7 @@ public class DocumentService : IDocumentService
         }
     }
 
-    // ── Delete ────────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<bool> DeleteDocumentAsync(Guid id, CancellationToken cancellationToken = default)
     {
         try
@@ -266,7 +323,7 @@ public class DocumentService : IDocumentService
             var entity = await _db.Documents.FindAsync(new object[] { id }, cancellationToken);
             if (entity == null) return false;
 
-            // Delete physical file
+            // Delete physical file from storage
             if (File.Exists(entity.FilePath))
                 File.Delete(entity.FilePath);
 
@@ -283,8 +340,7 @@ public class DocumentService : IDocumentService
         }
     }
 
-    // ── File content ──────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<Stream> GetDocumentContentAsync(
         Guid id,
         CancellationToken cancellationToken = default)
@@ -298,8 +354,9 @@ public class DocumentService : IDocumentService
         return File.OpenRead(document.FilePath);
     }
 
-    // ── Mapping helpers ───────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Maps a database entity to a domain <see cref="Document"/> model.
+    /// </summary>
     private static Document MapToDomain(DocumentEntity e) => new()
     {
         Id               = e.Id,
@@ -336,6 +393,9 @@ public class DocumentService : IDocumentService
             }).ToList()
     };
 
+    /// <summary>
+    /// Builds metadata entities from a metadata dictionary.
+    /// </summary>
     private static List<DocumentMetadataEntity> BuildMetadataEntities(
         Guid documentId,
         Dictionary<string, object>? metadata,
@@ -363,8 +423,10 @@ public class DocumentService : IDocumentService
             .ToList();
     }
 
-    // ── Text/tag helpers (fallbacks if pipeline doesn't provide them) ─────────
-
+    /// <summary>
+    /// Fallback description generator if pipeline doesn't provide one.
+    /// Takes the first 3 meaningful lines from extracted text.
+    /// </summary>
     private static string GenerateDescription(string? extractedText, string fileName)
     {
         if (string.IsNullOrWhiteSpace(extractedText))
@@ -383,21 +445,29 @@ public class DocumentService : IDocumentService
         return description.Length > 200 ? description[..197] + "..." : description;
     }
 
+    /// <summary>
+    /// Fallback tag generator if pipeline doesn't provide tags.
+    /// Extracts tags from filename, category, and common business keywords.
+    /// </summary>
     private static List<string> GenerateTags(
         string fileName, string? category, string? extractedText)
     {
         var tags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Add category as tag
         if (!string.IsNullOrWhiteSpace(category)) tags.Add(category.ToLower());
 
+        // Add filename parts as tags
         foreach (var part in Regex.Split(
                      Path.GetFileNameWithoutExtension(fileName), @"[\s_\-]+")
                  .Where(p => p.Length > 3).Select(p => p.ToLower()))
             tags.Add(part);
 
+        // Add file extension as tag
         var ext = Path.GetExtension(fileName).TrimStart('.').ToLower();
         if (!string.IsNullOrWhiteSpace(ext)) tags.Add(ext);
 
+        // Extract business keywords from text content
         if (!string.IsNullOrWhiteSpace(extractedText))
         {
             var keywords = new[]
@@ -410,6 +480,7 @@ public class DocumentService : IDocumentService
             foreach (var kw in keywords)
                 if (lower.Contains(kw)) tags.Add(kw);
 
+            // Extract year from text as a tag
             var yearMatch = Regex.Match(extractedText, @"\b(20\d{2})\b");
             if (yearMatch.Success) tags.Add(yearMatch.Value);
         }

@@ -11,12 +11,54 @@ using System.Text.Json.Serialization;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// RAG (Retrieval Augmented Generation) Service.
-///
-/// The user's identity (UserId, UserRole, AllowedCategories) is forwarded to
-/// every internal SearchRequest so OpenSearch's ACL filter applies to RAG
-/// context retrieval as well — users can only get answers from documents they
+/// RAG (Retrieval Augmented Generation) service for AI-powered question answering.
+/// 
+/// <para>
+/// The service retrieves relevant document chunks based on the user's query and
+/// generates a natural language answer using a local LLM (Ollama).
+/// </para>
+/// 
+/// <para>
+/// Security: The user's identity (UserId, UserRole, AllowedCategories) is forwarded
+/// to every internal SearchRequest so OpenSearch's ACL filter applies to RAG
+/// context retrieval as well. Users can only get answers from documents they
 /// are allowed to see.
+/// </para>
+/// 
+/// <para>
+/// RAG Pipeline:
+/// <list type="number">
+///   <item>
+///     <term>Context building</term>
+///     <description>
+///       Searches for relevant chunks using semantic similarity (kNN).
+///       Falls back to full-document search if no chunks found.
+///     </description>
+///   </item>
+///   <item>
+///     <term>ACL enforcement</term>
+///     <description>
+///       Only retrieves chunks from accessible documents.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Prompt construction</term>
+///     <description>
+///       Builds prompt with retrieved context and user question.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Answer generation</term>
+///     <description>
+///       Calls Ollama to generate answer from context.
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// Supports both streaming and non-streaming response modes.
+/// </para>
 /// </summary>
 public class RagService : IRagService
 {
@@ -24,16 +66,47 @@ public class RagService : IRagService
     private readonly IUserContext        _userContext;
     private readonly OpenSearchService   _openSearch;
     private readonly HttpClient          _httpClient;
-    private readonly ILogger<RagService> _logger;
+    private readonly ILogger<RagService>  _logger;
 
+    /// <summary>
+    /// Ollama API endpoint for text generation.
+    /// </summary>
     private readonly string _llmEndpoint;
+
+    /// <summary>
+    /// Ollama model name for answer generation.
+    /// </summary>
     private readonly string _llmModel;
+
+    /// <summary>
+    /// Whether the RAG service is enabled.
+    /// </summary>
     private readonly bool   _enabled;
+
+    /// <summary>
+    /// Number of top chunks to retrieve for context.
+    /// </summary>
     private readonly int    _topK;
+
+    /// <summary>
+    /// Maximum characters to include in context (to fit LLM context window).
+    /// </summary>
     private readonly int    _maxContextChars;
 
+    /// <summary>
+    /// Minimum confidence threshold for chunk inclusion.
+    /// </summary>
     private const float RagConfidenceThreshold = 0.45f;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="RagService"/>.
+    /// </summary>
+    /// <param name="searchService">Search service for document retrieval.</param>
+    /// <param name="openSearch">OpenSearch service for chunk search.</param>
+    /// <param name="userContext">User context for ACL enforcement.</param>
+    /// <param name="httpClient">HTTP client for Ollama API.</param>
+    /// <param name="logger">Logger for RAG events.</param>
+    /// <param name="configuration">Application configuration.</param>
     public RagService(
         ISearchService      searchService,
         OpenSearchService   openSearch,
@@ -54,8 +127,7 @@ public class RagService : IRagService
         _maxContextChars = configuration.GetValue<int>("RAG:MaxContextChars", 6000);
     }
 
-    // ── AskAsync ──────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<RagResponse> AskAsync(
         RagRequest request,
         CancellationToken cancellationToken = default)
@@ -71,11 +143,13 @@ public class RagService : IRagService
         var startTime = DateTime.UtcNow;
         _logger.LogInformation("🤖 RAG pipeline starting for query: '{Query}'", request.Query);
 
+        // Build context from relevant documents
         var (effectiveCategories, chunkHits, sources, contextBuilder, charsUsed, earlyExit) =
             await BuildContextAsync(request, cancellationToken);
 
         if (earlyExit != null) return earlyExit;
 
+        // No relevant documents found
         if (!sources.Any())
             return new RagResponse
             {
@@ -84,6 +158,7 @@ public class RagService : IRagService
                 Query   = request.Query
             };
 
+        // Generate answer from context
         string answer;
         try
         {
@@ -103,16 +178,15 @@ public class RagService : IRagService
         return new RagResponse
         {
             Query                  = request.Query,
-            Answer                 = answer,
-            Sources                = sources,
-            SearchTimeMs           = elapsed,
+            Answer                = answer,
+            Sources               = sources,
+            SearchTimeMs          = elapsed,
             TotalDocumentsSearched = sources.Count,
-            ModelUsed              = _llmModel
+            ModelUsed             = _llmModel
         };
     }
 
-    // ── AskStreamAsync ────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async IAsyncEnumerable<string> AskStreamAsync(
         RagRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -160,6 +234,7 @@ public class RagService : IRagService
 
         if (fallbackAnswer != null) { yield return fallbackAnswer; yield break; }
 
+        // Stream response tokens
         await using var stream = await response!.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new System.IO.StreamReader(stream);
 
@@ -176,6 +251,9 @@ public class RagService : IRagService
 
     // ── Shared context builder ────────────────────────────────────────────────
 
+    /// <summary>
+    /// Builds context by retrieving relevant document chunks.
+    /// </summary>
     private async Task<(
         List<string>?        effectiveCategories,
         List<ChunkSearchHit> chunkHits,
@@ -185,13 +263,14 @@ public class RagService : IRagService
         RagResponse?         earlyExit)>
         BuildContextAsync(RagRequest request, CancellationToken cancellationToken)
     {
-        // ── Category-based ACL ────────────────────────────────────────────────
+        // Apply category-based ACL
         List<string>? allowedCategories = null;
         if (!string.IsNullOrEmpty(request.Username))
         {
             allowedCategories = _userContext.GetAllowedCategories(request.Username);
             if (allowedCategories != null)
             {
+                // Intersect with requested categories (if any)
                 allowedCategories = request.Categories == null
                     ? allowedCategories
                     : request.Categories
@@ -206,7 +285,7 @@ public class RagService : IRagService
 
         var effectiveCategories = allowedCategories ?? request.Categories;
 
-        // ── Chunk search ──────────────────────────────────────────────────────
+        // Search for relevant chunks
         List<ChunkSearchHit> chunkHits = new();
         try
         {
@@ -224,6 +303,7 @@ public class RagService : IRagService
 
             _logger.LogInformation("🔍 RAG chunk search: {Count} chunk hits", chunkHits.Count);
 
+            // Check confidence threshold
             bool hasConfidentChunks = chunkHits.Any(c => c.Score >= RagConfidenceThreshold);
             if (chunkHits.Any() && !hasConfidentChunks)
             {
@@ -246,7 +326,7 @@ public class RagService : IRagService
             _logger.LogWarning(ex, "Chunk search failed — will fall back to full-doc search");
         }
 
-        // ── Build context ─────────────────────────────────────────────────────
+        // Build context from chunks
         var sources        = new List<RagSource>();
         var contextBuilder = new StringBuilder();
         int charsUsed      = 0;
@@ -256,10 +336,12 @@ public class RagService : IRagService
             var seenDocIds = new HashSet<Guid>();
             foreach (var chunk in chunkHits)
             {
+                // Respect max context length
                 if (charsUsed >= _maxContextChars) break;
                 var remaining = _maxContextChars - charsUsed;
                 var text      = chunk.Text.Length > remaining ? chunk.Text[..remaining] + "…" : chunk.Text;
 
+                // Format chunk for context
                 contextBuilder.AppendLine($"--- Document : {chunk.Title} (extrait {chunk.ChunkIndex + 1}) ---");
                 if (chunk.DocumentDate.HasValue)
                     contextBuilder.AppendLine($"Date : {chunk.DocumentDate.Value:yyyy-MM-dd}");
@@ -269,6 +351,7 @@ public class RagService : IRagService
                 contextBuilder.AppendLine();
                 charsUsed += text.Length + 80;
 
+                // Track unique documents
                 if (seenDocIds.Add(chunk.DocumentId))
                     sources.Add(new RagSource
                     {
@@ -289,11 +372,8 @@ public class RagService : IRagService
         }
         else
         {
-            // Full-document fallback
+            // Fallback to full-document search
             _logger.LogInformation("⚠️  No chunk hits — falling back to full-document search");
-
-            // Fallback to full-document search when no chunk hits are found
-            _logger.LogInformation("No chunk hits — falling back to full-document search");
 
             var searchRequest = new SearchRequest
             {
@@ -343,6 +423,7 @@ public class RagService : IRagService
                         TotalDocumentsSearched = searchResult.TotalResults
                     });
 
+            // Build context from full documents
             foreach (var doc in searchResult.Documents)
             {
                 var excerpt = ExtractBestExcerpt(doc);
@@ -350,6 +431,7 @@ public class RagService : IRagService
                 var remaining = _maxContextChars - charsUsed;
                 if (remaining <= 100) break;
 
+                // Allocate more context to higher-scoring documents
                 var scoreFraction = doc.Score > 0 ? Math.Min(doc.Score * 1.5f, 1.0f) : 0.5f;
                 var budget        = Math.Max((int)(remaining * scoreFraction), 300);
                 var truncated     = excerpt.Length > budget ? excerpt[..budget] + "…" : excerpt;
@@ -387,6 +469,9 @@ public class RagService : IRagService
 
     // ── Prompt builder ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Builds the full prompt for answer generation.
+    /// </summary>
     private string BuildPrompt(string query, string context, string language)
     {
         var lang = string.IsNullOrEmpty(language) ? "fr" : language.ToLower();
@@ -404,7 +489,7 @@ USER QUESTION:
 INSTRUCTIONS:
 - Answer precisely and concisely based ONLY on the provided documents.
 - If the documents don't contain enough information to answer, clearly state that.
-- Cite the relevant documents in your answer (e.g., ""According to Document 1 (title)..."").
+- Cite the relevant documents in your answer (e.g., ""According to Document 1 (title)..."".
 - Do NOT fabricate any information not present in the documents.
 - {languageInstruction}
 
@@ -413,6 +498,9 @@ INSTRUCTIONS:
 ANSWER:";
     }
 
+    /// <summary>
+    /// Gets language-specific prompt configuration.
+    /// </summary>
     private static (string systemPrompt, string formatInstructions, string languageInstruction) GetLanguageConfig(string lang)
     {
         return lang switch
@@ -437,6 +525,9 @@ ANSWER:";
 
     // ── Non-streaming Ollama call ─────────────────────────────────────────────
 
+    /// <summary>
+    /// Generates an answer from context using Ollama.
+    /// </summary>
     private async Task<string> GenerateAnswerAsync(
         string query, string context, string language, CancellationToken cancellationToken)
     {
@@ -482,6 +573,10 @@ ANSWER:";
 
     // ── Static helpers ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Extracts the best excerpt from a document for context.
+    /// Prefers highlights, then OCR text, then extracted text, then description.
+    /// </summary>
     private static string ExtractBestExcerpt(DocumentSearchHit doc)
     {
         if (doc.Highlights?.Any() == true)
@@ -495,6 +590,9 @@ ANSWER:";
         return string.Empty;
     }
 
+    /// <summary>
+    /// Builds a fallback answer listing relevant documents when LLM fails.
+    /// </summary>
     private static string BuildFallbackAnswer(List<RagSource> sources)
     {
         var sb = new StringBuilder();
@@ -511,6 +609,8 @@ ANSWER:";
         }
         return sb.ToString();
     }
+
+    // ── Ollama DTOs ──────────────────────────────────────────────────────────
 
     private class OllamaResponse
     {

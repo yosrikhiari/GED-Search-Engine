@@ -12,36 +12,74 @@ using CoreSearchRequest = GED.Core.Models.SearchRequest;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Hybrid search service: BM25 (keyword) + kNN (semantic vector) combined.
-///
+/// Hybrid search service combining BM25 (keyword) and kNN (semantic vector) search.
+/// 
+/// <para>
 /// Access control is enforced at query time via OpenSearch filters:
-///   - Admin → sees all documents (no filter injected)
-///   - Others → must satisfy at least one of:
-///       1. accessLevel == "open"
-///       2. allowedUserIds contains the current user's ID
-///       3. category is in the user's AllowedCategories list
-///
+/// <list type="bullet">
+///   <item>
+///     <term>Admin users</term>
+///     <description>See all documents (no filter injected).</description>
+///   </item>
+///   <item>
+///     <term>Other users</term>
+///     <description>
+///       Must satisfy at least one of:
+///       <list type="number">
+///         <item>Document's accessLevel == "open"</item>
+///         <item>User's ID is in allowedUserIds</item>
+///         <item>Document's category is in user's AllowedCategories</item>
+///       </list>
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
 /// ACL fields (allowedUserIds, accessLevel, createdByUserId) are written to
 /// OpenSearch at index time and kept in sync whenever ACL grants change.
+/// </para>
 /// </summary>
 public class OpenSearchService : ISearchService
 {
-    private readonly IOpenSearchClient             _client;
-    private readonly INlpService                   _nlpService;
-    private readonly GedDbContext                  _db;
-    private readonly ILogger<OpenSearchService>    _logger;
+    private readonly IOpenSearchClient _client;
+    private readonly INlpService       _nlpService;
+    private readonly GedDbContext      _db;
+    private readonly ILogger<OpenSearchService> _logger;
 
+    /// <summary>
+    /// Name of the documents index.
+    /// </summary>
     private readonly string _documentIndex;
-    private const int       EmbeddingDim  = 768;
 
+    /// <summary>
+    /// Embedding vector dimension (nomic-embed-text produces 768-dim vectors).
+    /// </summary>
+    private const int EmbeddingDim = 768;
+
+    /// <summary>
+    /// Weight for BM25 scores in hybrid ranking (0.6 = 60% BM25 influence).
+    /// </summary>
     private readonly float _bm25Weight;
+
+    /// <summary>
+    /// Weight for semantic similarity scores in hybrid ranking (0.4 = 40% kNN influence).
+    /// </summary>
     private readonly float _semanticWeight;
+
+    /// <summary>
+    /// Minimum semantic similarity score to include kNN results.
+    /// </summary>
     private readonly float _semanticThreshold;
 
-    // Maps FR/AR query words → stored English category values
+    /// <summary>
+    /// Multilingual category aliases mapping FR/AR terms to English values.
+    /// Used to normalize category queries across languages.
+    /// </summary>
     private static readonly Dictionary<string, string> CategoryAliases =
         new(StringComparer.OrdinalIgnoreCase)
     {
+        // French aliases
         { "contrat",      "Contract"     }, { "contrats",     "Contract"     },
         { "facture",      "Invoice"      }, { "factures",     "Invoice"      },
         { "rapport",      "Report"       }, { "rapports",     "Report"       },
@@ -50,6 +88,7 @@ public class OpenSearchService : ISearchService
         { "devis",        "Invoice"      },
         { "note",         "Memo"         },
         { "présentation", "Presentation" }, { "presentation", "Presentation" },
+        // Arabic aliases
         { "عقد",          "Contract"     }, { "عقود",         "Contract"     },
         { "فاتورة",       "Invoice"      }, { "فواتير",       "Invoice"      },
         { "تقرير",        "Report"       }, { "تقارير",       "Report"       },
@@ -58,8 +97,14 @@ public class OpenSearchService : ISearchService
         { "عرض",          "Presentation" },
     };
 
-    // ── Constructor ───────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Initializes a new instance of <see cref="OpenSearchService"/>.
+    /// </summary>
+    /// <param name="client">OpenSearch client instance.</param>
+    /// <param name="nlpService">NLP service for embeddings and query processing.</param>
+    /// <param name="db">Database context for ACL lookups.</param>
+    /// <param name="logger">Logger for search events.</param>
+    /// <param name="configuration">Application configuration with Search:* settings.</param>
     public OpenSearchService(
         IOpenSearchClient           client,
         INlpService                 nlpService,
@@ -77,8 +122,7 @@ public class OpenSearchService : ISearchService
         _semanticThreshold = configuration.GetValue<float>("Search:SemanticThreshold", 0.30f);
     }
 
-    // ── SearchAsync (hybrid pipeline) ─────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<SearchResult> SearchAsync(
         CoreSearchRequest request,
         CancellationToken cancellationToken = default)
@@ -90,6 +134,7 @@ public class OpenSearchService : ISearchService
             NaturalLanguageQuery? nlQuery = null;
             var processedQuery = request.Query;
 
+            // Process natural language query if requested
             if (request.SearchType == GED.Core.Models.SearchType.Natural &&
                 !string.IsNullOrWhiteSpace(request.Query))
             {
@@ -101,6 +146,7 @@ public class OpenSearchService : ISearchService
                     request.Query, nlQuery.DetectedLanguage,
                     string.Join(",", nlQuery.Keywords), nlQuery.IsUnderstood);
 
+                // Return empty results if query couldn't be understood
                 if (!nlQuery.IsUnderstood)
                 {
                     return new SearchResult
@@ -116,8 +162,10 @@ public class OpenSearchService : ISearchService
                     };
                 }
 
+                // Apply NLP-extracted filters to the search request
                 ApplyNlpFilters(request, nlQuery);
 
+                // Handle "show all" queries
                 var lowerRaw = request.Query.ToLower().Trim();
                 var genericPhrases = new[]
                 {
@@ -132,6 +180,7 @@ public class OpenSearchService : ISearchService
                 }
             }
 
+            // Generate query embedding for semantic search (parallel with BM25)
             var embeddingText = string.IsNullOrWhiteSpace(processedQuery)
                 ? request.Query : processedQuery;
             var embeddingTask = string.IsNullOrWhiteSpace(embeddingText)
@@ -140,11 +189,13 @@ public class OpenSearchService : ISearchService
 
             var bm25Task = RunBm25SearchAsync(request, processedQuery, nlQuery, cancellationToken);
 
+            // Run BM25 and embedding in parallel
             await Task.WhenAll(bm25Task, embeddingTask);
 
             var bm25Response   = await bm25Task;
             var queryEmbedding = await embeddingTask;
 
+            // Run kNN semantic search if we have an embedding
             List<(Guid Id, float Score)> semanticHits = new();
             var searchMode = SearchMode.BM25;
 
@@ -155,8 +206,10 @@ public class OpenSearchService : ISearchService
                     ? SearchMode.Hybrid : SearchMode.BM25;
             }
 
+            // Merge results using Reciprocal Rank Fusion
             var documents = await MergeHybridResultsAsync(bm25Response, semanticHits, cancellationToken);
 
+            // Normalize scores to 0-1 range
             var totalBm25    = (int)(bm25Response?.Total ?? 0);
             var isUnderstood = nlQuery?.IsUnderstood != false &&
                                (documents.Any() || totalBm25 > 0 ||
@@ -186,6 +239,7 @@ public class OpenSearchService : ISearchService
                 SearchMode       = searchMode
             };
 
+            // Get related document suggestions if requested
             if (request.IncludeSuggestions && result.Documents.Any())
                 result.Suggestions = await GetRelatedDocumentsAsync(
                     result.Documents.First().Id, 5, cancellationToken);
@@ -203,8 +257,9 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── BM25 search ───────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Runs BM25 (keyword) search with highlighting and aggregations.
+    /// </summary>
     private async Task<ISearchResponse<DocumentIndexModel>?> RunBm25SearchAsync(
         CoreSearchRequest request,
         string processedQuery,
@@ -243,8 +298,9 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── kNN semantic search ───────────────────────────────────────────────────
-
+    /// <summary>
+    /// Runs kNN semantic search using query embedding.
+    /// </summary>
     private async Task<List<(Guid Id, float Score)>> RunKnnSearchAsync(
         CoreSearchRequest request,
         float[] queryEmbedding,
@@ -252,6 +308,7 @@ public class OpenSearchService : ISearchService
     {
         try
         {
+            // Fetch more candidates than requested to allow for filtering
             var k = Math.Min(request.PageSize * 3, 50);
 
             var response = await _client.SearchAsync<DocumentIndexModel>(s => s
@@ -260,21 +317,19 @@ public class OpenSearchService : ISearchService
                 .Query(q => q
                     .Bool(b =>
                     {
-                        // ── Hard filters ──────────────────────────────────────
+                        // Hard filter: only indexed documents
                         var filters = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
                         {
                             fq => fq.Term(t => t.Field("status").Value("Indexed"))
                         };
 
-                        // ── ACL filter for non-admins ─────────────────────────
-                        // If user is authenticated but UserId is null, return no results
-                        // This prevents data leakage when authentication fails silently
+                        // ACL filter for non-admin users
                         bool isNonAdminWithValidId = request.UserRole != "Admin" && !string.IsNullOrEmpty(request.UserId);
                         bool isNonAdminWithoutId = request.UserRole != "Admin" && string.IsNullOrEmpty(request.UserId);
 
                         if (isNonAdminWithoutId)
                         {
-                            // User is not Admin but has no UserId - return no results
+                            // Return no results if user has no ID (authentication issue)
                             filters.Add(fq => fq.Term(t => t.Field("id").Value(Guid.Empty.ToString())));
                         }
                         else if (isNonAdminWithValidId)
@@ -284,9 +339,12 @@ public class OpenSearchService : ISearchService
 
                             var aclShould = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
                             {
+                                // Document is open to all
                                 s2 => s2.Term(t => t.Field("accessLevel").Value("open")),
+                                // User has explicit ACL grant
                                 s2 => s2.Term(t => t.Field("allowedUserIds").Value(userId))
                             };
+                            // Category-based access
                             foreach (var cat in cats)
                             {
                                 var c = cat;
@@ -300,6 +358,7 @@ public class OpenSearchService : ISearchService
 
                         b = b.Filter(filters.ToArray());
 
+                        // kNN query for semantic search
                         b = b.Must(m => m.Knn(knn => knn
                             .Field("embedding")
                             .Vector(queryEmbedding)
@@ -328,28 +387,33 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── Hybrid merge (RRF) ────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Merges BM25 and kNN results using Reciprocal Rank Fusion (RRF).
+    /// RRF provides a simple, robust way to combine rankings without score normalization.
+    /// </summary>
     private async Task<List<DocumentSearchHit>> MergeHybridResultsAsync(
         ISearchResponse<DocumentIndexModel>? bm25Response,
         List<(Guid Id, float Score)> semanticHits,
         CancellationToken cancellationToken)
     {
-        const int rrfK = 60;
+        const int rrfK = 60;  // RRF constant (60 is standard)
         var scores = new Dictionary<Guid, float>();
         var hitMap = new Dictionary<Guid, DocumentSearchHit>();
 
+        // Process BM25 hits
         if (bm25Response?.Hits != null)
         {
             int rank = 1;
             foreach (var hit in bm25Response.Hits)
             {
                 var docHit = MapToSearchHit(hit);
+                // RRF score contribution: 1 / (k + rank)
                 scores[docHit.Id] = scores.GetValueOrDefault(docHit.Id) + 1f / (rrfK + rank++);
                 hitMap.TryAdd(docHit.Id, docHit);
             }
         }
 
+        // Process semantic hits and fetch missing documents
         var missingIds = new List<Guid>();
         for (int i = 0; i < semanticHits.Count; i++)
         {
@@ -359,6 +423,7 @@ public class OpenSearchService : ISearchService
                 missingIds.Add(id);
         }
 
+        // Fetch documents missing from BM25 results (found only via kNN)
         if (missingIds.Any())
         {
             var fetchResponse = await _client.MultiGetAsync(mg => mg
@@ -395,14 +460,14 @@ public class OpenSearchService : ISearchService
             }
         }
 
+        // Sort by combined RRF score
         return hitMap.Values
             .OrderByDescending(d => scores.GetValueOrDefault(d.Id))
             .Select(d => { d.Score = scores.GetValueOrDefault(d.Id); return d; })
             .ToList();
     }
 
-    // ── Index document (with ACL snapshot) ───────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<bool> IndexDocumentAsync(
         Document document,
         CancellationToken cancellationToken = default)
@@ -411,20 +476,19 @@ public class OpenSearchService : ISearchService
         {
             var indexModel = MapToIndexModel(document);
 
-            // ── ACL: fetch active ACL grants and embed them in the index doc ──
+            // Fetch ACL grants and embed in index document for query-time filtering
             var aclUserIds = await _db.DocumentAcls
                 .Where(a => a.DocumentId == document.Id &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
                 .Select(a => a.UserId.ToString())
                 .ToListAsync(cancellationToken);
 
-            // If there are ACL grants, the document is restricted to those users
-            // If no ACL grants, the document is open to everyone
+            // If there are ACL grants, document is restricted; otherwise it's open
             indexModel.AllowedUserIds   = aclUserIds;
             indexModel.CreatedByUserId  = document.CreatedBy;
             indexModel.AccessLevel      = aclUserIds.Count > 0 ? "restricted" : "open";
 
-            // Generate embedding
+            // Generate embedding for semantic search
             var embeddingText = BuildEmbeddingText(document);
             if (!string.IsNullOrWhiteSpace(embeddingText))
             {
@@ -471,12 +535,16 @@ public class OpenSearchService : ISearchService
         }
     }
 
+    /// <summary>
+    /// Builds text for embedding by combining title, description, category, and content.
+    /// Content is truncated to 3000 chars to fit model context.
+    /// </summary>
     private static string BuildEmbeddingText(Document document)
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(document.Title))       parts.Add(document.Title);
         if (!string.IsNullOrWhiteSpace(document.Description)) parts.Add(document.Description);
-        if (!string.IsNullOrWhiteSpace(document.Category))    parts.Add(document.Category);
+        if (!string.IsNullOrWhiteSpace(document.Category))      parts.Add(document.Category);
 
         var content = !string.IsNullOrWhiteSpace(document.OcrText)
             ? document.OcrText : document.ExtractedText;
@@ -486,8 +554,7 @@ public class OpenSearchService : ISearchService
         return string.Join(". ", parts.Where(p => !string.IsNullOrWhiteSpace(p)));
     }
 
-    // ── Chunk-level indexing ──────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task IndexChunksAsync(
         Document document,
         List<DocumentChunk> chunks,
@@ -495,9 +562,10 @@ public class OpenSearchService : ISearchService
     {
         if (!chunks.Any()) return;
 
+        // Delete existing chunks for this document before re-indexing
         await DeleteChunksForDocumentAsync(document.Id, cancellationToken);
 
-        // ── ACL: fetch active ACL grants and embed them in chunk docs ───────────
+        // Fetch ACL grants for chunk documents
         var aclUserIds = await _db.DocumentAcls
             .Where(a => a.DocumentId == document.Id &&
                         (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
@@ -512,6 +580,7 @@ public class OpenSearchService : ISearchService
         {
             try
             {
+                // Generate embedding for each chunk
                 chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(
                     chunk.Text, cancellationToken);
 
@@ -529,7 +598,7 @@ public class OpenSearchService : ISearchService
                     content_type   = document.ContentType,
                     tags           = document.Tags,
                     embedding      = chunk.Embedding,
-                    // ── ACL fields (denormalized from parent document) ──────────
+                    // ACL fields denormalized from parent document
                     allowedUserIds = aclUserIds,
                     accessLevel    = accessLevel,
                     createdByUserId = createdByUserId
@@ -555,6 +624,7 @@ public class OpenSearchService : ISearchService
             indexed, chunks.Count, document.Id);
     }
 
+    /// <inheritdoc />
     public async Task<List<ChunkSearchHit>> SearchChunksAsync(
         string query,
         int topK = 5,
@@ -565,6 +635,7 @@ public class OpenSearchService : ISearchService
         List<string>? userAllowedCategories = null,
         CancellationToken cancellationToken = default)
     {
+        // Generate query embedding
         var queryEmbedding = await _nlpService.GenerateEmbeddingAsync(query, cancellationToken);
         if (queryEmbedding == null || queryEmbedding.Length == 0)
             return new List<ChunkSearchHit>();
@@ -581,7 +652,7 @@ public class OpenSearchService : ISearchService
 
                 var filters = new List<Func<QueryContainerDescriptor<ChunkIndexModel>, QueryContainer>>();
 
-                // Document ID filter — restricts chunk search to specific documents
+                // Document ID filter
                 if (documentIds?.Any() == true)
                 {
                     filters.Add(f => f.Terms(t => t
@@ -597,7 +668,7 @@ public class OpenSearchService : ISearchService
                         .Terms(categories)));
                 }
 
-                // ── ACL filter for non-admins ─────────────────────────────────────
+                // ACL filter for non-admins
                 if (userRole != "Admin" && userId != null)
                 {
                     var cats = userAllowedCategories ?? new List<string>();
@@ -620,6 +691,7 @@ public class OpenSearchService : ISearchService
                 }
                 else if (userRole != "Admin")
                 {
+                    // No user ID — return no results
                     filters.Add(fq => fq.Term(t => t.Field("accessLevel").Value("__impossible__")));
                 }
 
@@ -636,7 +708,7 @@ public class OpenSearchService : ISearchService
             return new List<ChunkSearchHit>();
         }
 
-        // Return top K results (ACL filtering is now done at query time)
+        // Map results to ChunkSearchHit
         var results = searchResponse.Hits.Select(h => new ChunkSearchHit
         {
             ChunkId      = h.Source.ChunkId,
@@ -655,6 +727,9 @@ public class OpenSearchService : ISearchService
         return results.Take(topK).ToList();
     }
 
+    /// <summary>
+    /// Deletes all chunks for a document from the chunks index.
+    /// </summary>
     private async Task DeleteChunksForDocumentAsync(Guid documentId, CancellationToken ct)
     {
         try
@@ -670,12 +745,14 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── NLP filter application ────────────────────────────────────────────────
-
+    /// <summary>
+    /// Applies NLP-extracted filters to the search request.
+    /// </summary>
     private void ApplyNlpFilters(CoreSearchRequest request, NaturalLanguageQuery nlQuery)
     {
         if (nlQuery.ExtractedFilters == null || !nlQuery.ExtractedFilters.Any()) return;
 
+        // Date filters
         bool hasNonYearKeywords = nlQuery.Keywords
             .Any(k => !System.Text.RegularExpressions.Regex.IsMatch(k, @"^\d{4}$"));
 
@@ -701,6 +778,7 @@ public class OpenSearchService : ISearchService
 
         _logger.LogInformation("🔍 NLP ExtractedFilters: {Filters}", string.Join(", ", nlQuery.ExtractedFilters?.Select(kv => $"{kv.Key}={kv.Value}") ?? Array.Empty<string>()));
         
+        // File type filter
         if (nlQuery.ExtractedFilters.TryGetValue("filetype", out var fileType))
         {
             bool hasNonFiletypeKeywords = nlQuery.Keywords
@@ -713,6 +791,7 @@ public class OpenSearchService : ISearchService
 
             if (!hasNonFiletypeKeywords && hasFiletypeKeyword && nlQuery.Keywords.Count == 1)
             {
+                // Only keyword is file type — don't filter, search instead
                 _logger.LogInformation("⏭️  Skipping filetype filter — only keyword is filetype '{KW}', will search instead", string.Join(", ", nlQuery.Keywords));
             }
             else if (!hasNonFiletypeKeywords)
@@ -726,6 +805,7 @@ public class OpenSearchService : ISearchService
             }
         }
 
+        // Category filter from entities
         var categoryEntity = nlQuery.Entities.FirstOrDefault(e => e.StartsWith("CATEGORY:"));
         if (categoryEntity != null && request.Categories == null)
         {
@@ -735,16 +815,16 @@ public class OpenSearchService : ISearchService
         }
     }
 
-    // ── NLP summary ───────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Builds a human-readable NLP summary for display.
+    /// </summary>
     private static string? BuildNlpSummary(NaturalLanguageQuery? nlQuery)
     {
         if (nlQuery == null) return null;
         var parts = new List<string>();
 
         var category = nlQuery.Entities
-            .FirstOrDefault(e => e.StartsWith("CATEGORY:"))
-            ?["CATEGORY:".Length..];
+            .FirstOrDefault(e => e.StartsWith("CATEGORY:"))?["CATEGORY:".Length..];
         if (!string.IsNullOrEmpty(category)) parts.Add(category);
 
         var fileType = nlQuery.ExtractedFilters?.GetValueOrDefault("filetype");
@@ -764,8 +844,9 @@ public class OpenSearchService : ISearchService
         return parts.Any() ? string.Join(" · ", parts) : null;
     }
 
-    // ── BM25 query builder ────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Builds the BM25 query with filters, scoring, and ACL enforcement.
+    /// </summary>
     private QueryContainer BuildPrecisionQuery(
         QueryContainerDescriptor<DocumentIndexModel> q,
         string query,
@@ -775,22 +856,16 @@ public class OpenSearchService : ISearchService
         var shouldQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
         var filterQueries = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>();
 
-        // ── Hard filter: only indexed documents ───────────────────────────────
+        // Hard filter: only indexed documents
         filterQueries.Add(fq => fq.Term(t => t.Field("status").Value("Indexed")));
 
-        // ── ACL filter for non-admin users ─────────────────────────────────────
-        // Admin bypasses this filter entirely — sees all documents.
-        // Everyone else must satisfy at least one of:
-        //   1. Document is explicitly open (accessLevel == "open")
-        //   2. User's ID is in allowedUserIds
-        //   3. Document's category is in the user's AllowedCategories list
-        // If user is authenticated but UserId is null, return no results to prevent data leakage
+        // ACL filter for non-admin users
         bool isNonAdminWithValidId = request.UserRole != "Admin" && !string.IsNullOrEmpty(request.UserId);
         bool isNonAdminWithoutId = request.UserRole != "Admin" && string.IsNullOrEmpty(request.UserId);
 
         if (isNonAdminWithoutId)
         {
-            // User is not Admin but has no UserId - return no results
+            // Return no results
             filterQueries.Add(fq => fq.Term(t => t.Field("id").Value(Guid.Empty.ToString())));
         }
         else if (isNonAdminWithValidId)
@@ -800,16 +875,13 @@ public class OpenSearchService : ISearchService
 
             var aclShould = new List<Func<QueryContainerDescriptor<DocumentIndexModel>, QueryContainer>>
             {
-                // Path 1 — document is open to all authenticated users
                 s => s.Term(t => t.Field("accessLevel").Value("open")),
-                // Path 2 — user has an explicit ACL grant
                 s => s.Term(t => t.Field("allowedUserIds").Value(userId))
             };
 
-            // Path 3 — category-based access (user's AllowedCategories list)
             foreach (var cat in cats)
             {
-                var c = cat; // capture loop variable
+                var c = cat;
                 aclShould.Add(s => s.Term(t => t.Field("category.keyword").Value(c)));
             }
 
@@ -818,7 +890,7 @@ public class OpenSearchService : ISearchService
                 .MinimumShouldMatch(1)));
         }
 
-        // ── Optional filters ──────────────────────────────────────────────────
+        // Optional filters
         if (request.ContentTypes?.Any() == true)
             filterQueries.Add(ctq => ctq.Terms(t => t
                 .Field(d => d.ContentType).Terms(request.ContentTypes)));
@@ -839,6 +911,7 @@ public class OpenSearchService : ISearchService
             filterQueries.Add(tq => tq.Terms(t => t
                 .Field(d => d.Tags).Terms(request.Tags)));
 
+        // Date range filter
         if (request.FromDate.HasValue || request.ToDate.HasValue)
             filterQueries.Add(dq => dq.Bool(b => b
                 .Should(
@@ -854,21 +927,24 @@ public class OpenSearchService : ISearchService
                             .LessThanOrEquals(request.ToDate))))
                 ).MinimumShouldMatch(1)));
 
-        // ── Scoring queries ───────────────────────────────────────────────────
+        // Scoring queries
         if (!string.IsNullOrWhiteSpace(query))
         {
             var cleanQuery = query.Trim();
             var normalized = NormalizeSearchQuery(cleanQuery);
             var variations = GenerateQueryVariations(cleanQuery);
 
+            // Add category aliases
             foreach (var token in cleanQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (CategoryAliases.TryGetValue(token, out var aliasedCategory))
                     variations.Add(aliasedCategory);
 
+            // Exact phrase match on title (highest boost)
             if (cleanQuery.Contains(' '))
                 shouldQueries.Add(sq => sq.MatchPhrase(mp => mp
                     .Field(d => d.Title).Query(cleanQuery).Boost(100.0)));
 
+            // Build query variations with boosts
             foreach (var v in variations)
             {
                 shouldQueries.Add(sq => sq.Term(t => t.Field("category.keyword").Value(v).CaseInsensitive(true).Boost(80.0)));
@@ -881,6 +957,7 @@ public class OpenSearchService : ISearchService
                 shouldQueries.Add(sq => sq.Wildcard(w => w.Field(d => d.Title).Value($"*{v.ToLower()}*").CaseInsensitive(true).Boost(20.0)));
             }
 
+            // Additional query types
             shouldQueries.Add(sq => sq.MatchPhrasePrefix(mpp => mpp
                 .Field(d => d.Title).Query(cleanQuery).MaxExpansions(20).Boost(35.0)));
             shouldQueries.Add(sq => sq.Match(m => m
@@ -888,12 +965,14 @@ public class OpenSearchService : ISearchService
             shouldQueries.Add(sq => sq.Match(m => m
                 .Field(d => d.OcrText).Query(normalized).Operator(Operator.Or).MinimumShouldMatch("30%").Boost(5.0)));
 
+            // NLP keyword queries
             if (nlQuery?.Keywords?.Any() == true)
             {
                 foreach (var kw in nlQuery.Keywords)
                 {
                     if (System.Text.RegularExpressions.Regex.IsMatch(kw, @"^\d{4}$"))
                     {
+                        // Year keyword — boost all fields
                         shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.ExtractedText).Query(kw).Boost(8.0)));
                         shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.OcrText).Query(kw).Boost(4.0)));
                         shouldQueries.Add(sq => sq.Match(m => m.Field(d => d.Title).Query(kw).Boost(6.0)));
@@ -917,11 +996,9 @@ public class OpenSearchService : ISearchService
             }
         }
 
-        // Use dis_max for better performance and more predictable relevance
-        // Instead of flat bool.should with many queries
+        // Build final query using dis_max for better relevance
         if (shouldQueries.Any())
         {
-            // Split into two tiers: high-boost exact matches vs lower-boost fuzzy matches
             var exactMatches = shouldQueries.Take(10).ToList();
             var fuzzyMatches = shouldQueries.Skip(10).ToList();
 
@@ -930,7 +1007,6 @@ public class OpenSearchService : ISearchService
                 var bq = b;
                 if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
 
-                // Use dis_max for the top queries (exact matches)
                 if (exactMatches.Any())
                 {
                     bq = bq.Should(m => m.DisMax(dm => dm
@@ -938,7 +1014,6 @@ public class OpenSearchService : ISearchService
                         .TieBreaker(0.3)));
                 }
 
-                // Add remaining queries as optional with lower weight
                 if (fuzzyMatches.Any())
                 {
                     bq = bq.Should(fuzzyMatches.ToArray())
@@ -964,15 +1039,21 @@ public class OpenSearchService : ISearchService
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Normalizes query by handling common plural forms.
+    /// </summary>
     private static string NormalizeSearchQuery(string query)
     {
         if (string.IsNullOrWhiteSpace(query)) return query;
         var n = query.ToLower().Trim();
-        if (n.EndsWith("ies") && n.Length > 4) return n[..^3] + "y";
+        if (n.EndsWith("ies") && n.Length > 4) return n[..^3] + "y";  // factories → factory
         if (n.EndsWith("s") && n.Length > 2 && !n.EndsWith("ss")) return n.TrimEnd('s');
         return n;
     }
 
+    /// <summary>
+    /// Generates query variations for fuzzy matching.
+    /// </summary>
     private static List<string> GenerateQueryVariations(string query)
     {
         if (string.IsNullOrWhiteSpace(query)) return new();
@@ -986,12 +1067,9 @@ public class OpenSearchService : ISearchService
             .ToList();
     }
 
-    private static string CalculateMinimumShouldMatch(string query, int total)
-    {
-        if (string.IsNullOrWhiteSpace(query)) return "0";
-        return total <= 10 ? "1" : total <= 30 ? "2" : "3";
-    }
-
+    /// <summary>
+    /// Builds sort descriptor for search results.
+    /// </summary>
     private static SortDescriptor<DocumentIndexModel> BuildSort(
         SortDescriptor<DocumentIndexModel> sort, SortField sortBy, bool descending)
     {
@@ -1007,6 +1085,9 @@ public class OpenSearchService : ISearchService
         };
     }
 
+    /// <summary>
+    /// Builds aggregation descriptors for faceted search.
+    /// </summary>
     private static AggregationContainerDescriptor<DocumentIndexModel> BuildAggregations(
         AggregationContainerDescriptor<DocumentIndexModel> agg)
         => agg
@@ -1017,6 +1098,9 @@ public class OpenSearchService : ISearchService
                 .Field(doc => doc.CreatedAt)
                 .CalendarInterval(DateInterval.Month));
 
+    /// <summary>
+    /// Maps an OpenSearch hit to a <see cref="DocumentSearchHit"/>.
+    /// </summary>
     private static DocumentSearchHit MapToSearchHit(IHit<DocumentIndexModel> hit)
     {
         var highlights = hit.Highlight?.Values.SelectMany(v => v).ToList() ?? new();
@@ -1042,6 +1126,9 @@ public class OpenSearchService : ISearchService
         };
     }
 
+    /// <summary>
+    /// Maps a domain <see cref="Document"/> to an index model.
+    /// </summary>
     private DocumentIndexModel MapToIndexModel(Document document)
         => new()
         {
@@ -1060,9 +1147,12 @@ public class OpenSearchService : ISearchService
             Tags          = document.Tags,
             Category      = document.Category,
             Metadata      = SanitizeMetadata(document.Metadata)
-            // AllowedUserIds and CreatedByUserId are set in IndexDocumentAsync after the DB query
+            // ACL fields set in IndexDocumentAsync after DB query
         };
 
+    /// <summary>
+    /// Sanitizes metadata values for JSON serialization.
+    /// </summary>
     private static Dictionary<string, object>? SanitizeMetadata(Dictionary<string, object>? metadata)
     {
         if (metadata == null) return null;
@@ -1072,6 +1162,9 @@ public class OpenSearchService : ISearchService
         return result;
     }
 
+    /// <summary>
+    /// Flattens complex values to JSON-serializable types.
+    /// </summary>
     private static object FlattenValue(object? value)
     {
         if (value is null) return string.Empty;
@@ -1088,6 +1181,9 @@ public class OpenSearchService : ISearchService
         return value;
     }
 
+    /// <summary>
+    /// Maps file type string to MIME content type.
+    /// </summary>
     private static string MapFileTypeToContentType(string fileType)
         => fileType.ToLower() switch
         {
@@ -1102,6 +1198,9 @@ public class OpenSearchService : ISearchService
             _             => string.Empty
         };
 
+    /// <summary>
+    /// Extracts facet values from aggregation results.
+    /// </summary>
     private Dictionary<string, List<FacetValue>> ExtractFacets(
         IReadOnlyDictionary<string, IAggregate> aggregations)
     {
@@ -1118,16 +1217,19 @@ public class OpenSearchService : ISearchService
         return facets;
     }
 
-    // ── Pass-through implementations ──────────────────────────────────────────
+    // ── Pass-through implementations ─────────────────────────────────────────
 
+    /// <inheritdoc />
     public async Task<NaturalLanguageQuery> ProcessNaturalLanguageQueryAsync(
         string query, CancellationToken cancellationToken = default)
         => await _nlpService.UnderstandQueryAsync(query, cancellationToken);
 
+    /// <inheritdoc />
     public async Task<bool> UpdateDocumentIndexAsync(
         Document document, CancellationToken cancellationToken = default)
         => await IndexDocumentAsync(document, cancellationToken);
 
+    /// <inheritdoc />
     public async Task<bool> DeleteDocumentIndexAsync(
         Guid documentId, CancellationToken cancellationToken = default)
     {
@@ -1144,6 +1246,7 @@ public class OpenSearchService : ISearchService
         }
     }
 
+    /// <inheritdoc />
     public async Task<bool> BulkIndexDocumentsAsync(
         IEnumerable<Document> documents, CancellationToken cancellationToken = default)
     {
@@ -1153,10 +1256,9 @@ public class OpenSearchService : ISearchService
             var indexModels = new List<DocumentIndexModel>(docs.Count);
             var semaphore   = new SemaphoreSlim(4, 4);
 
-            // Batch-fetch ACLs for all documents in one query
+            // Batch-fetch ACLs for all documents
             var docIds = docs.Select(d => d.Id).ToList();
             
-            // First fetch all ACLs as raw data to avoid EF Core Guid issues
             var allAclRows = await _db.DocumentAcls
                 .Where(a => docIds.Contains(a.DocumentId) &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
@@ -1169,6 +1271,7 @@ public class OpenSearchService : ISearchService
                     g => g.Key,
                     g => g.Select(a => a.UserId.ToString()).ToList());
 
+            // Process documents in parallel with semaphore throttling
             var tasks = docs.Select(async doc =>
             {
                 var model         = MapToIndexModel(doc);
@@ -1213,11 +1316,13 @@ public class OpenSearchService : ISearchService
         }
     }
 
+    /// <inheritdoc />
     public async Task<List<DocumentSuggestion>> GetRelatedDocumentsAsync(
         Guid documentId, int count = 5, CancellationToken cancellationToken = default)
     {
         try
         {
+            // Try semantic similarity first
             var docResponse = await _client.GetAsync<DocumentIndexModel>(
                 documentId.ToString(), g => g.Index(_documentIndex), cancellationToken);
 
@@ -1250,6 +1355,7 @@ public class OpenSearchService : ISearchService
                 if (semanticSuggestions.Any()) return semanticSuggestions;
             }
 
+            // Fallback to More Like This
             var mltResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
                 .Index(_documentIndex)
                 .Size(count + 1)
@@ -1278,76 +1384,244 @@ public class OpenSearchService : ISearchService
     }
 }
 
-// ── Index document model ──────────────────────────────────────────────────────
-
 /// <summary>
-/// OpenSearch index document model.
-/// Embedding is mapped as knn_vector in Program.cs.
-/// AllowedUserIds / AccessLevel / CreatedByUserId are the ACL fields used for
-/// query-time row-level security — no JWT required.
+/// OpenSearch index document model for ged-documents index.
+/// Embedding field is mapped as knn_vector in Program.cs.
 /// </summary>
 public class DocumentIndexModel
 {
-    public Guid    Id          { get; set; }
-    public string  Title       { get; set; } = string.Empty;
+    /// <summary>
+    /// Document unique identifier.
+    /// </summary>
+    public Guid Id { get; set; }
+
+    /// <summary>
+    /// Document title.
+    /// </summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document description/summary.
+    /// </summary>
     public string? Description { get; set; }
-    public string  FileName    { get; set; } = string.Empty;
-    public string  ContentType { get; set; } = string.Empty;
-    public long    FileSize    { get; set; }
-    public DateTime  CreatedAt    { get; set; }
+
+    /// <summary>
+    /// Original filename.
+    /// </summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// MIME content type.
+    /// </summary>
+    public string ContentType { get; set; } = string.Empty;
+
+    /// <summary>
+    /// File size in bytes.
+    /// </summary>
+    public long FileSize { get; set; }
+
+    /// <summary>
+    /// Document creation timestamp.
+    /// </summary>
+    public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// Extracted document date (e.g., invoice date, contract effective date).
+    /// </summary>
     public DateTime? DocumentDate { get; set; }
-    public DateTime? ModifiedAt   { get; set; }
-    public string  Status       { get; set; } = "Indexed";
+
+    /// <summary>
+    /// Last modification timestamp.
+    /// </summary>
+    public DateTime? ModifiedAt { get; set; }
+
+    /// <summary>
+    /// Indexing status.
+    /// </summary>
+    public string Status { get; set; } = "Indexed";
+
+    /// <summary>
+    /// Extracted text content.
+    /// </summary>
     public string? ExtractedText { get; set; }
-    public string? OcrText       { get; set; }
-    public List<string>?              Tags     { get; set; }
-    public string?                    Category { get; set; }
+
+    /// <summary>
+    /// OCR-extracted text.
+    /// </summary>
+    public string? OcrText { get; set; }
+
+    /// <summary>
+    /// Document tags.
+    /// </summary>
+    public List<string>? Tags { get; set; }
+
+    /// <summary>
+    /// Document category.
+    /// </summary>
+    public string? Category { get; set; }
+
+    /// <summary>
+    /// Additional metadata.
+    /// </summary>
     public Dictionary<string, object>? Metadata { get; set; }
 
-    /// <summary>768-dim nomic-embed-text vector for kNN search.</summary>
+    /// <summary>
+    /// 768-dimensional nomic-embed-text vector for kNN search.
+    /// </summary>
     public float[]? Embedding { get; set; }
 
-    // ACL fields (denormalized from parent document)
+    // ── ACL fields for query-time row-level security ─────────────────────────
+
+    /// <summary>
+    /// User IDs with explicit access grants.
+    /// </summary>
     public List<string> AllowedUserIds { get; set; } = new();
 
+    /// <summary>
+    /// Access level: "open" or "restricted".
+    /// </summary>
     public string AccessLevel { get; set; } = "restricted";
 
-    /// <summary>Username of the user who uploaded the document.</summary>
+    /// <summary>
+    /// Username of document creator.
+    /// </summary>
     public string? CreatedByUserId { get; set; }
 }
 
-// ── Chunk models ──────────────────────────────────────────────────────────────
-
+/// <summary>
+/// OpenSearch index model for ged-chunks index (RAG chunk storage).
+/// </summary>
 public class ChunkIndexModel
 {
-    public Guid      DocumentId   { get; set; }
-    public string    ChunkId      { get; set; } = string.Empty;
-    public int       ChunkIndex   { get; set; }
-    public string    Text         { get; set; } = string.Empty;
-    public string    Title        { get; set; } = string.Empty;
-    public string?   Category     { get; set; }
-    public DateTime? DocumentDate { get; set; }
-    public string    FileName     { get; set; } = string.Empty;
-    public string    ContentType  { get; set; } = string.Empty;
-    public List<string>? Tags     { get; set; }
+    /// <summary>
+    /// Parent document ID.
+    /// </summary>
+    public Guid DocumentId { get; set; }
 
-    // ACL fields (denormalized from parent document)
+    /// <summary>
+    /// Unique chunk identifier.
+    /// </summary>
+    public string ChunkId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Zero-based chunk index within document.
+    /// </summary>
+    public int ChunkIndex { get; set; }
+
+    /// <summary>
+    /// Chunk text content.
+    /// </summary>
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Parent document title.
+    /// </summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document category.
+    /// </summary>
+    public string? Category { get; set; }
+
+    /// <summary>
+    /// Document date.
+    /// </summary>
+    public DateTime? DocumentDate { get; set; }
+
+    /// <summary>
+    /// Original filename.
+    /// </summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// MIME content type.
+    /// </summary>
+    public string ContentType { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document tags.
+    /// </summary>
+    public List<string>? Tags { get; set; }
+
+    /// <summary>
+    /// Chunk embedding vector.
+    /// </summary>
+    public float[]? Embedding { get; set; }
+
+    // ACL fields
+    /// <summary>
+    /// User IDs with access grants.
+    /// </summary>
     public List<string> AllowedUserIds { get; set; } = new();
+
+    /// <summary>
+    /// Access level: "open" or "restricted".
+    /// </summary>
     public string AccessLevel { get; set; } = "restricted";
+
+    /// <summary>
+    /// Document creator username.
+    /// </summary>
     public string? CreatedByUserId { get; set; }
 }
 
+/// <summary>
+/// Represents a search hit for a document chunk.
+/// </summary>
 public class ChunkSearchHit
 {
-    public string    ChunkId      { get; set; } = string.Empty;
-    public Guid      DocumentId   { get; set; }
-    public int       ChunkIndex   { get; set; }
-    public string    Text         { get; set; } = string.Empty;
-    public string    Title        { get; set; } = string.Empty;
-    public string?   Category     { get; set; }
+    /// <summary>
+    /// Unique chunk identifier.
+    /// </summary>
+    public string ChunkId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Parent document ID.
+    /// </summary>
+    public Guid DocumentId { get; set; }
+
+    /// <summary>
+    /// Zero-based chunk index.
+    /// </summary>
+    public int ChunkIndex { get; set; }
+
+    /// <summary>
+    /// Chunk text content.
+    /// </summary>
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document title.
+    /// </summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document category.
+    /// </summary>
+    public string? Category { get; set; }
+
+    /// <summary>
+    /// Document date.
+    /// </summary>
     public DateTime? DocumentDate { get; set; }
-    public string    FileName     { get; set; } = string.Empty;
-    public string    ContentType  { get; set; } = string.Empty;
-    public List<string>? Tags     { get; set; }
-    public float     Score        { get; set; }
+
+    /// <summary>
+    /// Filename.
+    /// </summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// MIME content type.
+    /// </summary>
+    public string ContentType { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Document tags.
+    /// </summary>
+    public List<string>? Tags { get; set; }
+
+    /// <summary>
+    /// Relevance/similarity score.
+    /// </summary>
+    public float Score { get; set; }
 }

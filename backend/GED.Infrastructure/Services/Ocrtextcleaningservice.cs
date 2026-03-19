@@ -8,28 +8,76 @@ namespace GED.Infrastructure.Services;
 
 /// <summary>
 /// Uses Ollama (local LLM) to clean up raw OCR text that contains common
-/// OCR artifacts: broken words, garbled characters, misread letters (0/O, 1/l/I),
+/// OCR artifacts such as broken words, garbled characters, misread letters (0/O, 1/l/I),
 /// random line breaks mid-word, stray symbols, etc.
-///
-/// This runs AFTER Tesseract and BEFORE date/metadata extraction so that
+/// 
+/// <para>
+/// This runs AFTER Tesseract extraction and BEFORE date/metadata extraction so that
 /// downstream services receive clean, readable text.
+/// </para>
+/// 
+/// <para>
+/// Text cleaning rules applied:
+/// <list type="bullet">
+///   <item>Fix broken words split across lines</item>
+///   <item>Correct misread characters (0→O, 1→l/I, rn→m)</item>
+///   <item>Remove stray symbols between words</item>
+///   <item>Fix extra spaces within words</item>
+///   <item>Add missing spaces between words</item>
+///   <item>Correct garbled numbers in dates</item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// Important constraints:
+/// <list type="bullet">
+///   <item>Preserves ALL original content — no summarization</item>
+///   <item>Preserves original structure (paragraphs, line breaks)</item>
+///   <item>Returns original text on any failure</item>
+/// </list>
+/// </para>
 /// </summary>
 public class OcrTextCleaningService
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<OcrTextCleaningService> _logger;
+
+    /// <summary>
+    /// Ollama API endpoint for text cleaning requests.
+    /// </summary>
     private readonly string _endpoint;
+
+    /// <summary>
+    /// Ollama model name for text cleaning.
+    /// </summary>
     private readonly string _model;
+
+    /// <summary>
+    /// Whether the cleaning service is enabled.
+    /// </summary>
     private readonly bool _enabled;
 
-    // Maximum characters sent to LLM in one call (keep prompt under context window)
+    /// <summary>
+    /// Maximum characters sent to LLM in one call (keeps prompt under context window).
+    /// </summary>
     private const int MaxCharsPerChunk = 4000;
 
-    // Minimum text length worth sending to LLM (very short text = not worth the round-trip)
+    /// <summary>
+    /// Minimum text length worth sending to LLM (very short text = not worth the round-trip).
+    /// </summary>
     private const int MinCharsToClean = 20;
 
+    /// <summary>
+    /// Timeout for each LLM cleaning request in seconds.
+    /// </summary>
     private const int ChunkTimeoutSeconds = 60;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="OcrTextCleaningService"/>.
+    /// </summary>
+    /// <param name="httpClient">HTTP client for Ollama API calls.</param>
+    /// <param name="logger">Logger for cleaning events.</param>
+    /// <param name="configuration">Application configuration with NLP:* settings.</param>
     public OcrTextCleaningService(
         HttpClient httpClient,
         ILogger<OcrTextCleaningService> logger,
@@ -44,8 +92,22 @@ public class OcrTextCleaningService
 
     /// <summary>
     /// Cleans OCR-extracted text using Ollama.
-    /// Returns the original text unchanged if cleaning fails or is disabled.
     /// </summary>
+    /// <param name="rawOcrText">Raw text from OCR to clean.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// Cleaned text, or the original text if cleaning fails/disabled.
+    /// </returns>
+    /// <remarks>
+    /// Returns the original text unchanged if:
+    /// <list type="bullet">
+    ///   <item>NLP is disabled</item>
+    ///   <item>Text is empty or whitespace</item>
+    ///   <item>Text is shorter than MinCharsToClean</item>
+    ///   <item>LLM returns empty text</item>
+    ///   <item>Cleaned text is less than 30% of original (suspicious)</item>
+    /// </list>
+    /// </remarks>
     public async Task<string> CleanOcrTextAsync(
         string rawOcrText,
         CancellationToken cancellationToken = default)
@@ -117,8 +179,12 @@ public class OcrTextCleaningService
         }
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Cleans a single chunk of OCR text using Ollama.
+    /// </summary>
+    /// <param name="chunk">Text chunk to clean.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Cleaned text, or original chunk on failure.</returns>
     private async Task<string> CleanChunkAsync(string chunk, CancellationToken cancellationToken)
     {
         var prompt = BuildCleaningPrompt(chunk);
@@ -128,7 +194,7 @@ public class OcrTextCleaningService
             model       = _model,
             prompt      = prompt,
             stream      = false,
-            temperature = 0.1,   // Very low temperature — we want deterministic correction, not creativity
+            temperature = 0.1,   // Very low temperature — deterministic correction, not creativity
             options = new
             {
                 num_predict = 2048  // Allow enough tokens for the cleaned output
@@ -165,6 +231,12 @@ public class OcrTextCleaningService
         return cleaned;
     }
 
+    /// <summary>
+    /// Cleans long text by splitting into paragraphs and processing each chunk.
+    /// </summary>
+    /// <param name="text">Full text to clean.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Cleaned text.</returns>
     private async Task<string> CleanInChunksAsync(string text, CancellationToken cancellationToken)
     {
         // Split on paragraph boundaries to avoid cutting sentences mid-word
@@ -202,9 +274,13 @@ public class OcrTextCleaningService
                 await Task.Delay(100, cancellationToken);
         }
 
+        // Rejoin with paragraph separators
         return string.Join("\n\n", cleanedChunks);
     }
 
+    /// <summary>
+    /// Builds the prompt for OCR text cleaning with explicit rules.
+    /// </summary>
     private static string BuildCleaningPrompt(string rawText)
     {
         return $@"You are an OCR text correction assistant. Your job is to clean up text that was extracted from an image using OCR (Optical Character Recognition). OCR often produces errors like:
@@ -231,6 +307,9 @@ RAW OCR TEXT:
 CLEANED TEXT:";
     }
 
+    /// <summary>
+    /// Strips markdown code fences from text.
+    /// </summary>
     private static string StripMarkdownFences(string text)
     {
         // Remove ```...``` blocks if the LLM wrapped the output
@@ -239,8 +318,14 @@ CLEANED TEXT:";
         return stripped.Trim();
     }
 
+    /// <summary>
+    /// Ollama API response wrapper.
+    /// </summary>
     private class OllamaResponse
     {
+        /// <summary>
+        /// The generated text response from Ollama.
+        /// </summary>
         public string? Response { get; set; }
     }
 }

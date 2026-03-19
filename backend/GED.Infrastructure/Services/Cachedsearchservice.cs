@@ -8,27 +8,53 @@ using System.Text.Json;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Decorator around ISearchService that caches search results in Redis.
-/// Cache key = SHA256 of the serialized SearchRequest so different callers
-/// with identical parameters share the same cached entry.
-///
-/// Only SearchAsync results are cached — index mutations (Index/Update/Delete)
-/// also invalidate the cache so stale results are never served after writes.
+/// Decorator around <see cref="ISearchService"/> that caches search results in Redis.
+/// 
+/// Cache key = SHA256 hash of the serialized <see cref="SearchRequest"/> plus the current
+/// cache generation, so different callers with identical parameters share the same cached entry.
+/// 
+/// Only <see cref="SearchAsync"/> results are cached — index mutations (Index/Update/Delete)
+/// also invalidate the cache via generation increment, ensuring stale results are never served after writes.
+/// 
+/// Cache invalidation strategy uses a "flush tag" approach: instead of enumerating all cached
+/// search keys (which is O(N) in Redis), we increment a generation counter. Since
+/// <see cref="BuildCacheKeyAsync"/> includes the generation in the hash, all previous
+/// cache entries become logically invalid without needing deletion.
 /// </summary>
 public class CachedSearchService : ISearchService
 {
     private readonly ISearchService          _inner;
     private readonly IDistributedCache       _cache;
     private readonly ILogger<CachedSearchService> _logger;
-    private readonly TimeSpan                _ttl;
-    private readonly bool                    _enabled;
 
+    /// <summary>
+    /// Time-to-live for cached search results.
+    /// Includes ±20s jitter to prevent thundering herd on cache expiration.
+    /// </summary>
+    private readonly TimeSpan _ttl;
+
+    /// <summary>
+    /// Whether Redis caching is enabled. When false, all requests pass through to the inner service.
+    /// </summary>
+    private readonly bool     _enabled;
+
+    /// <summary>
+    /// JSON serialization options for cache key generation and result serialization.
+    /// Uses camelCase naming for consistency with JSON standards.
+    /// </summary>
     private static readonly JsonSerializerOptions _json = new()
     {
         PropertyNamingPolicy        = JsonNamingPolicy.CamelCase,
         WriteIndented               = false
     };
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="CachedSearchService"/>.
+    /// </summary>
+    /// <param name="inner">The wrapped search service to cache results from.</param>
+    /// <param name="cache">The distributed cache implementation (Redis).</param>
+    /// <param name="logger">Logger for cache events.</param>
+    /// <param name="configuration">Application configuration with Redis:* settings.</param>
     public CachedSearchService(
         ISearchService          inner,
         IDistributedCache       cache,
@@ -40,17 +66,17 @@ public class CachedSearchService : ISearchService
         _logger  = logger;
         _enabled = configuration.GetValue<bool>("Redis:Enabled", true);
         _ttl = TimeSpan.FromSeconds(
-    configuration.GetValue<int>("Redis:SearchCacheTtlSeconds", 120)
-    + Random.Shared.Next(-20, 20)  // ±20s jitter
-);
+            configuration.GetValue<int>("Redis:SearchCacheTtlSeconds", 120)
+            + Random.Shared.Next(-20, 20)  // ±20s jitter to prevent thundering herd
+        );
     }
 
-    // ── ISearchService ────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<SearchResult> SearchAsync(
         SearchRequest request,
         CancellationToken cancellationToken = default)
     {
+        // Bypass cache entirely when disabled
         if (!_enabled)
             return await _inner.SearchAsync(request, cancellationToken);
 
@@ -98,11 +124,7 @@ public class CachedSearchService : ISearchService
         return searchResult;
     }
 
-    // ── Write-through cache invalidation ─────────────────────────────────────
-    // When a document is written (indexed / updated / deleted) we flush the
-    // search cache so the next search re-reads from OpenSearch.
-    // We use a "flush tag" key rather than enumerating all search keys.
-
+    /// <inheritdoc />
     public async Task<bool> IndexDocumentAsync(
         Document document, CancellationToken cancellationToken = default)
     {
@@ -111,6 +133,7 @@ public class CachedSearchService : ISearchService
         return ok;
     }
 
+    /// <inheritdoc />
     public async Task<bool> UpdateDocumentIndexAsync(
         Document document, CancellationToken cancellationToken = default)
     {
@@ -119,6 +142,7 @@ public class CachedSearchService : ISearchService
         return ok;
     }
 
+    /// <inheritdoc />
     public async Task<bool> DeleteDocumentIndexAsync(
         Guid documentId, CancellationToken cancellationToken = default)
     {
@@ -127,6 +151,7 @@ public class CachedSearchService : ISearchService
         return ok;
     }
 
+    /// <inheritdoc />
     public async Task<bool> BulkIndexDocumentsAsync(
         IEnumerable<Document> documents, CancellationToken cancellationToken = default)
     {
@@ -135,23 +160,33 @@ public class CachedSearchService : ISearchService
         return ok;
     }
 
-    // ── Pass-through (not cached) ─────────────────────────────────────────────
-
+    /// <inheritdoc />
     public Task<List<DocumentSuggestion>> GetRelatedDocumentsAsync(
         Guid documentId, int count = 5, CancellationToken cancellationToken = default)
         => _inner.GetRelatedDocumentsAsync(documentId, count, cancellationToken);
 
+    /// <inheritdoc />
     public Task<NaturalLanguageQuery> ProcessNaturalLanguageQueryAsync(
         string query, CancellationToken cancellationToken = default)
         => _inner.ProcessNaturalLanguageQueryAsync(query, cancellationToken);
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /// <inheritdoc />
+    public Task IndexChunksAsync(Document document, List<DocumentChunk> chunks, CancellationToken cancellationToken = default)
+    {
+        // Forward to inner service (chunks are not cached separately)
+        return _inner.IndexChunksAsync(document, chunks, cancellationToken);
+    }
 
     /// <summary>
-    /// Deterministic cache key derived from the full search request.
-    /// Uses SHA256 so keys are a fixed length regardless of query complexity.
-    /// Prefix "ged:search:" lets us namespace keys in a shared Redis instance.
+    /// Builds a deterministic cache key from the search request.
+    /// 
+    /// The key is a SHA256 hash of "generation:serialized_request", prefixed with "ged:search:".
+    /// The generation is read from Redis and included in the key — when the generation
+    /// changes, all previous keys become logically invalid without needing enumeration.
     /// </summary>
+    /// <param name="request">The search request to generate a key for.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A cache key string prefixed with "ged:search:".</returns>
     private async Task<string> BuildCacheKeyAsync(
         SearchRequest request, CancellationToken ct)
     {
@@ -172,21 +207,26 @@ public class CachedSearchService : ISearchService
     }
 
     /// <summary>
-    /// Increments a "generation" counter in Redis.
-    /// BuildCacheKey includes the current generation, so bumping it
-    /// logically invalidates all previously cached search results without
-    /// needing to enumerate keys (Redis SCAN is O(N) and dangerous in prod).
+    /// Invalidates all cached search results by incrementing the generation counter.
+    /// 
+    /// This uses a generation-based invalidation strategy: instead of enumerating all
+    /// cached search keys (which is O(N) and dangerous in production Redis),
+    /// we increment a single "ged:cache:generation" key. Since BuildCacheKey
+    /// includes the current generation in the hash, all previously cached
+    /// searches become logically invalid with O(1) cost.
     /// </summary>
     private async Task InvalidateCacheAsync(CancellationToken cancellationToken)
     {
         if (!_enabled) return;
         try
         {
+            // Set generation to current Unix timestamp (milliseconds)
             await _cache.SetStringAsync(
                 "ged:cache:generation",
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(),
                 new DistributedCacheEntryOptions
                 {
+                    // Keep generation slightly longer than TTL to ensure no overlap
                     AbsoluteExpirationRelativeToNow = _ttl + TimeSpan.FromMinutes(5)
                 },
                 cancellationToken);
@@ -197,10 +237,5 @@ public class CachedSearchService : ISearchService
         {
             _logger.LogWarning(ex, "Cache invalidation failed — Redis may be unavailable");
         }
-    }
-
-    public async Task IndexChunksAsync(Document document, List<DocumentChunk> chunks, CancellationToken cancellationToken = default)
-    {
-        await _inner.IndexChunksAsync(document, chunks, cancellationToken);
     }
 }

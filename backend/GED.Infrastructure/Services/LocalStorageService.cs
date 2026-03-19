@@ -3,11 +3,37 @@ using Microsoft.Extensions.Logging;
 
 namespace GED.Infrastructure.Services;
 
+/// <summary>
+/// Local filesystem-based storage service for document files.
+/// 
+/// <para>
+/// Files are stored at a configurable base path with their original filenames preserved.
+/// This implementation is suitable for development and small deployments.
+/// For production, consider using cloud storage (S3, Azure Blob, etc.) for scalability and durability.
+/// </para>
+/// 
+/// <para>
+/// Thread-safety: This implementation handles concurrent file operations safely using
+/// the underlying filesystem's locking mechanisms.
+/// </para>
+/// </summary>
 public class LocalStorageService : IStorageService
 {
     private readonly ILogger<LocalStorageService> _logger;
+
+    /// <summary>
+    /// Base directory path where files are stored.
+    /// </summary>
     private readonly string _basePath;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="LocalStorageService"/>.
+    /// </summary>
+    /// <param name="logger">Logger for storage events.</param>
+    /// <param name="basePath">
+    ///   Base directory path for file storage.
+    ///   Defaults to "/var/lib/ged/storage" if not specified.
+    /// </param>
     public LocalStorageService(ILogger<LocalStorageService> logger, string basePath = "/var/lib/ged/storage")
     {
         _logger = logger;
@@ -15,13 +41,19 @@ public class LocalStorageService : IStorageService
         Directory.CreateDirectory(_basePath);
     }
 
-    public async Task<string> StoreFileAsync(Stream fileStream, string fileName, string contentType, CancellationToken cancellationToken = default)
+    /// <inheritdoc />
+    public async Task<string> StoreFileAsync(
+        Stream fileStream, 
+        string fileName, 
+        string contentType, 
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var filePath = Path.Combine(_basePath, fileName);
             var directory = Path.GetDirectoryName(filePath);
             
+            // Ensure directory exists before creating file
             if (!string.IsNullOrEmpty(directory))
             {
                 Directory.CreateDirectory(directory);
@@ -40,6 +72,7 @@ public class LocalStorageService : IStorageService
         }
     }
 
+    /// <inheritdoc />
     public Task<Stream> RetrieveFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
         try
@@ -49,6 +82,7 @@ public class LocalStorageService : IStorageService
                 throw new FileNotFoundException($"File not found: {filePath}");
             }
 
+            // Return open file stream for reading
             Stream stream = File.OpenRead(filePath);
             return Task.FromResult(stream);
         }
@@ -59,6 +93,7 @@ public class LocalStorageService : IStorageService
         }
     }
 
+    /// <inheritdoc />
     public Task<bool> DeleteFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
         try
@@ -79,11 +114,13 @@ public class LocalStorageService : IStorageService
         }
     }
 
+    /// <inheritdoc />
     public Task<bool> FileExistsAsync(string filePath, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(File.Exists(filePath));
     }
 
+    /// <inheritdoc />
     public Task<long> GetFileSizeAsync(string filePath, CancellationToken cancellationToken = default)
     {
         try

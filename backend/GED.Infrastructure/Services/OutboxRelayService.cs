@@ -9,32 +9,81 @@ using System.Text.Json;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Outbox Relay: polls the outbox_messages table every 5 seconds and publishes
-/// any unprocessed messages to RabbitMQ.
-///
-/// This is the second half of the Outbox Pattern. It ensures OCR jobs are
-/// delivered to RabbitMQ even if the broker was temporarily unavailable during upload.
-///
+/// Outbox pattern relay that ensures reliable message delivery to RabbitMQ.
+/// 
+/// <para>
+/// This is the second half of the Outbox Pattern. It polls the outbox_messages
+/// table every 5 seconds and publishes any unprocessed messages to RabbitMQ.
+/// </para>
+/// 
+/// <para>
 /// Key properties:
-/// - At-least-once delivery (idempotent consumers should handle duplicates)
-/// - Max 5 retry attempts per message (prevents infinite retry loops)
-/// - Processes up to 20 messages per poll cycle (backpressure)
-/// - Uses scoped DI to get fresh DbContext per cycle (thread-safe)
+/// <list type="bullet">
+///   <item>
+///     <term>At-least-once delivery</term>
+///     <description>
+///       Messages are published until acknowledged. Idempotent consumers should handle duplicates.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Retry limit</term>
+///     <description>
+///       Max 5 retry attempts per message to prevent infinite retry loops.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Backpressure</term>
+///     <description>
+///       Processes up to 20 messages per poll cycle.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Thread safety</term>
+///     <description>
+///       Uses scoped DI to get fresh DbContext per cycle.
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// This approach ensures OCR jobs are delivered to RabbitMQ even if the broker
+/// was temporarily unavailable during document upload. The upload transaction
+/// commits both the document and the outbox message atomically.
+/// </para>
 /// </summary>
 public class OutboxRelayService : BackgroundService
 {
-    private readonly IServiceProvider            _sp;
+    private readonly IServiceProvider _sp;
     private readonly ILogger<OutboxRelayService> _logger;
-    private readonly TimeSpan                    _pollInterval = TimeSpan.FromSeconds(5);
-    private const    int                         MaxRetries    = 5;
-    private const    int                         BatchSize     = 20;
 
+    /// <summary>
+    /// Polling interval between relay cycles.
+    /// </summary>
+    private readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Maximum retry attempts before giving up on a message.
+    /// </summary>
+    private const int MaxRetries = 5;
+
+    /// <summary>
+    /// Maximum messages to process per poll cycle.
+    /// </summary>
+    private const int BatchSize = 20;
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="OutboxRelayService"/>.
+    /// </summary>
+    /// <param name="sp">Service provider for creating scoped dependencies.</param>
+    /// <param name="logger">Logger for relay events.</param>
     public OutboxRelayService(IServiceProvider sp, ILogger<OutboxRelayService> logger)
     {
         _sp     = sp;
         _logger = logger;
     }
 
+    /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("📬 Outbox relay started (polling every {Interval}s)", _pollInterval.TotalSeconds);
@@ -61,6 +110,9 @@ public class OutboxRelayService : BackgroundService
         _logger.LogInformation("📪 Outbox relay stopped");
     }
 
+    /// <summary>
+    /// Processes pending outbox messages by publishing them to RabbitMQ.
+    /// </summary>
     private async Task ProcessPendingMessagesAsync(CancellationToken ct)
     {
         using var scope  = _sp.CreateScope();
@@ -108,27 +160,32 @@ public class OutboxRelayService : BackgroundService
             }
         }
 
-        // Persist all state changes (ProcessedAt + RetryCount) in one round-trip
+        // Persist all state changes (ProcessedAt + RetryCount + Error) in one round-trip
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>
+    /// Publishes an outbox message to the appropriate RabbitMQ queue.
+    /// </summary>
+    /// <param name="rabbitMq">RabbitMQ service for publishing.</param>
+    /// <param name="msg">Outbox message to publish.</param>
+    /// <param name="ct">Cancellation token.</param>
     private static async Task PublishMessageAsync(
-    RabbitMqService rabbitMq, OutboxMessage msg, CancellationToken ct)
-{
-    var queueName = msg.Type switch
+        RabbitMqService rabbitMq, OutboxMessage msg, CancellationToken ct)
     {
-        "OcrJob" => "ocr-queue",
-        _        => throw new InvalidOperationException($"Unknown outbox message type: {msg.Type}")
-    };
+        // Route to appropriate queue based on message type
+        var queueName = msg.Type switch
+        {
+            "OcrJob" => "ocr-queue",
+            _        => throw new InvalidOperationException($"Unknown outbox message type: {msg.Type}")
+        };
 
-    // ✅ FIX: msg.Payload is already a JSON string.
-    // Passing it directly to PublishAsync<string> causes double-serialization
-    // (the string gets JSON-encoded again, wrapping it in quotes).
-    // Deserialize to the concrete type first so PublishAsync<T> serializes an object.
-    var ocrJob = JsonSerializer.Deserialize<OcrJobMessage>(msg.Payload,
-        new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-        ?? throw new InvalidOperationException("Failed to deserialize OcrJob payload");
+        // Deserialize payload to concrete type before publishing
+        // This prevents double-serialization when PublishAsync<T> serializes the object
+        var ocrJob = JsonSerializer.Deserialize<OcrJobMessage>(msg.Payload,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidOperationException("Failed to deserialize OcrJob payload");
 
-    await rabbitMq.PublishAsync(queueName, ocrJob, ct);
-}
+        await rabbitMq.PublishAsync(queueName, ocrJob, ct);
+    }
 }

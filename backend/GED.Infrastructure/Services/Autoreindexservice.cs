@@ -9,21 +9,78 @@ using Microsoft.Extensions.Logging;
 
 namespace GED.Infrastructure.Services;
 
+/// <summary>
+/// Background service that automatically maintains search index consistency.
+/// 
+/// This service runs three maintenance tasks at configurable intervals:
+/// <list type="number">
+///   <item>
+///     <term>Stale Document Re-indexing</term>
+///     <description>Documents that have been modified since their last indexing are re-indexed.</description>
+///   </item>
+///   <item>
+///     <term>Missing Document Detection</term>
+///     <description>Documents marked as Indexed but missing from OpenSearch are re-indexed.</description>
+///   </item>
+///   <item>
+///     <term>Failed Document Retry</term>
+///     <description>Documents with Failed status are retried for indexing.</description>
+///   </item>
+/// </list>
+/// 
+/// All intervals and batch sizes are configurable via appsettings.json.
+/// </summary>
 public class AutoReindexService : BackgroundService
 {
     private readonly IServiceProvider         _serviceProvider;
     private readonly ILogger<AutoReindexService> _logger;
 
+    /// <summary>
+    /// Interval between consecutive checks for stale documents.
+    /// </summary>
     private readonly TimeSpan _staleInterval;
+
+    /// <summary>
+    /// Interval between consecutive checks for missing documents in OpenSearch.
+    /// </summary>
     private readonly TimeSpan _missingInterval;
+
+    /// <summary>
+    /// Interval between consecutive retry attempts for failed documents.
+    /// </summary>
     private readonly TimeSpan _failedInterval;
+
+    /// <summary>
+    /// Maximum number of documents to process per batch.
+    /// </summary>
     private readonly int      _batchSize;
+
+    /// <summary>
+    /// Whether the service is enabled. When false, the service returns immediately.
+    /// </summary>
     private readonly bool     _enabled;
 
-    private DateTime _lastStaleCheck   = DateTime.MinValue;
-    private DateTime _lastMissingCheck = DateTime.MinValue;
-    private DateTime _lastFailedCheck  = DateTime.MinValue;
+    /// <summary>
+    /// Timestamp of the last stale document check (UTC).
+    /// </summary>
+    private DateTime _lastStaleCheck   = DateTime.UtcNow;
 
+    /// <summary>
+    /// Timestamp of the last missing document check (UTC).
+    /// </summary>
+    private DateTime _lastMissingCheck = DateTime.UtcNow;
+
+    /// <summary>
+    /// Timestamp of the last failed document retry check (UTC).
+    /// </summary>
+    private DateTime _lastFailedCheck  = DateTime.UtcNow;
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="AutoReindexService"/>.
+    /// </summary>
+    /// <param name="serviceProvider">Service provider for creating scoped dependencies.</param>
+    /// <param name="logger">Logger for service events.</param>
+    /// <param name="configuration">Application configuration with Reindex:* settings.</param>
     public AutoReindexService(
         IServiceProvider          serviceProvider,
         ILogger<AutoReindexService> logger,
@@ -41,6 +98,7 @@ public class AutoReindexService : BackgroundService
                                configuration.GetValue<double>("Reindex:FailedRetryIntervalMinutes", 30));
     }
 
+    /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_enabled)
@@ -55,6 +113,7 @@ public class AutoReindexService : BackgroundService
             _missingInterval.TotalMinutes,
             _failedInterval.TotalMinutes);
 
+        // Wait for system to stabilize before starting checks
         await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -63,18 +122,21 @@ public class AutoReindexService : BackgroundService
 
             try
             {
+                // Check and process stale documents
                 if (now - _lastStaleCheck >= _staleInterval)
                 {
                     await ReindexStaleDocumentsAsync(stoppingToken);
                     _lastStaleCheck = DateTime.UtcNow;
                 }
 
+                // Check for documents missing from OpenSearch
                 if (now - _lastMissingCheck >= _missingInterval)
                 {
                     await ReindexMissingDocumentsAsync(stoppingToken);
                     _lastMissingCheck = DateTime.UtcNow;
                 }
 
+                // Retry failed document indexing
                 if (now - _lastFailedCheck >= _failedInterval)
                 {
                     await RetryFailedDocumentsAsync(stoppingToken);
@@ -90,12 +152,17 @@ public class AutoReindexService : BackgroundService
                 _logger.LogError(ex, "Unhandled error in AutoReindexService loop");
             }
 
+            // Wait 1 minute before next iteration
             await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
         }
 
         _logger.LogInformation("🛑 AutoReindexService stopped");
     }
 
+    /// <summary>
+    /// Re-indexes documents that have been modified since their last indexing.
+    /// Compares <c>ModifiedAt</c> against <c>last_indexed_at</c> metadata.
+    /// </summary>
     private async Task ReindexStaleDocumentsAsync(CancellationToken ct)
     {
         using var scope        = _serviceProvider.CreateScope();
@@ -104,6 +171,7 @@ public class AutoReindexService : BackgroundService
 
         try
         {
+            // Fetch candidate documents (modified after indexing)
             var candidates = await db.Documents
                 .AsNoTracking()
                 .Where(d => d.Status == DocumentStatus.Indexed &&
@@ -112,6 +180,7 @@ public class AutoReindexService : BackgroundService
                 .Take(_batchSize * 2)
                 .ToListAsync(ct);
 
+            // Filter to only truly stale documents
             var stale = candidates.Where(d =>
             {
                 if (d.Metadata == null) return true;
@@ -128,9 +197,11 @@ public class AutoReindexService : BackgroundService
 
             _logger.LogInformation("🔄 Re-indexing {Count} stale documents", stale.Count);
 
+            // Convert and bulk index
             var domainDocs = stale.Select(MapToDomain).ToList();
             await searchService.BulkIndexDocumentsAsync(domainDocs, ct);
 
+            // Update last_indexed_at metadata for each re-indexed document
             using var writeScope = _serviceProvider.CreateScope();
             var writeDb          = writeScope.ServiceProvider.GetRequiredService<GedDbContext>();
 
@@ -152,6 +223,10 @@ public class AutoReindexService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Detects and re-indexes documents that exist in the database but are missing from OpenSearch.
+    /// Uses multi-get API to check existence without full re-indexing.
+    /// </summary>
     private async Task ReindexMissingDocumentsAsync(CancellationToken ct)
     {
         using var scope   = _serviceProvider.CreateScope();
@@ -160,6 +235,7 @@ public class AutoReindexService : BackgroundService
 
         try
         {
+            // Get indexed documents from database
             var candidates = await db.Documents
                 .AsNoTracking()
                 .Where(d => d.Status == DocumentStatus.Indexed)
@@ -169,6 +245,7 @@ public class AutoReindexService : BackgroundService
 
             if (!candidates.Any()) return;
 
+            // Check which ones are missing from OpenSearch
             var missing = await FindMissingFromOpenSearchAsync(
                 candidates.Select(d => d.Id).ToList(),
                 scope.ServiceProvider,
@@ -182,6 +259,7 @@ public class AutoReindexService : BackgroundService
 
             _logger.LogWarning("⚠️  {Count} documents missing from OpenSearch — re-indexing", missing.Count);
 
+            // Re-index only the missing documents
             var toIndex = candidates
                 .Where(d => missing.Contains(d.Id))
                 .Select(MapToDomain)
@@ -196,6 +274,10 @@ public class AutoReindexService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Retries indexing for documents that previously failed.
+    /// Updates status to Indexed on success.
+    /// </summary>
     private async Task RetryFailedDocumentsAsync(CancellationToken ct)
     {
         using var scope   = _serviceProvider.CreateScope();
@@ -204,6 +286,7 @@ public class AutoReindexService : BackgroundService
 
         try
         {
+            // Get failed documents ordered by modification time (oldest first)
             var failed = await db.Documents
                 .AsNoTracking()
                 .Where(d => d.Status == DocumentStatus.Failed)
@@ -230,6 +313,7 @@ public class AutoReindexService : BackgroundService
 
                     if (ok)
                     {
+                        // Update document status on successful indexing
                         using var retryScope = _serviceProvider.CreateScope();
                         var retryDb = retryScope.ServiceProvider
                             .GetRequiredService<GedDbContext>();
@@ -253,6 +337,7 @@ public class AutoReindexService : BackgroundService
                     _logger.LogWarning(ex, "Retry failed for document {DocumentId}", entity.Id);
                 }
 
+                // Delay between retries to avoid overwhelming the search service
                 await Task.Delay(200, ct);
             }
 
@@ -266,6 +351,13 @@ public class AutoReindexService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Checks OpenSearch for document existence using multi-get API.
+    /// </summary>
+    /// <param name="ids">Document IDs to check.</param>
+    /// <param name="scopedProvider">Scoped service provider for OpenSearch client.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Set of document IDs not found in OpenSearch.</returns>
     private async Task<HashSet<Guid>> FindMissingFromOpenSearchAsync(
         List<Guid> ids,
         IServiceProvider scopedProvider,
@@ -276,16 +368,19 @@ public class AutoReindexService : BackgroundService
             var client = scopedProvider
                 .GetRequiredService<OpenSearch.Client.IOpenSearchClient>();
 
+            // Multi-get request to check all IDs at once
             var mgetResponse = await client.MultiGetAsync(mg => mg
                 .Index("ged-documents")
                 .GetMany<DocumentIndexModel>(ids.Select(id => id.ToString())),
                 ct);
 
+            // Collect found document IDs
             var found = mgetResponse.Hits
                 .Where(h => h.Found)
                 .Select(h => Guid.Parse(h.Id))
                 .ToHashSet();
 
+            // Return IDs that were not found
             return ids.Where(id => !found.Contains(id)).ToHashSet();
         }
         catch (Exception ex)
@@ -295,6 +390,9 @@ public class AutoReindexService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Maps a database entity to a domain <see cref="Document"/> model.
+    /// </summary>
     private static Document MapToDomain(DocumentEntity e) => new()
     {
         Id            = e.Id,

@@ -10,10 +10,10 @@ namespace GED.Infrastructure.Services;
 
 /// <summary>
 /// Authentication and user management service.
-///
+/// 
 /// Provides:
 ///   - User registration and login with bcrypt-style password hashing
-///   - JWT token generation with role claims
+///   - Session-based authentication (cookie) with role claims
 ///   - User CRUD (Admin only)
 ///
 /// Users are persisted in a JSON file for simplicity (no extra DB migration needed).
@@ -24,13 +24,37 @@ namespace GED.Infrastructure.Services;
 public class AuthService : IUserContext
 {
     private readonly ILogger<AuthService> _logger;
-
     private readonly string _usersFilePath;
 
-    // In-memory user store, backed by JSON file
+    /// <summary>
+    /// In-memory user store, backed by JSON file for persistence.
+    /// Thread-safety ensured via <see cref="_lock"/>.
+    /// </summary>
     private readonly List<AppUser> _users = new();
+
+    /// <summary>
+    /// Lock object for thread-safe access to session and user data.
+    /// </summary>
     private readonly object _lock = new();
 
+    /// <summary>
+    /// Active user sessions keyed by session token.
+    /// Sessions auto-expire after 8 hours and are lazily cleaned up.
+    /// </summary>
+    private readonly Dictionary<string, (AppUser User, DateTime Expires)> _sessions = new();
+
+    /// <summary>
+    /// Username lookup index for O(1) access.
+    /// Maintained in sync with <see cref="_users"/> list.
+    /// </summary>
+    private Dictionary<string, AppUser> _usersByUsername = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="AuthService"/>.
+    /// Loads existing users from disk and ensures default admin/manager/user accounts exist.
+    /// </summary>
+    /// <param name="logger">Logger for authentication events.</param>
+    /// <param name="configuration">Application configuration containing Auth:UsersFilePath setting.</param>
     public AuthService(ILogger<AuthService> logger, IConfiguration configuration)
     {
         _logger         = logger;
@@ -40,97 +64,100 @@ public class AuthService : IUserContext
         EnsureDefaultAdmin();
     }
 
-
+    /// <inheritdoc />
     public AppUser? GetUserByToken(string token)
-{
-    lock (_lock)
     {
-        if (_sessions.TryGetValue(token, out var entry))
+        lock (_lock)
         {
-            if (entry.Expires > DateTime.UtcNow)
-                return entry.User;
+            if (_sessions.TryGetValue(token, out var entry))
+            {
+                if (entry.Expires > DateTime.UtcNow)
+                    return entry.User;
 
-            // Expired — clean it up lazily
-            _sessions.Remove(token);
+                // Expired — clean it up lazily
+                _sessions.Remove(token);
+            }
+            return null;
         }
-        return null;
     }
-}
-    // ── Log Out ─────────────────────────────────────────────────────────────────
+
+    /// <inheritdoc />
     public bool Logout(string token)
-{
-    lock (_lock)
     {
-        return _sessions.Remove(token);
+        lock (_lock)
+        {
+            return _sessions.Remove(token);
+        }
     }
-}
 
-// Called periodically, or lazily on each login:
-private void PurgeExpiredSessions()
-{
-    var now = DateTime.UtcNow;
-    var expired = _sessions
-        .Where(kv => kv.Value.Expires < now)
-        .Select(kv => kv.Key)
-        .ToList();
-    foreach (var key in expired)
-        _sessions.Remove(key);
-}
+    /// <summary>
+    /// Purges all expired sessions from the in-memory session store.
+    /// Called periodically and lazily on each login attempt.
+    /// </summary>
+    private void PurgeExpiredSessions()
+    {
+        var now = DateTime.UtcNow;
+        var expired = _sessions
+            .Where(kv => kv.Value.Expires < now)
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var key in expired)
+            _sessions.Remove(key);
+    }
 
-
-    // ── Login ─────────────────────────────────────────────────────────────────
-
-    private readonly Dictionary<string, (AppUser User, DateTime Expires)> _sessions = new();
-
+    /// <inheritdoc />
     public LoginResponse? Login(LoginRequest request)
-{
-    lock (_lock)
     {
-        PurgeExpiredSessions();
-
-        var user = _users.FirstOrDefault(u =>
-            u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)
-            && u.IsActive);
-
-        if (user == null)
+        lock (_lock)
         {
-            _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
-            return null;
+            PurgeExpiredSessions();
+
+            // Find active user by username (case-insensitive)
+            var user = _users.FirstOrDefault(u =>
+                u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)
+                && u.IsActive);
+
+            if (user == null)
+            {
+                _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
+                return null;
+            }
+
+            // Verify password using constant-time comparison to prevent timing attacks
+            if (!VerifyPassword(request.Password, user.PasswordHash))
+            {
+                _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
+                return null;
+            }
+
+            user.LastLoginAt = DateTime.UtcNow;
+            SaveUsers();
+
+            // Generate cryptographically secure session token (256 bits)
+            var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            var expires      = DateTime.UtcNow.AddHours(8);
+            _sessions[sessionToken] = (user, expires);
+
+            _logger.LogInformation("✅ User '{Username}' logged in (role={Role})", user.Username, user.Role);
+
+            return new LoginResponse
+            {
+                Token     = sessionToken,
+                UserId   = user.Id,
+                Username  = user.Username,
+                FullName  = user.FullName,
+                Role      = user.Role,
+                ExpiresAt = expires
+            };
         }
-
-        if (!VerifyPassword(request.Password, user.PasswordHash))
-        {
-            _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
-            return null;
-        }
-
-        user.LastLoginAt = DateTime.UtcNow;
-        SaveUsers();
-
-        var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        var expires      = DateTime.UtcNow.AddHours(8);
-        _sessions[sessionToken] = (user, expires);
-
-        _logger.LogInformation("✅ User '{Username}' logged in (role={Role})", user.Username, user.Role);
-
-        return new LoginResponse
-        {
-            Token     = sessionToken,
-            UserId   = user.Id,
-            Username  = user.Username,
-            FullName  = user.FullName,
-            Role      = user.Role,
-            ExpiresAt = expires
-        };
     }
-}
 
-    // ── User management ───────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public (bool Success, string? Error) Register(RegisterRequest request)
     {
         lock (_lock)
         {
+            // Check for duplicate username (case-insensitive)
             if (_users.Any(u => u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)))
                 return (false, $"Username '{request.Username}' already exists.");
 
@@ -148,7 +175,7 @@ private void PurgeExpiredSessions()
             };
 
             _users.Add(user);
-            // Maintain username index
+            // Maintain username index for O(1) lookup
             _usersByUsername[user.Username.ToLowerInvariant()] = user;
             SaveUsers();
 
@@ -160,6 +187,7 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <inheritdoc />
     public List<UserDto> GetAllUsers()
     {
         lock (_lock)
@@ -168,6 +196,7 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <inheritdoc />
     public UserDto? GetUserById(Guid id)
     {
         lock (_lock)
@@ -177,6 +206,7 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <inheritdoc />
     public (bool Success, string? Error) UpdateUser(Guid id, RegisterRequest request)
     {
         lock (_lock)
@@ -189,6 +219,7 @@ private void PurgeExpiredSessions()
             user.Role              = request.Role;
             user.AllowedCategories = request.AllowedCategories;
 
+            // Only update password if provided (allows partial updates)
             if (!string.IsNullOrWhiteSpace(request.Password))
                 user.PasswordHash = HashPassword(request.Password);
 
@@ -197,6 +228,7 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <inheritdoc />
     public bool DeactivateUser(Guid id)
     {
         lock (_lock)
@@ -209,6 +241,7 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <inheritdoc />
     public List<string>? GetAllowedCategories(string username)
     {
         lock (_lock)
@@ -220,8 +253,9 @@ private void PurgeExpiredSessions()
 
     /// <summary>
     /// Fast O(1) lookup by username using case-insensitive comparison.
-    /// Returns null if user not found.
     /// </summary>
+    /// <param name="username">The username to look up.</param>
+    /// <returns>User DTO if found, null otherwise.</returns>
     public UserDto? GetUserByUsername(string username)
     {
         lock (_lock)
@@ -231,17 +265,31 @@ private void PurgeExpiredSessions()
         }
     }
 
+    /// <summary>
+    /// Internal method for fast username lookup using the username index.
+    /// </summary>
     private AppUser? GetUserByUsernameInternal(string username)
     {
-        // Use the username index for O(1) lookup
         var key = username.ToLowerInvariant();
         return _usersByUsername.TryGetValue(key, out var user) ? user : null;
     }
 
-    // Username lookup index - maintained in sync with _users list
-    private Dictionary<string, AppUser> _usersByUsername = new(StringComparer.OrdinalIgnoreCase);
+    /// <inheritdoc />
+    public bool UserExists(string username)
+    {
+        lock (_lock)
+        {
+            return _users.Any(u =>
+                u.Username.Equals(username, StringComparison.OrdinalIgnoreCase) && u.IsActive);
+        }
+    }
 
-    // ── Private ───────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Hashes a password using PBKDF2 with SHA-256.
+    /// Uses 100,000 iterations for security against brute-force attacks.
+    /// </summary>
+    /// <param name="password">The plaintext password to hash.</param>
+    /// <returns>Base64-encoded salt and hash in format "salt:hash".</returns>
     private static string HashPassword(string password)
     {
         // PBKDF2 with SHA-256, 100k iterations — secure without BCrypt dependency
@@ -253,6 +301,12 @@ private void PurgeExpiredSessions()
         return Convert.ToBase64String(salt) + ":" + Convert.ToBase64String(hash);
     }
 
+    /// <summary>
+    /// Verifies a password against a stored hash using constant-time comparison.
+    /// </summary>
+    /// <param name="password">The plaintext password to verify.</param>
+    /// <param name="storedHash">The stored hash in "salt:hash" format.</param>
+    /// <returns>True if password matches, false otherwise.</returns>
     private static bool VerifyPassword(string password, string storedHash)
     {
         try
@@ -263,6 +317,7 @@ private void PurgeExpiredSessions()
             var salt       = Convert.FromBase64String(parts[0]);
             var storedBytes = Convert.FromBase64String(parts[1]);
 
+            // Re-compute hash with same salt and compare using constant-time algorithm
             var hash = Rfc2898DeriveBytes.Pbkdf2(
                 Encoding.UTF8.GetBytes(password), salt,
                 100_000, HashAlgorithmName.SHA256, 32);
@@ -275,69 +330,73 @@ private void PurgeExpiredSessions()
         }
     }
 
-private void EnsureDefaultAdmin()
-{
-    lock (_lock)
-    {
-        var changed = false;
-
-        if (!_users.Any(u => u.Role == UserRole.Admin))
-        {
-            _logger.LogWarning("⚠️  No admin user found — creating default admin (username: admin, password: Admin@1234)");
-            _users.Add(new AppUser
-            {
-                Id           = Guid.NewGuid(),
-                Username     = "admin",
-                PasswordHash = HashPassword("Admin@1234"),
-                FullName     = "System Administrator",
-                Role         = UserRole.Admin,
-                IsActive     = true,
-                CreatedAt    = DateTime.UtcNow
-            });
-            changed = true;
-        }
-
-        if (!_users.Any(u => u.Username == "manager"))
-        {
-            _users.Add(new AppUser
-            {
-                Id           = Guid.NewGuid(),
-                Username     = "manager",
-                PasswordHash = HashPassword("Manager@1234"),
-                FullName     = "Test Manager",
-                Role         = UserRole.Manager,
-                IsActive     = true,
-                CreatedAt    = DateTime.UtcNow
-            });
-            changed = true;
-        }
-
-        if (!_users.Any(u => u.Username == "user"))
-        {
-            _users.Add(new AppUser
-            {
-                Id           = Guid.NewGuid(),
-                Username     = "user",
-                PasswordHash = HashPassword("User@1234"),
-                FullName     = "Test User",
-                Role         = UserRole.User,
-                IsActive     = true,
-                CreatedAt    = DateTime.UtcNow
-            });
-            changed = true;
-        }
-
-        if (changed) SaveUsers();
-    }
-}
-    public bool UserExists(string username)
+    /// <summary>
+    /// Ensures default system accounts exist (admin, manager, user).
+    /// Creates them with known default passwords if they don't exist.
+    /// </summary>
+    private void EnsureDefaultAdmin()
     {
         lock (_lock)
         {
-            return _users.Any(u =>
-                u.Username.Equals(username, StringComparison.OrdinalIgnoreCase) && u.IsActive);
+            var changed = false;
+
+            // Create admin account if no admin exists
+            if (!_users.Any(u => u.Role == UserRole.Admin))
+            {
+                _logger.LogWarning("⚠️  No admin user found — creating default admin (username: admin, password: Admin@1234)");
+                _users.Add(new AppUser
+                {
+                    Id           = Guid.NewGuid(),
+                    Username     = "admin",
+                    PasswordHash = HashPassword("Admin@1234"),
+                    FullName     = "System Administrator",
+                    Role         = UserRole.Admin,
+                    IsActive     = true,
+                    CreatedAt    = DateTime.UtcNow
+                });
+                changed = true;
+            }
+
+            // Create manager account for testing
+            if (!_users.Any(u => u.Username == "manager"))
+            {
+                _users.Add(new AppUser
+                {
+                    Id           = Guid.NewGuid(),
+                    Username     = "manager",
+                    PasswordHash = HashPassword("Manager@1234"),
+                    FullName     = "Test Manager",
+                    Role         = UserRole.Manager,
+                    IsActive     = true,
+                    CreatedAt    = DateTime.UtcNow
+                });
+                changed = true;
+            }
+
+            // Create regular user account for testing
+            if (!_users.Any(u => u.Username == "user"))
+            {
+                _users.Add(new AppUser
+                {
+                    Id           = Guid.NewGuid(),
+                    Username     = "user",
+                    PasswordHash = HashPassword("User@1234"),
+                    FullName     = "Test User",
+                    Role         = UserRole.User,
+                    IsActive     = true,
+                    CreatedAt    = DateTime.UtcNow
+                });
+                changed = true;
+            }
+
+            if (changed) SaveUsers();
         }
     }
+
+    /// <summary>
+    /// Loads users from the JSON file into memory.
+    /// Builds the username index for fast lookups.
+    /// </summary>
     private void LoadUsers()
     {
         try
@@ -362,6 +421,10 @@ private void EnsureDefaultAdmin()
         }
     }
 
+    /// <summary>
+    /// Persists the in-memory user list to the JSON file.
+    /// Creates the directory if it doesn't exist.
+    /// </summary>
     private void SaveUsers()
     {
         try
@@ -379,6 +442,9 @@ private void EnsureDefaultAdmin()
         }
     }
 
+    /// <summary>
+    /// Maps an <see cref="AppUser"/> entity to a <see cref="UserDto"/>.
+    /// </summary>
     private static UserDto MapToDto(AppUser u) => new()
     {
         Id                = u.Id,

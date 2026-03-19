@@ -10,14 +10,61 @@ using System.Text;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Text extraction service with full PDF, DOCX, XLSX, and plain-text support.
-/// Previously Word/Excel extraction was stubbed with empty returns — now implemented.
+/// Text extraction service using built-in .NET libraries (iText, OpenXML).
+///
+/// <para>
+/// This service serves as the fallback for <see cref="TikaTextExtractionService"/>.
+/// It is used when Tika Server is unavailable, disabled, or returns an error.
+/// Both services implement <see cref="ITextExtractionService"/>, allowing the
+/// pipeline to continue with any available extraction method.
+/// </para>
+/// 
+/// <para>
+/// This service provides full text extraction capabilities:
+/// <list type="bullet">
+///   <item>
+///     <term>PDF</term>
+///     <description>
+///       Uses iText to extract text from PDF documents, including those with
+///       native text layers. Processes all pages sequentially.
+///     </description>
+///   </item>
+///   <item>
+///     <term>DOCX (Word)</term>
+///     <description>
+///       Extracts text from Word documents including paragraphs, tables,
+///       headers, and footers.
+///     </description>
+///   </item>
+///   <item>
+///     <term>XLSX (Excel)</term>
+///     <description>
+///       Extracts text content from Excel spreadsheets, including all sheets.
+///       Uses shared string table for efficient string lookup.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Plain text</term>
+///     <description>
+///       Reads text files directly with UTF-8 encoding.
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// All extraction methods are fault-tolerant and return empty strings on failure,
+/// allowing the calling code to continue without interruption.
+/// </para>
 /// </summary>
 public class TextExtractionService : ITextExtractionService
 {
     private readonly ILogger<TextExtractionService> _logger;
 
-    // Supported MIME types (drives both extraction routing and SupportsContentType)
+    /// <summary>
+    /// Set of supported MIME types for text extraction.
+    /// Drives both extraction routing and <see cref="SupportsContentType"/> checks.
+    /// </summary>
     private static readonly HashSet<string> SupportedTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "application/pdf",
@@ -26,16 +73,18 @@ public class TextExtractionService : ITextExtractionService
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.ms-excel",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
     };
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="TextExtractionService"/>.
+    /// </summary>
+    /// <param name="logger">Logger for extraction events.</param>
     public TextExtractionService(ILogger<TextExtractionService> logger)
     {
         _logger = logger;
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task<string> ExtractTextAsync(
         Stream fileStream,
         string contentType,
@@ -45,22 +94,25 @@ public class TextExtractionService : ITextExtractionService
         {
             return contentType.ToLower() switch
             {
+                // PDF extraction
                 "application/pdf"
                     => await ExtractFromPdfAsync(fileStream, cancellationToken),
 
+                // Plain text
                 "text/plain"
                     => await ExtractFromPlainTextAsync(fileStream),
 
+                // Word documents (both legacy .doc and modern .docx)
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or
                 "application/msword"
                     => await ExtractFromDocxAsync(fileStream, cancellationToken),
 
-
+                // Excel spreadsheets (both legacy .xls and modern .xlsx)
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" or
                 "application/vnd.ms-excel"
                     => await ExtractFromXlsxAsync(fileStream, cancellationToken),
-   
-
+    
+                // Unsupported format
                 _ => string.Empty
             };
         }
@@ -71,15 +123,23 @@ public class TextExtractionService : ITextExtractionService
         }
     }
 
+    /// <inheritdoc />
     public Task<bool> SupportsContentType(string contentType)
         => Task.FromResult(SupportedTypes.Contains(contentType));
 
-    // ── PDF ───────────────────────────────────────────────────────────────────
+    // ── PDF extraction ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Extracts text from a PDF document using iText.
+    /// </summary>
+    /// <param name="pdfStream">PDF file stream.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Extracted text from all pages.</returns>
     private async Task<string> ExtractFromPdfAsync(Stream pdfStream, CancellationToken cancellationToken)
     {
         try
         {
+            // Copy to MemoryStream because iText requires seekable stream
             using var ms = new MemoryStream();
             await pdfStream.CopyToAsync(ms, cancellationToken);
             ms.Position = 0;
@@ -88,6 +148,7 @@ public class TextExtractionService : ITextExtractionService
             using var pdfDoc    = new PdfDocument(reader);
             var sb              = new StringBuilder();
 
+            // Extract text from each page
             for (int i = 1; i <= pdfDoc.GetNumberOfPages(); i++)
             {
                 var page     = pdfDoc.GetPage(i);
@@ -107,18 +168,36 @@ public class TextExtractionService : ITextExtractionService
         }
     }
 
+    // ── Plain text extraction ────────────────────────────────────────────────
 
-    // ── Plain text ────────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Reads plain text from a stream.
+    /// </summary>
+    /// <param name="stream">Text file stream.</param>
+    /// <returns>File contents as string.</returns>
     private static async Task<string> ExtractFromPlainTextAsync(Stream stream)
     {
         using var reader = new StreamReader(stream, leaveOpen: true);
         return await reader.ReadToEndAsync();
     }
 
-    // ── Word (DOCX) ───────────────────────────────────────────────────────────
-    // Extracts paragraphs, tables, headers and footers from DOCX files.
+    // ── DOCX (Word) extraction ────────────────────────────────────────────────
 
+    /// <summary>
+    /// Extracts text from a Word document (DOCX format).
+    /// </summary>
+    /// <param name="stream">DOCX file stream.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Extracted text including paragraphs, tables, headers, and footers.</returns>
+    /// <remarks>
+    /// Extracts from:
+    /// <list type="bullet">
+    ///   <item>Main document body (paragraphs and tables)</item>
+    ///   <item>Headers</item>
+    ///   <item>Footers</item>
+    /// </list>
+    /// Tables are formatted with tab separators for readability.
+    /// </remarks>
     private async Task<string> ExtractFromDocxAsync(Stream stream, CancellationToken cancellationToken)
     {
         try
@@ -139,7 +218,7 @@ public class TextExtractionService : ITextExtractionService
 
             var sb = new StringBuilder();
 
-            // ── Paragraphs & Tables ──────────────────────────────────────────
+            // Extract paragraphs and tables
             foreach (var element in body.ChildElements)
             {
                 // Paragraph
@@ -154,6 +233,7 @@ public class TextExtractionService : ITextExtractionService
                 {
                     foreach (var row in table.Elements<DocumentFormat.OpenXml.Wordprocessing.TableRow>())
                     {
+                        // Extract cell text and join with tabs
                         var cells = row
                             .Elements<DocumentFormat.OpenXml.Wordprocessing.TableCell>()
                             .Select(cell => cell.InnerText.Trim())
@@ -166,7 +246,7 @@ public class TextExtractionService : ITextExtractionService
                 }
             }
 
-            // ── Headers ──────────────────────────────────────────────────────
+            // Extract headers
             foreach (var headerPart in wordDoc.MainDocumentPart?.HeaderParts ?? Enumerable.Empty<HeaderPart>())
             {
                 var headerText = headerPart.Header?.InnerText?.Trim();
@@ -174,7 +254,7 @@ public class TextExtractionService : ITextExtractionService
                     sb.Insert(0, headerText + Environment.NewLine);
             }
 
-            // ── Footers ──────────────────────────────────────────────────────
+            // Extract footers
             foreach (var footerPart in wordDoc.MainDocumentPart?.FooterParts ?? Enumerable.Empty<FooterPart>())
             {
                 var footerText = footerPart.Footer?.InnerText?.Trim();
@@ -194,9 +274,11 @@ public class TextExtractionService : ITextExtractionService
     }
 
     /// <summary>
-    /// Extract text from a paragraph, preserving runs and handling
+    /// Extracts text from a paragraph, preserving runs and handling
     /// tab characters, line breaks, and field codes correctly.
     /// </summary>
+    /// <param name="para">Word paragraph element.</param>
+    /// <returns>Extracted paragraph text.</returns>
     private static string ExtractParagraphText(DocumentFormat.OpenXml.Wordprocessing.Paragraph para)
     {
         var sb = new StringBuilder();
@@ -223,13 +305,23 @@ public class TextExtractionService : ITextExtractionService
         return sb.ToString().Trim();
     }
 
-    // ── Excel (XLSX) ──────────────────────────────────────────────────────────
-    // Extracts text content from Excel spreadsheet files.
+    // ── XLSX (Excel) extraction ────────────────────────────────────────────────
 
+    /// <summary>
+    /// Extracts text from an Excel spreadsheet (XLSX format).
+    /// </summary>
+    /// <param name="stream">XLSX file stream.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Extracted text with rows separated by newlines, sheets by blank lines.</returns>
+    /// <remarks>
+    /// Uses the shared string table for efficient string lookup.
+    /// Each sheet is separated by a blank line in the output.
+    /// </remarks>
     private async Task<string> ExtractFromXlsxAsync(Stream stream, CancellationToken cancellationToken)
     {
         try
         {
+            // Copy to MemoryStream (OpenXml requires seekable stream)
             using var ms = new MemoryStream();
             await stream.CopyToAsync(ms, cancellationToken);
             ms.Position = 0;
@@ -248,11 +340,13 @@ public class TextExtractionService : ITextExtractionService
 
             var sb = new StringBuilder();
 
+            // Process each worksheet
             foreach (var sheet in workbookPart.WorksheetParts)
             {
                 var sheetData = sheet.Worksheet.GetFirstChild<SheetData>();
                 if (sheetData == null) continue;
 
+                // Extract each row
                 foreach (var row in sheetData.Elements<Row>())
                 {
                     var cellValues = new List<string>();
@@ -268,7 +362,7 @@ public class TextExtractionService : ITextExtractionService
                         sb.AppendLine(rowText);
                 }
 
-                sb.AppendLine(); // blank line between sheets
+                sb.AppendLine(); // Blank line between sheets
             }
 
             var result = sb.ToString();
@@ -282,23 +376,30 @@ public class TextExtractionService : ITextExtractionService
         }
     }
 
+    /// <summary>
+    /// Gets the display value of an Excel cell, handling shared strings and data types.
+    /// </summary>
+    /// <param name="cell">Excel cell element.</param>
+    /// <param name="sharedStrings">Shared string table for the workbook.</param>
+    /// <returns>Cell value as string.</returns>
     private static string GetCellValue(Cell cell, List<string> sharedStrings)
     {
         if (cell.CellValue == null) return string.Empty;
 
         var rawValue = cell.CellValue.InnerText;
 
-        // Shared string reference
+        // Shared string reference (most common for text cells)
         if (cell.DataType?.Value == CellValues.SharedString)
         {
             if (int.TryParse(rawValue, out var index) && index < sharedStrings.Count)
                 return sharedStrings[index];
         }
 
-        // Boolean
+        // Boolean values
         if (cell.DataType?.Value == CellValues.Boolean)
             return rawValue == "1" ? "TRUE" : "FALSE";
 
+        // Numeric and other values — return raw text
         return rawValue;
     }
 }

@@ -10,30 +10,70 @@ using GED.Core.Models;
 namespace GED.Infrastructure.Services;
 
 /// <summary>
-/// Multilingual NLP Service.
-///
+/// Multilingual NLP service providing language detection, keyword extraction, and embedding generation.
+/// 
+/// <para>
 /// Design principles:
-///   1. Language detection is PURELY LOCAL — character-range heuristics, zero latency.
-///   2. Keyword / entity / filter extraction is PURELY LOCAL — rule-based, zero latency.
-///   3. The ONLY Ollama call in the search path is GenerateEmbeddingAsync, which uses
-///      nomic-embed-text (an embedding model, not a text-generation model).
-///      Embeddings are ~50-100ms and language-agnostic by design.
-///   4. Ollama text-generation (llama3.2) is NEVER called from the search path.
-///      It is reserved exclusively for RAG answer generation (RagService).
-///
+/// <list type="number">
+///   <item>
+///     <term>Language detection is purely local</term>
+///     <description>
+///       Uses character-range heuristics with zero latency.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Keyword/entity/filter extraction is purely local</term>
+///     <description>
+///       Rule-based extraction without network calls.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Embedding generation uses Ollama</term>
+///     <description>
+///       The only Ollama call in the search path is <see cref="GenerateEmbeddingAsync"/>,
+///       which uses nomic-embed-text (an embedding model, not a text-generation model).
+///       Embeddings are ~50-100ms and language-agnostic by design.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Ollama text-generation (llama3.2) is NEVER called from the search path</term>
+///     <description>
+///       Reserved exclusively for RAG answer generation (<see cref="RagService"/>).
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
 /// This means a French query like "montrez-moi les factures de janvier" and its Arabic
 /// equivalent "أرني فواتير يناير" produce similar embedding vectors and find the same
 /// documents — without any translation step.
+/// </para>
 /// </summary>
 public class NlpService : INlpService
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<NlpService> _logger;
-    private readonly bool _nlpEnabled;
-    private readonly string _embedEndpoint;   // e.g. http://localhost:11434/api/embed
-    private readonly string _embedModel;      // nomic-embed-text
 
-    // ── Stop-word sets (multilingual) ─────────────────────────────────────────
+    /// <summary>
+    /// Whether NLP processing is enabled.
+    /// </summary>
+    private readonly bool _nlpEnabled;
+
+    /// <summary>
+    /// Ollama API endpoint for embedding generation.
+    /// </summary>
+    private readonly string _embedEndpoint;
+
+    /// <summary>
+    /// Ollama model name for embeddings.
+    /// </summary>
+    private readonly string _embedModel;
+
+    /// <summary>
+    /// Multilingual stop word sets for keyword extraction.
+    /// Includes English, French, and Arabic stop words.
+    /// </summary>
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
         // English
@@ -54,9 +94,17 @@ public class NlpService : INlpService
         "ابحث","اعرض","أظهر","جد","قدم"
     };
 
-    // French accent characters for language detection - static to avoid reallocation
+    /// <summary>
+    /// French accent characters for language detection heuristics.
+    /// </summary>
     private static readonly char[] FrenchAccents = { 'é', 'è', 'ê', 'ë', 'à', 'â', 'ù', 'û', 'ô', 'î', 'ï', 'ç', 'œ', 'æ' };
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="NlpService"/>.
+    /// </summary>
+    /// <param name="httpClient">HTTP client for Ollama API calls.</param>
+    /// <param name="logger">Logger for NLP events.</param>
+    /// <param name="configuration">Application configuration with NLP:* settings.</param>
     public NlpService(
         HttpClient httpClient,
         ILogger<NlpService> logger,
@@ -77,12 +125,7 @@ public class NlpService : INlpService
         }
     }
 
-    // ── INlpService ───────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Fully local. Detects language, extracts keywords, entities, filters, and intent.
-    /// No network calls. Completes in under 5ms.
-    /// </summary>
+    /// <inheritdoc />
     public Task<NaturalLanguageQuery> UnderstandQueryAsync(
         string query,
         CancellationToken cancellationToken = default)
@@ -98,6 +141,7 @@ public class NlpService : INlpService
             });
         }
 
+        // All processing is local — no network calls
         var lang     = DetectLanguage(query);
         var keywords = ExtractKeywordsLocal(query, 8);
         var entities = ExtractEntitiesLocal(query);
@@ -123,16 +167,19 @@ public class NlpService : INlpService
         });
     }
 
+    /// <inheritdoc />
     public Task<List<string>> ExtractKeywordsAsync(
         string text, int maxKeywords = 10,
         CancellationToken cancellationToken = default)
         => Task.FromResult(ExtractKeywordsLocal(text, maxKeywords));
 
+    /// <inheritdoc />
     public Task<List<string>> ExtractEntitiesAsync(
         string text,
         CancellationToken cancellationToken = default)
         => Task.FromResult(ExtractEntitiesLocal(text));
 
+    /// <inheritdoc />
     public Task<float> CalculateSimilarityAsync(
         string text1, string text2,
         CancellationToken cancellationToken = default)
@@ -140,6 +187,7 @@ public class NlpService : INlpService
         if (string.IsNullOrWhiteSpace(text1) || string.IsNullOrWhiteSpace(text2))
             return Task.FromResult(0f);
 
+        // Jaccard similarity coefficient
         var w1 = text1.ToLower().Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
         var w2 = text2.ToLower().Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
         var intersection = w1.Intersect(w2).Count();
@@ -147,6 +195,7 @@ public class NlpService : INlpService
         return Task.FromResult(union > 0 ? (float)intersection / union : 0f);
     }
 
+    /// <inheritdoc />
     public Task<string> SummarizeTextAsync(
         string text, int maxLength = 200,
         CancellationToken cancellationToken = default)
@@ -154,6 +203,7 @@ public class NlpService : INlpService
         if (string.IsNullOrWhiteSpace(text) || text.Length <= maxLength)
             return Task.FromResult(text ?? string.Empty);
 
+        // Extract sentences up to maxLength
         var sentences = text.Split(new[] { '.', '!', '?' }, StringSplitOptions.RemoveEmptyEntries);
         var sb        = new StringBuilder();
         foreach (var s in sentences)
@@ -170,16 +220,23 @@ public class NlpService : INlpService
     }
 
     /// <summary>
-    /// Calls Ollama's /api/embed with nomic-embed-text to produce a 768-dimensional
-    /// vector for the given text. Returns null if Ollama is unavailable — the caller
-    /// (OpenSearchService) degrades gracefully to BM25-only search.
-    ///
-    /// Why nomic-embed-text?
-    ///   • Multilingual by training — Arabic, French, English all work natively.
-    ///   • 768 dimensions — good balance of precision vs index size.
-    ///   • Fast: ~50-150ms on CPU, ~10-30ms on GPU.
-    ///   • Much faster than any text-generation model.
+    /// Generates embedding vector for text using Ollama's nomic-embed-text model.
     /// </summary>
+    /// <param name="text">Text to embed.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>768-dimensional float array, or null if Ollama is unavailable.</returns>
+    /// <remarks>
+    /// Returns null if Ollama is unavailable — the caller (<see cref="OpenSearchService"/>)
+    /// degrades gracefully to BM25-only search.
+    /// 
+    /// Why nomic-embed-text?
+    /// <list type="bullet">
+    ///   <item>Multilingual by training — Arabic, French, English all work natively.</item>
+    ///   <item>768 dimensions — good balance of precision vs index size.</item>
+    ///   <item>Fast: ~50-150ms on CPU, ~10-30ms on GPU.</item>
+    ///   <item>Much faster than any text-generation model.</item>
+    /// </list>
+    /// </remarks>
     public async Task<float[]?> GenerateEmbeddingAsync(
         string text,
         CancellationToken cancellationToken = default)
@@ -234,16 +291,30 @@ public class NlpService : INlpService
         }
     }
 
-    // ── Language detection (pure local, zero latency) ─────────────────────────
-
     /// <summary>
     /// Detects language from character ranges — no network, no model, ~0.1ms.
-    ///
-    /// Strategy:
-    ///   Arabic    → dominant Unicode block \u0600–\u06FF
-    ///   French    → presence of accented chars OR common French tokens
-    ///   English   → default (Latin script, no strong French signals)
     /// </summary>
+    /// <param name="text">Text to analyze.</param>
+    /// <returns>
+    ///   Language code: "ar" (Arabic), "fr" (French), "en" (English), or "unknown".
+    /// </returns>
+    /// <remarks>
+    /// Strategy:
+    /// <list type="bullet">
+    ///   <item>
+    ///     <term>Arabic</term>
+    ///     <description>Dominant Unicode block \u0600–\u06FF (&gt;15% of letters).</description>
+    ///   </item>
+    ///   <item>
+    ///     <term>French</term>
+    ///     <description>Presence of accented chars OR common French tokens.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term>English</term>
+    ///     <description>Default (Latin script, no strong French signals).</description>
+    ///   </item>
+    /// </list>
+    /// </remarks>
     public static string DetectLanguage(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return "unknown";
@@ -277,8 +348,13 @@ public class NlpService : INlpService
         return "en";
     }
 
-    // ── Local keyword extraction ───────────────────────────────────────────────
-
+    /// <summary>
+    /// Extracts keywords from text using stop word filtering and frequency ranking.
+    /// Purely local, no network calls.
+    /// </summary>
+    /// <param name="text">Text to extract keywords from.</param>
+    /// <param name="maxKeywords">Maximum number of keywords to return.</param>
+    /// <returns>List of keywords sorted by frequency.</returns>
     private static List<string> ExtractKeywordsLocal(string text, int maxKeywords)
     {
         if (string.IsNullOrWhiteSpace(text)) return new();
@@ -294,8 +370,10 @@ public class NlpService : INlpService
             .ToList();
     }
 
-    // ── Local entity extraction ───────────────────────────────────────────────
-
+    /// <summary>
+    /// Extracts structured entities (file types, document categories, years) from text.
+    /// Supports English, French, and Arabic category names.
+    /// </summary>
     private static List<string> ExtractEntitiesLocal(string text)
     {
         var entities  = new List<string>();
@@ -347,8 +425,10 @@ public class NlpService : INlpService
         return entities.Distinct().ToList();
     }
 
-    // ── Filters (dates, file types) ───────────────────────────────────────────
-
+    /// <summary>
+    /// Extracts date and file type filters from natural language queries.
+    /// Supports English, French, and Arabic date expressions.
+    /// </summary>
     private static Dictionary<string, string> ExtractFilters(string query)
     {
         var filters = new Dictionary<string, string>();
@@ -383,7 +463,7 @@ public class NlpService : INlpService
         else if (lower.Contains("this year"))     SetThisYear(filters, now);
         else if (lower.Contains("last week"))     SetLastWeek(filters, now);
         else if (lower.Contains("today"))         SetToday(filters, now);
-        else if (lower.Contains("yesterday"))     SetYesterday(filters, now);
+        else if (lower.Contains("yesterday"))    SetYesterday(filters, now);
         // French
         else if (lower.Contains("mois dernier"))  SetLastMonth(filters, now);
         else if (lower.Contains("année dernière") || lower.Contains("l'an dernier")) SetLastYear(filters, now);
@@ -434,7 +514,7 @@ public class NlpService : INlpService
         return filters;
     }
 
-    // ── Date helpers ──────────────────────────────────────────────────────────
+    // ── Date helper methods ──────────────────────────────────────────────────
 
     private static void SetLastMonth(Dictionary<string, string> f, DateTime now)
     {
@@ -480,21 +560,26 @@ public class NlpService : INlpService
         f["toDate"]   = y.AddDays(1).AddSeconds(-1).ToString("o");
     }
 
-    // ── Intent + query processing ─────────────────────────────────────────────
+    // ── Intent and query processing ─────────────────────────────────────────
 
+    /// <summary>
+    /// Determines the user's intent from the query.
+    /// </summary>
     private static QueryIntent DetermineIntent(string query)
     {
         var lower = query.ToLower();
         if (new[] { "find","search","trouver","chercher","ابحث","اعثر" }.Any(lower.Contains)) return QueryIntent.Find;
         if (new[] { "list","all","liste","tous","كل","جميع" }.Any(lower.Contains))            return QueryIntent.List;
         if (new[] { "filter","where","filtrer","فقط","حيث" }.Any(lower.Contains))             return QueryIntent.Filter;
-        if (new[] { "compare","difference","vs","comparer","مقارنة" }.Any(lower.Contains))    return QueryIntent.Compare;
+        if (new[] { "compare","difference","vs","comparer","مقارنة" }.Any(lower.Contains))   return QueryIntent.Compare;
         return QueryIntent.Search;
     }
 
+    /// <summary>
+    /// Processes query by removing command phrases and keeping domain terms.
+    /// </summary>
     private static string ProcessQuery(string query, List<string> keywords)
     {
-        // Remove command/question phrases; leave domain terms
         var commands = new[]
         {
             "show me","find me","get me","search for","look for","give me",
@@ -510,7 +595,7 @@ public class NlpService : INlpService
         return processed.Trim();
     }
 
-    // ── Ollama DTOs ───────────────────────────────────────────────────────────
+    // ── Ollama DTOs ──────────────────────────────────────────────────────────
 
     private class OllamaEmbedRequest
     {

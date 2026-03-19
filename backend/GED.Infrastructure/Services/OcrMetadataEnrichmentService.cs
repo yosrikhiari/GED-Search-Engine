@@ -9,24 +9,86 @@ namespace GED.Infrastructure.Services;
 /// <summary>
 /// Uses Ollama (local LLM) to generate meaningful tags and a human-readable
 /// description from OCR-extracted document text.
-///
-/// Runs AFTER OcrTextCleaningService so it receives clean, readable text.
+/// 
+/// <para>
+/// This service runs AFTER <see cref="OcrTextCleaningService"/> so it receives
+/// clean, readable text rather than raw OCR output.
+/// </para>
+/// 
+/// <para>
+/// The enrichment includes:
+/// <list type="bullet">
+///   <item>
+///     <term>Tags</term>
+///     <description>
+///       4-12 lowercase tags from a predefined vocabulary plus free-form tags
+///       for specific entities (names, organizations, amounts).
+///     </description>
+///   </item>
+///   <item>
+///     <term>Description</term>
+///     <description>
+///       A single plain-text sentence summarizing the document (max 300 chars).
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
 /// Returns null on any failure — callers fall back to keyword-based tags.
+/// </para>
 /// </summary>
 public class OcrMetadataEnrichmentService
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<OcrMetadataEnrichmentService> _logger;
+
+    /// <summary>
+    /// Ollama API endpoint for metadata enrichment requests.
+    /// </summary>
     private readonly string _endpoint;
+
+    /// <summary>
+    /// Ollama model name for enrichment.
+    /// </summary>
     private readonly string _model;
+
+    /// <summary>
+    /// Whether the enrichment service is enabled.
+    /// </summary>
     private readonly bool _enabled;
 
-    private const int MaxTextChars        = 3000;
-    private const int TimeoutSeconds      = 60;
-    private const int MinTags             = 4;
-    private const int MaxTags             = 12;
+    /// <summary>
+    /// Maximum characters sent to LLM (keeps prompt under context window).
+    /// </summary>
+    private const int MaxTextChars = 3000;
+
+    /// <summary>
+    /// Timeout for LLM requests in seconds.
+    /// </summary>
+    private const int TimeoutSeconds = 60;
+
+    /// <summary>
+    /// Minimum tags required for successful enrichment.
+    /// </summary>
+    private const int MinTags = 4;
+
+    /// <summary>
+    /// Maximum tags returned by the LLM.
+    /// </summary>
+    private const int MaxTags = 12;
+
+    /// <summary>
+    /// Maximum characters in generated description.
+    /// </summary>
     private const int MaxDescriptionChars = 300;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="OcrMetadataEnrichmentService"/>.
+    /// </summary>
+    /// <param name="httpClient">HTTP client for Ollama API calls.</param>
+    /// <param name="logger">Logger for enrichment events.</param>
+    /// <param name="configuration">Application configuration with NLP:* settings.</param>
     public OcrMetadataEnrichmentService(
         HttpClient httpClient,
         ILogger<OcrMetadataEnrichmentService> logger,
@@ -39,16 +101,36 @@ public class OcrMetadataEnrichmentService
         _enabled    = configuration.GetValue<bool>("NLP:Enabled", true);
     }
 
+    /// <summary>
+    /// Result of metadata enrichment containing tags and description.
+    /// </summary>
     public class EnrichmentResult
     {
+        /// <summary>
+        /// Extracted tags from the document.
+        /// </summary>
         public List<string> Tags { get; set; } = new();
+
+        /// <summary>
+        /// Generated description summarizing the document.
+        /// </summary>
         public string Description { get; set; } = string.Empty;
     }
 
     /// <summary>
     /// Generates AI tags and description from OCR text.
-    /// Returns null on failure — never throws.
     /// </summary>
+    /// <param name="ocrText">Cleaned OCR text to analyze.</param>
+    /// <param name="fileName">Original filename for context.</param>
+    /// <param name="category">Document category.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// <see cref="EnrichmentResult"/> with tags and description, or null on failure.
+    /// </returns>
+    /// <remarks>
+    /// Returns null on any failure — never throws.
+    /// Callers should fall back to keyword-based tags when null is returned.
+    /// </remarks>
     public async Task<EnrichmentResult?> EnrichAsync(
         string ocrText,
         string fileName,
@@ -64,6 +146,7 @@ public class OcrMetadataEnrichmentService
                 "🏷️  Enriching metadata with Ollama for {FileName} ({Chars} chars)",
                 fileName, ocrText.Length);
 
+            // Truncate text to max chars for efficiency
             var preview = ocrText.Length > MaxTextChars
                 ? ocrText[..MaxTextChars] + "…"
                 : ocrText;
@@ -75,11 +158,12 @@ public class OcrMetadataEnrichmentService
                 model       = _model,
                 prompt      = prompt,
                 stream      = false,
-                temperature = 0.2,
+                temperature = 0.2,  // Low temperature for consistent output
                 format      = "json",
                 options     = new { num_predict = 512 }
             };
 
+            // Set timeout for LLM request
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(TimeSpan.FromSeconds(TimeoutSeconds));
 
@@ -116,11 +200,12 @@ public class OcrMetadataEnrichmentService
         }
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
-
-private static string BuildPrompt(string text, string fileName, string category)
-{
-    return $@"You are a document analysis assistant. Analyze this {category} document and return metadata.
+    /// <summary>
+    /// Builds the prompt for metadata enrichment with predefined tag vocabulary.
+    /// </summary>
+    private static string BuildPrompt(string text, string fileName, string category)
+    {
+        return $@"You are a document analysis assistant. Analyze this {category} document and return metadata.
 
 DOCUMENT FILE: {fileName}
 DOCUMENT TEXT:
@@ -144,9 +229,13 @@ Example output:
 {{""tags"":[""invoice"",""finance"",""2024"",""acme-corp"",""approved""],""description"":""Invoice #1042 from Acme Corp for consulting services rendered in Q3 2024, total amount 12,500 EUR.""}}
 
 Now analyze the document above and return JSON:";
-}
+    }
 
-
+    /// <summary>
+    /// Parses the LLM response into an <see cref="EnrichmentResult"/>.
+    /// </summary>
+    /// <param name="raw">Raw LLM response text.</param>
+    /// <returns>Parsed enrichment result, or null on parse failure.</returns>
     private EnrichmentResult? ParseResult(string raw)
     {
         try
@@ -217,8 +306,14 @@ Now analyze the document above and return JSON:";
         }
     }
 
+    /// <summary>
+    /// Ollama API response wrapper.
+    /// </summary>
     private class OllamaResponse
     {
+        /// <summary>
+        /// The generated text response from Ollama.
+        /// </summary>
         public string? Response { get; set; }
     }
 }

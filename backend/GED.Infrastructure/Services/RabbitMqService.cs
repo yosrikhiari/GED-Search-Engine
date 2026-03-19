@@ -10,20 +10,83 @@ namespace GED.Infrastructure.Services;
 
 /// <summary>
 /// Resilient RabbitMQ service with lazy connection and automatic reconnection.
-/// Updated for RabbitMQ.Client v7 async API.
+/// 
+/// <para>
+/// Key features:
+/// <list type="bullet">
+///   <item>
+///     <term>Lazy connection</term>
+///     <description>
+///       Connection is established on first use, not at construction.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Automatic reconnection</term>
+///     <description>
+///       Handles connection failures with exponential backoff retries.
+///     </description>
+///   </item>
+///   <item>
+///     <term>Thread-safe</term>
+///     <description>
+///       Uses semaphore for connection access and disposal.
+///     </description>
+///   </item>
+///   <item>
+///     <term>RabbitMQ.Client v7 compatible</term>
+///     <description>
+///       Uses async API methods (CreateConnectionAsync, CreateChannelAsync).
+///     </description>
+///   </item>
+/// </list>
+/// </para>
+/// 
+/// <para>
+/// Message persistence: All published messages use Persistent = true to survive
+/// broker restarts. Un persistent messages are lost on shutdown.
+/// </para>
 /// </summary>
 public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposable
 {
     private readonly ILogger<RabbitMqService> _logger;
+
+    /// <summary>
+    /// Connection factory with connection parameters.
+    /// </summary>
     private readonly ConnectionFactory _factory;
 
+    /// <summary>
+    /// Current connection (null until first use).
+    /// </summary>
     private IConnection? _connection;
+
+    /// <summary>
+    /// Lock for thread-safe connection access.
+    /// </summary>
     private readonly SemaphoreSlim _lock = new(1, 1);
+
+    /// <summary>
+    /// Whether the service has been disposed.
+    /// </summary>
     private bool _disposed;
 
+    /// <summary>
+    /// Maximum retry attempts for connection.
+    /// </summary>
     private const int MaxConnectRetries = 5;
+
+    /// <summary>
+    /// Base retry delay in milliseconds (multiplied by attempt number).
+    /// </summary>
     private const int BaseRetryMs = 1000;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="RabbitMqService"/>.
+    /// </summary>
+    /// <param name="logger">Logger for service events.</param>
+    /// <param name="hostname">RabbitMQ hostname.</param>
+    /// <param name="username">RabbitMQ username.</param>
+    /// <param name="password">RabbitMQ password.</param>
     public RabbitMqService(
         ILogger<RabbitMqService> logger,
         string hostname,
@@ -37,7 +100,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
             HostName                   = hostname,
             UserName                   = username,
             Password                   = password,
-            AutomaticRecoveryEnabled   = true,
+            AutomaticRecoveryEnabled   = true,  // Let library handle basic recovery
             NetworkRecoveryInterval    = TimeSpan.FromSeconds(5),
             RequestedHeartbeat         = TimeSpan.FromSeconds(60),
             RequestedConnectionTimeout = TimeSpan.FromSeconds(10),
@@ -48,8 +111,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
             hostname);
     }
 
-    // ── IMessageQueueService ──────────────────────────────────────────────────
-
+    /// <inheritdoc />
     public async Task PublishAsync<T>(
         string queueName,
         T message,
@@ -68,7 +130,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
                 {
                     var props = new BasicProperties
                     {
-                        Persistent  = true,
+                        Persistent  = true,  // Survive broker restarts
                         ContentType = "application/json"
                     };
 
@@ -93,6 +155,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
                       OperationInterruptedException or
                       IOException)
             {
+                // Connection issue — reset and retry
                 await ResetConnectionAsync();
 
                 if (attempt == MaxConnectRetries)
@@ -113,6 +176,11 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
         }
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Note: Subscription is handled by OcrWorkerService, not this service.
+    /// This is a no-op that logs a warning if called.
+    /// </remarks>
     public Task SubscribeAsync<T>(
         string queueName,
         Func<T, Task> handler,
@@ -126,17 +194,29 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
 
     // ── Connection management ─────────────────────────────────────────────────
 
+    /// <summary>
+    /// Gets or creates a connection to RabbitMQ.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Active RabbitMQ connection.</returns>
+    /// <remarks>
+    /// Uses lazy initialization — connection is created on first publish.
+    /// Thread-safe via semaphore.
+    /// </remarks>
     private async Task<IConnection> GetConnectionAsync(CancellationToken ct)
     {
+        // Fast path: return existing connection
         if (_connection is { IsOpen: true })
             return _connection;
 
         await _lock.WaitAsync(ct);
         try
         {
+            // Double-check after acquiring lock
             if (_connection is { IsOpen: true })
                 return _connection;
 
+            // Clean up stale connection
             if (_connection != null)
             {
                 await _connection.DisposeAsync();
@@ -145,6 +225,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
 
             _logger.LogInformation("🔌 Connecting to RabbitMQ at {Host}…", _factory.HostName);
 
+            // Connect with retries
             for (int attempt = 1; attempt <= MaxConnectRetries; attempt++)
             {
                 try
@@ -179,6 +260,10 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
         }
     }
 
+    /// <summary>
+    /// Resets the connection by disposing it.
+    /// Next operation will create a new connection.
+    /// </summary>
     private async Task ResetConnectionAsync()
     {
         await _lock.WaitAsync();
@@ -199,6 +284,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
 
     // ── IAsyncDisposable / IDisposable ────────────────────────────────────────
 
+    /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
@@ -212,6 +298,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
         _lock.Dispose();
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (_disposed) return;
