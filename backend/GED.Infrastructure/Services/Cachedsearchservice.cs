@@ -182,13 +182,11 @@ public class CachedSearchService : ISearchService
         if (!_enabled) return;
         try
         {
-            // Set a short-lived "bust" flag; if Redis is unavailable we skip silently
             await _cache.SetStringAsync(
                 "ged:cache:generation",
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(),
                 new DistributedCacheEntryOptions
                 {
-                    // Keep generation key alive as long as the longest possible cached entry
                     AbsoluteExpirationRelativeToNow = _ttl + TimeSpan.FromMinutes(5)
                 },
                 cancellationToken);
@@ -199,5 +197,10 @@ public class CachedSearchService : ISearchService
         {
             _logger.LogWarning(ex, "Cache invalidation failed — Redis may be unavailable");
         }
+    }
+
+    public async Task IndexChunksAsync(Document document, List<DocumentChunk> chunks, CancellationToken cancellationToken = default)
+    {
+        await _inner.IndexChunksAsync(document, chunks, cancellationToken);
     }
 }

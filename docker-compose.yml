@@ -155,7 +155,7 @@ services:
       - ged-network
     environment:
       - OLLAMA_HOST=ollama:11434
-    command: ["/bin/sh", "-c", "ollama pull llama3.2 && ollama pull nomic-embed-text && echo 'Models ready.'"]
+    command: ["sh", "-c", "ollama pull llama3.2:1b && ollama pull nomic-embed-text && echo 'Models ready.'"]
     restart: "no"
 
   # ── Backend (ASP.NET Core API) ────────────────────────────────────────────────
@@ -182,7 +182,7 @@ services:
       - NLP__Enabled=true
       - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
       - NLP__EmbedApiEndpoint=http://ollama:11434/api/embed
-      - NLP__Model=llama3.2
+      - NLP__Model=llama3.2:1b
       - NLP__EmbedModel=nomic-embed-text
       - Embeddings__Enabled=true
       - Embeddings__Model=nomic-embed-text
@@ -198,7 +198,7 @@ services:
       - Reindex__MissingCheckIntervalMinutes=15
       - Reindex__FailedRetryIntervalMinutes=30
       - RAG__TopK=5
-      - RAG__MaxContextChars=6000
+      - RAG__MaxContextChars=2000
       - Auth__UsersFilePath=/var/lib/ged/users.json
       - Document__MaxUploadSizeMB=100
     depends_on:

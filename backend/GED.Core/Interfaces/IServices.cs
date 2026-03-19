@@ -11,6 +11,7 @@ public interface ISearchService
     Task<bool> UpdateDocumentIndexAsync(Document document, CancellationToken cancellationToken = default);
     Task<bool> DeleteDocumentIndexAsync(Guid documentId, CancellationToken cancellationToken = default);
     Task<bool> BulkIndexDocumentsAsync(IEnumerable<Document> documents, CancellationToken cancellationToken = default);
+    Task IndexChunksAsync(Document document, List<DocumentChunk> chunks, CancellationToken cancellationToken = default);
 }
 
 public interface IDocumentService

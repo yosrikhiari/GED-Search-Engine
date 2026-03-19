@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
+using GED.Infrastructure.Services;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
@@ -17,6 +18,7 @@ public class DocumentsController : ControllerBase
     private readonly IDocumentService _documentService;
     private readonly ISearchService _searchService;
     private readonly IOcrService _ocrService;
+    private readonly DocumentChunkingService _chunkingService;
     private readonly GedDbContext _db;
     private readonly ILogger<DocumentsController> _logger;
     private readonly IDistributedCache _cache;
@@ -32,6 +34,7 @@ public class DocumentsController : ControllerBase
         IDocumentService documentService,
         ISearchService searchService,
         IOcrService ocrService,
+        DocumentChunkingService chunkingService,
         GedDbContext db,
         ILogger<DocumentsController> logger,
         IConfiguration configuration,
@@ -40,6 +43,7 @@ public class DocumentsController : ControllerBase
         _documentService = documentService;
         _searchService   = searchService;
         _ocrService      = ocrService;
+        _chunkingService = chunkingService;
         _db              = db;
         _logger          = logger;
         _configuration   = configuration;
@@ -134,6 +138,22 @@ public async Task<ActionResult<Document>> UploadDocument(
             else
                 _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
 
+            if (!string.IsNullOrWhiteSpace(document.ExtractedText))
+            {
+                var chunks = _chunkingService.ChunkText(document.Id, document.ExtractedText);
+                if (chunks.Any())
+                {
+                    try
+                    {
+                        await _searchService.IndexChunksAsync(document, chunks);
+                        _logger.LogInformation("Document {DocumentId} chunked into {Count} chunks for RAG", document.Id, chunks.Count);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to index chunks for document {DocumentId}", document.Id);
+                    }
+                }
+            }
 
                 if (!string.IsNullOrWhiteSpace(idempotencyKey))
                 {
