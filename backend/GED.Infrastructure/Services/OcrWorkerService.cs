@@ -443,7 +443,7 @@ public class OcrWorkerService : BackgroundService
             var errMsg = ocrResult.ErrorMessage ?? "OCR returned no text";
             _logger.LogWarning("OCR returned no text for {DocId}: {Error}", message.DocumentId, errMsg);
             await MarkOcrFailedAsync(document.Id, errMsg, ct);
-            return; // ← this is fine, stage is now "failed", frontend will stop polling
+            return;
         }
 
         document.OcrText        = ocrResult.ExtractedText;

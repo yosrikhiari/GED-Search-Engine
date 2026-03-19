@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
-using GED.Core.Interfaces;          // ← NEW: ISearchService, IDocumentService
+using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
@@ -23,21 +23,21 @@ public class DocumentAclController : ControllerBase
 {
     private readonly GedDbContext                       _db;
     private readonly AuthService                        _authService;
-    private readonly ISearchService                     _searchService;   // ← NEW
-    private readonly IDocumentService                   _documentService; // ← NEW
+    private readonly ISearchService                     _searchService;
+    private readonly IDocumentService                   _documentService;
     private readonly ILogger<DocumentAclController>     _logger;
 
     public DocumentAclController(
         GedDbContext                   db,
         AuthService                    authService,
-        ISearchService                 searchService,    // ← NEW
-        IDocumentService               documentService,  // ← NEW
-        ILogger<DocumentAclController> logger)
+        ISearchService                 searchService,
+        IDocumentService               documentService,
+        ILogger<DocumentAclController>  logger)
     {
         _db              = db;
         _authService     = authService;
-        _searchService   = searchService;                // ← NEW
-        _documentService = documentService;              // ← NEW
+        _searchService   = searchService;
+        _documentService = documentService;
         _logger          = logger;
     }
 
@@ -112,7 +112,7 @@ public class DocumentAclController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        // ── NEW: re-index the document so allowedUserIds is updated in OpenSearch ──
+        // Re-index the document so allowedUserIds is updated in OpenSearch
         var doc = await _documentService.GetDocumentByIdAsync(documentId);
         if (doc != null)
         {
@@ -157,7 +157,7 @@ public class DocumentAclController : ControllerBase
         _db.DocumentAcls.Remove(acl);
         await _db.SaveChangesAsync();
 
-        // ── NEW: re-index so the removed user is cleared from allowedUserIds ──
+        // Re-index so the removed user is cleared from allowedUserIds
         var doc = await _documentService.GetDocumentByIdAsync(documentId);
         if (doc != null)
         {

@@ -15,8 +15,8 @@ namespace GED.Infrastructure.Services;
 /// Hybrid search service: BM25 (keyword) + kNN (semantic vector) combined.
 ///
 /// Access control is enforced at query time via OpenSearch filters:
-///   • Admin → sees all documents (no filter injected)
-///   • Others → must satisfy at least one of:
+///   - Admin → sees all documents (no filter injected)
+///   - Others → must satisfy at least one of:
 ///       1. accessLevel == "open"
 ///       2. allowedUserIds contains the current user's ID
 ///       3. category is in the user's AllowedCategories list
@@ -28,7 +28,7 @@ public class OpenSearchService : ISearchService
 {
     private readonly IOpenSearchClient             _client;
     private readonly INlpService                   _nlpService;
-    private readonly GedDbContext                  _db;          // ← NEW: for ACL lookups
+    private readonly GedDbContext                  _db;
     private readonly ILogger<OpenSearchService>    _logger;
 
     private readonly string _documentIndex;
@@ -63,13 +63,13 @@ public class OpenSearchService : ISearchService
     public OpenSearchService(
         IOpenSearchClient           client,
         INlpService                 nlpService,
-        GedDbContext                db,             // ← NEW
+        GedDbContext                db,
         ILogger<OpenSearchService>  logger,
         IConfiguration              configuration)
     {
         _client            = client;
         _nlpService        = nlpService;
-        _db                = db;                    // ← NEW
+        _db                = db;
         _logger            = logger;
         _documentIndex     = configuration["Search:IndexName"] ?? "ged-documents";
         _bm25Weight        = configuration.GetValue<float>("Search:Bm25Weight",       0.6f);
@@ -1153,7 +1153,7 @@ public class OpenSearchService : ISearchService
             var indexModels = new List<DocumentIndexModel>(docs.Count);
             var semaphore   = new SemaphoreSlim(4, 4);
 
-            // ── NEW: batch-fetch ACLs for all documents in one query ──────────
+            // Batch-fetch ACLs for all documents in one query
             var docIds = docs.Select(d => d.Id).ToList();
             
             // First fetch all ACLs as raw data to avoid EF Core Guid issues
@@ -1307,18 +1307,9 @@ public class DocumentIndexModel
     /// <summary>768-dim nomic-embed-text vector for kNN search.</summary>
     public float[]? Embedding { get; set; }
 
-    // ── ACL fields (NEW) ─────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Guids (as strings) of users who have been explicitly granted access.
-    /// Populated at index time from DocumentAcl table. Updated whenever ACL changes.
-    /// </summary>
+    // ACL fields (denormalized from parent document)
     public List<string> AllowedUserIds { get; set; } = new();
 
-    /// <summary>
-    /// "open"       = visible to every authenticated user
-    /// "restricted" = only users in AllowedUserIds, admins, or matching-category users
-    /// </summary>
     public string AccessLevel { get; set; } = "restricted";
 
     /// <summary>Username of the user who uploaded the document.</summary>
@@ -1340,7 +1331,7 @@ public class ChunkIndexModel
     public string    ContentType  { get; set; } = string.Empty;
     public List<string>? Tags     { get; set; }
 
-    // ── ACL fields (denormalized from parent document) ─────────────────────────
+    // ACL fields (denormalized from parent document)
     public List<string> AllowedUserIds { get; set; } = new();
     public string AccessLevel { get; set; } = "restricted";
     public string? CreatedByUserId { get; set; }

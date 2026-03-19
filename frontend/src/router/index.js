@@ -17,7 +17,6 @@ const routes = [
     path: '/',
     name: 'UserHome',
     component: () => import('../views/User.vue'),
-    // FIX 2: Added 'Admin' so admins aren't bounced when landing on /
     meta: { requiresAuth: true, roles: ['Admin', 'Manager', 'User', 'ReadOnly'] }
   },
   {
@@ -32,8 +31,6 @@ const router = createRouter({
 })
 
 router.beforeEach((to, _from, next) => {
-  // FIX 1: Auth is cookie-based — there is no ged_token in localStorage.
-  //         Check ged_user instead, which LoginView.vue saves on successful login.
   const user = (() => {
     try { return JSON.parse(localStorage.getItem('ged_user') || 'null') }
     catch { return null }

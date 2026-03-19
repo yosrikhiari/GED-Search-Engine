@@ -66,7 +66,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { auth } from '../api.js'   // ← THIS WAS MISSING — caused "Impossible de contacter le serveur"
+import { auth } from '../api.js'
 
 const router   = useRouter()
 const username = ref('')

@@ -159,7 +159,7 @@
             <button class="nlp-dismiss" @click="nlpInterpretation = null">✕</button>
           </div>
 
-          <!-- NEW: invalid query message -->
+          <!-- Show when query is not understood -->
           <div v-if="searchError" class="search-error-banner">
             {{ searchError }}
           </div>
@@ -1395,8 +1395,7 @@ const filteredPickerDocs = computed(() =>
 const fetchPickerDocs = async () => {
   pickerLoading.value = true
   try {
-    // Empty query bypasses NLP entirely → BuildPrecisionQuery has no shouldQueries
-    // → falls into bq.Must(m => m.MatchAll()) → returns ALL indexed documents
+    // Empty query returns all indexed documents via MatchAll query
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: authHeader(),
@@ -1526,7 +1525,7 @@ const handleSearch = () => {
 }
 
 const askRag = async () => {
-  const query = docSearch.value.trim()   // ← docSearch, not searchQuery
+  const query = docSearch.value.trim()
   if (!query) return
   ragAnswer.value  = ''
   ragSources.value = []
@@ -1538,7 +1537,7 @@ const askRag = async () => {
   try {
     const res = await fetch('/api/rag/ask', {
       method: 'POST',
-      headers: authHeader(),             // ← authHeader(), not authHeaders()
+      headers: authHeader(),
       body: JSON.stringify({
         query,
         language: 'fr',
@@ -1564,7 +1563,7 @@ const searchDocuments = async () => {
   searched.value          = true
   showAutocomplete.value  = false
   nlpInterpretation.value = null
-  searchError.value       = null    // ← add ref: const searchError = ref(null)
+  searchError.value       = null
 
   try {
     const res = await fetch('/api/search/query', {

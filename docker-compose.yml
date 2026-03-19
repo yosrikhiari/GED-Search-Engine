@@ -79,12 +79,6 @@ services:
     restart: unless-stopped
 
   # ── SQL Server init ───────────────────────────────────────────────────────────
-  # FIX 1: Mount from ./backend/init_schema.sql (the file that actually exists).
-  #         The root-level init_schema.sql was accidentally created as a directory
-  #         and has been removed. The real schema file lives in backend/.
-  # FIX 2: Mount to /tmp/ instead of /var/opt/mssql/ — SQL Server 2022 runs as
-  #         the non-root 'mssql' user and cannot read files in /var/opt/mssql
-  #         that are bind-mounted (owned by root). /tmp is world-readable.
   sqlserver-init:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: ged-sqlserver-init
@@ -176,8 +170,6 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - ASPNETCORE_URLS=http://+:8080
-      # FIX 3: Password must match SA_PASSWORD set on the sqlserver service above (GedPass_2024!).
-      #         The original value 'YourStrong@Passw0rd' caused login failures.
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=ged_db;User Id=sa;Password=GedPass_2024!;TrustServerCertificate=True;
       - OpenSearch__Url=http://opensearch:9200
       - RabbitMQ__Host=rabbitmq

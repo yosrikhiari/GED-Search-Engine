@@ -8,14 +8,9 @@ namespace GED.Infrastructure.Services;
 /// <summary>
 /// Text extraction using Apache Tika Server (REST API).
 ///
-/// FIXES vs original:
-///   1. Set Accept: text/plain header so Tika returns plain text instead of
-///      XHTML. The original sent no Accept header, so Tika defaulted to
-///      returning an XHTML document — this caused extracted_text and
-///      description fields to contain raw XML like
-///      "<?xml version="1.1"...><html xmlns=...>" instead of document content.
-///   2. Strip any residual XML/HTML that slips through (defensive cleanup).
-///   3. Timeout added per request (Tika can hang on corrupt files).
+/// Uses the Accept: text/plain header to receive plain text instead of XHTML.
+/// Includes defensive XML/HTML stripping for any residual markup.
+/// Timeout is applied per request to handle corrupt files.
 /// </summary>
 public class TikaTextExtractionService : ITextExtractionService
 {

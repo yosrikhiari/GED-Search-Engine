@@ -386,11 +386,10 @@ try
                     .Date(d => d.Name(n => n.CreatedAt))
                     .Date(d => d.Name(n => n.DocumentDate))
                     .Date(d => d.Name(n => n.ModifiedAt))
-                    // ── NEW: ACL fields for tag-based access control ───────────
+                    // ACL fields for tag-based and user-based access control
                     .Keyword(k => k.Name("accessLevel"))        // "open" | "restricted"
                     .Keyword(k => k.Name("allowedUserIds"))     // list of user Guids
                     .Keyword(k => k.Name("createdByUserId"))    // uploader username/id
-                    // ─────────────────────────────────────────────────────────
                     .KnnVector(k => k
                         .Name("embedding")
                         .Dimension(768)

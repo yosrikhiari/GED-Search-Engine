@@ -117,8 +117,7 @@ public class TextExtractionService : ITextExtractionService
     }
 
     // ── Word (DOCX) ───────────────────────────────────────────────────────────
-    // FIX: Previously returned string.Empty with a log warning.
-    // Now properly extracts paragraphs, tables, headers and footers.
+    // Extracts paragraphs, tables, headers and footers from DOCX files.
 
     private async Task<string> ExtractFromDocxAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -225,7 +224,7 @@ public class TextExtractionService : ITextExtractionService
     }
 
     // ── Excel (XLSX) ──────────────────────────────────────────────────────────
-    // FIX: Previously not implemented at all.
+    // Extracts text content from Excel spreadsheet files.
 
     private async Task<string> ExtractFromXlsxAsync(Stream stream, CancellationToken cancellationToken)
     {

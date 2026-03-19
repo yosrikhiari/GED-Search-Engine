@@ -154,7 +154,7 @@
             <span class="nlp-text">Compris comme : <strong>{{ nlpInterpretation }}</strong></span>
             <button class="nlp-dismiss" @click="nlpInterpretation = null">✕</button>
           </div>
-          <!-- NEW: show when query is not understood -->
+          <!-- Show when query is not understood -->
           <div v-if="searchError" class="search-error-banner">
             {{ searchError }}
           </div>
@@ -882,8 +882,7 @@ const handleKeydown = (e) => {
 const fetchPickerDocs = async () => {
   pickerLoading.value = true
   try {
-    // Empty query bypasses NLP entirely → BuildPrecisionQuery has no shouldQueries
-    // → falls into bq.Must(m => m.MatchAll()) → returns ALL indexed documents
+    // Empty query returns all indexed documents via MatchAll query
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -1204,7 +1203,7 @@ const performSearch = async () => {
   searched.value          = true
   showAutocomplete.value  = false
   nlpInterpretation.value = null
-  searchError.value       = null      // ← add ref: const searchError = ref(null)
+  searchError.value       = null
 
   try {
     const res = await fetch('/api/search/query', {

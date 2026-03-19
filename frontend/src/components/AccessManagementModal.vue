@@ -133,7 +133,7 @@
             </div>
 
             <!-- ══════════════════════════════════════════
-                 Documents sub-tab — FIXED PICKER
+                 Documents sub-tab
             ══════════════════════════════════════════ -->
             <div v-if="activeGroupSubtab === 'docs'">
               <div class="subsection-header">
@@ -145,7 +145,7 @@
                 </button>
               </div>
 
-              <!-- ── NEW: Card-grid document picker with drag & drop ── -->
+              <!-- Card-grid document picker with drag & drop -->
               <div v-if="showAddDocs" class="add-docs-panel">
 
                 <!-- Toolbar -->
@@ -1034,7 +1034,7 @@ onMounted(async () => {
 .subtab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
 
 /* ═══════════════════════════════════════════════════════════════
-   NEW DOC PICKER
+   DOCUMENT PICKER
 ══════════════════════════════════════════════════════════════ */
 .add-docs-panel {
   background: #f8faff; border: 1px solid #dbeafe;

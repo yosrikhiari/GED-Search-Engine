@@ -1,7 +1,6 @@
 /**
- * Centralized API client.
- *
- * request, and redirects to /login on 401 responses.
+ * Centralized API client with auth header injection and logging.
+ * Automatically redirects to /login on 401 responses.
  */
 
 import { logger } from './logger.js'

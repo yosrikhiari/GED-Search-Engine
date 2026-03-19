@@ -2,8 +2,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using GED.Core.Interfaces;
 using GED.Core.Models;
-using GED.Infrastructure.Services;   // ← NEW: for AuthService
-using System.Security.Claims;         // ← NEW: for ClaimTypes
+using GED.Infrastructure.Services;
+using System.Security.Claims;
 
 namespace GED.API.Controllers;
 
@@ -21,18 +21,18 @@ public class SearchController : ControllerBase
 {
     private readonly ISearchService             _searchService;
     private readonly INlpService                _nlpService;
-    private readonly AuthService                _authService;   // ← NEW
+    private readonly AuthService                _authService;
     private readonly ILogger<SearchController>  _logger;
 
     public SearchController(
         ISearchService            searchService,
         INlpService               nlpService,
-        AuthService               authService,                 // ← NEW
+        AuthService               authService,
         ILogger<SearchController> logger)
     {
         _searchService = searchService;
         _nlpService    = nlpService;
-        _authService   = authService;                         // ← NEW
+        _authService   = authService;
         _logger        = logger;
     }
 
@@ -49,7 +49,7 @@ public class SearchController : ControllerBase
         if (request == null)
             return BadRequest(new { error = "Request body is required." });
 
-        // ── NEW: populate user context from cookie claims ─────────────────────
+        // Populate user context from cookie claims
         // Admin → no ACL filter injected (sees everything).
         // Others → OpenSearchService will add a filter based on UserId /
         //          AllowedCategories so only permitted documents are returned.

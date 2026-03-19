@@ -15,7 +15,6 @@ public class OcrJob
     public string? ErrorMessage { get; set; }
     public bool    IsOcrProcessed { get; set; } 
 
-    // ── NEW: populated when status >= OcrStatus.TextExtracted ────────────────
     /// <summary>
     /// Character count from Tesseract (raw, before LLM cleaning).
     /// Set as soon as Tesseract finishes, so the frontend can show progress
@@ -39,9 +38,9 @@ public class OcrJob
 ///
 ///   Pending        → job is queued, worker hasn't started yet
 ///   Processing     → Tesseract is running
-///   TextExtracted  → *** NEW *** Tesseract finished; LLM cleaning not yet done
+///   TextExtracted  → Tesseract finished; LLM cleaning not yet done
 ///                    IsOcrProcessed = true at this point so polls resolve fast.
-///   LlmCleaning   → *** NEW *** Ollama cleaning + date extraction in progress
+///   LlmCleaning    → Ollama cleaning + date extraction in progress
 ///   Completed      → full pipeline done (cleaned text + metadata stored)
 ///   Failed         → unrecoverable error at any stage
 /// </summary>
@@ -49,10 +48,10 @@ public enum OcrStatus
 {
     Pending        = 0,
     Processing     = 1,
-    TextExtracted  = 2,   // ← NEW: Tesseract done, LLM pending
-    LlmCleaning    = 3,   // ← NEW: Ollama running
-    Completed      = 4,   // ← was 2
-    Failed         = 5    // ← was 3
+    TextExtracted  = 2,
+    LlmCleaning    = 3,
+    Completed      = 4,
+    Failed         = 5
 }
 
 public class OcrResult

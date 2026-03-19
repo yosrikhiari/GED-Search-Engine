@@ -292,7 +292,9 @@ public class RagService : IRagService
             // Full-document fallback
             _logger.LogInformation("⚠️  No chunk hits — falling back to full-document search");
 
-            // ── NEW: forward user identity so ACL filter applies here too ─────
+            // Fallback to full-document search when no chunk hits are found
+            _logger.LogInformation("No chunk hits — falling back to full-document search");
+
             var searchRequest = new SearchRequest
             {
                 Query              = request.Query,
@@ -306,9 +308,8 @@ public class RagService : IRagService
                 FromDate           = request.FromDate,
                 ToDate             = request.ToDate,
                 DocumentIds        = request.DocumentIds,
-                // ── ACL fields (NEW) ─────────────────────────────────────────
-                UserId                = request.UserId,
-                UserRole              = request.UserRole,
+                UserId             = request.UserId,
+                UserRole           = request.UserRole,
                 UserAllowedCategories = request.UserAllowedCategories
             };
 

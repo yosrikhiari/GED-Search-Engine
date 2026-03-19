@@ -1,24 +1,8 @@
 -- ============================================================================
--- GED Elise — SQL Server init schema
--- Converted from PostgreSQL to T-SQL
---
--- Key syntax changes vs the original PostgreSQL version:
---   UUID        → UNIQUEIDENTIFIER
---   VARCHAR     → NVARCHAR
---   TEXT        → NVARCHAR(MAX)
---   TEXT[]      → NVARCHAR(MAX)  (JSON array stored as text)
---   JSONB       → NVARCHAR(MAX)  (JSON object stored as text)
---   BOOLEAN     → BIT
---   TIMESTAMP   → DATETIME2
---   DEFAULT true/false → DEFAULT 1 / DEFAULT 0
---   NOW()       → GETUTCDATE()
---   SERIAL      → IDENTITY(1,1)  (not used here — all PKs are UNIQUEIDENTIFIER)
---   IF NOT EXISTS (table) → IF OBJECT_ID(...) IS NULL
---   IF NOT EXISTS (index) → IF NOT EXISTS (SELECT 1 FROM sys.indexes ...)
---   ON CONFLICT DO NOTHING → IF NOT EXISTS (...) INSERT
+-- GED Elise — SQL Server schema
 -- ============================================================================
 
--- Drop existing tables with potentially wrong schema (VARCHAR instead of UNIQUEIDENTIFIER)
+-- Drop existing tables
 IF OBJECT_ID('dbo.document_acls', 'U') IS NOT NULL
     DROP TABLE dbo.document_acls;
 
@@ -52,10 +36,8 @@ BEGIN
         is_ocr_processed    BIT               NOT NULL DEFAULT 0,
         ocr_text            NVARCHAR(MAX),
         extracted_text      NVARCHAR(MAX),
-        -- was TEXT[] in PostgreSQL — stored as JSON array, e.g. ["invoice","pdf"]
         tags                NVARCHAR(MAX),
         category            NVARCHAR(200),
-        -- was JSONB in PostgreSQL — stored as JSON object
         metadata            NVARCHAR(MAX),
         version             INT               NOT NULL DEFAULT 1,
         parent_document_id  UNIQUEIDENTIFIER
@@ -121,7 +103,6 @@ BEGIN
     CREATE TABLE dbo.document_metadata (
         id           UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
         document_id  UNIQUEIDENTIFIER  NOT NULL REFERENCES dbo.documents (id) ON DELETE CASCADE,
-        -- stored as string enum (e.g. 'Text', 'Number', 'Date')
         [key]        NVARCHAR(200)     NOT NULL,
         value        NVARCHAR(MAX),
         type         NVARCHAR(50)      NOT NULL DEFAULT 'Text',
@@ -167,7 +148,7 @@ BEGIN
         created_by   UNIQUEIDENTIFIER  NOT NULL,
         created_at   DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
         updated_at   DATETIME2,
-        is_active    BIT               NOT NULL DEFAULT 1    -- was DEFAULT true
+        is_active    BIT               NOT NULL DEFAULT 1
     );
 END
 
@@ -188,8 +169,8 @@ BEGIN
     );
 END
 
--- SQL Server does not support two cascading FK paths to the same table in one
--- statement, so document_id uses NO ACTION (handled by application logic).
+-- SQL Server limitation: cannot have multiple cascading paths to the same table
+-- document_id uses NO ACTION and is handled by application logic
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_group_members_group_doc' AND object_id = OBJECT_ID('dbo.document_group_members'))
     CREATE UNIQUE INDEX ix_group_members_group_doc ON dbo.document_group_members (group_id, document_id);
 
@@ -216,8 +197,8 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_user_group_assignments
 
 
 -- ─── EF Migrations history ────────────────────────────────────────────────────
--- EF Core creates this table automatically on first migration run.
--- We pre-create it here so the INSERT below does not fail on a fresh database.
+-- EF Core automatically creates this table on first migration run.
+-- Pre-creating it here prevents migration history insert failures on fresh databases.
 IF OBJECT_ID('dbo.__EFMigrationsHistory', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.__EFMigrationsHistory (
@@ -226,7 +207,6 @@ BEGIN
     );
 END
 
--- was: INSERT ... ON CONFLICT DO NOTHING
 IF NOT EXISTS (SELECT 1 FROM dbo.__EFMigrationsHistory WHERE MigrationId = '20260313114636_InitialCreate')
     INSERT INTO dbo.__EFMigrationsHistory (MigrationId, ProductVersion)
     VALUES ('20260313114636_InitialCreate', '8.0.25');

@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
-using GED.Core.Interfaces;          // ← NEW: IDocumentService
+using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
@@ -23,21 +23,21 @@ public class DocumentGroupController : ControllerBase
 {
     private readonly GedDbContext                       _db;
     private readonly AuthService                        _authService;
-    private readonly IDocumentService                   _documentService; // ← NEW
-    private readonly ISearchService                     _searchService;   // ← NEW
+    private readonly IDocumentService                   _documentService;
+    private readonly ISearchService                     _searchService;
     private readonly ILogger<DocumentGroupController>   _logger;
 
     public DocumentGroupController(
         GedDbContext                  db,
         AuthService                   authService,
-        IDocumentService              documentService,  // ← NEW
-        ISearchService                searchService,    // ← NEW
+        IDocumentService              documentService,
+        ISearchService                searchService,
         ILogger<DocumentGroupController> logger)
     {
         _db              = db;
         _authService     = authService;
-        _documentService = documentService;              // ← NEW
-        _searchService   = searchService;                // ← NEW
+        _documentService = documentService;
+        _searchService   = searchService;
         _logger          = logger;
     }
 
@@ -296,7 +296,7 @@ public class DocumentGroupController : ControllerBase
         // Expand ACL rows to existing assignees
         await PropagateNewDocumentsToAssignments(id, validDocIds, adminId.Value);
 
-        // ── NEW: re-index each new document so allowedUserIds is up to date ───
+        // Re-index each new document so allowedUserIds is up to date
         foreach (var docId in validDocIds)
         {
             var doc = await _documentService.GetDocumentByIdAsync(docId);
