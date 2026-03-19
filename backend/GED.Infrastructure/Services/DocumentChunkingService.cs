@@ -163,8 +163,12 @@ public class DocumentChunkingService
                 slideIndex++;
             }
 
-            // Move forward by (ChunkSize - overlap) so consecutive chunks share context
-            start += _chunkSize - _chunkOverlap;
+            // Move forward by _chunkOverlap so consecutive chunks share exactly
+            // _chunkOverlap characters of context. This ensures that if a sentence
+            // break cuts chunk0 early, chunk1 starts at start+overlap (which is
+            // BEFORE the break), covering the gap that would exist if step were
+            // _chunkSize-_chunkOverlap.
+            start += _chunkOverlap;
         }
 
         _logger.LogInformation(

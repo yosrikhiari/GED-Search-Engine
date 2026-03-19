@@ -3,6 +3,7 @@ using GED.Core.Models;
 using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
@@ -29,7 +30,8 @@ public class DocumentService : IDocumentService
         ITextExtractionService textExtractionService,
         GedDbContext db,
         DocumentIngestionPipeline ingestionPipeline,  // ✅ Already in constructor
-        DocumentDateExtractor? dateExtractor = null)
+        DocumentDateExtractor? dateExtractor = null,
+        IConfiguration? configuration = null)
     {
         _logger = logger;
         _storageService = storageService;
@@ -37,7 +39,7 @@ public class DocumentService : IDocumentService
         _ingestionPipeline = ingestionPipeline;  // ✅ Already assigned
         _db = db;
         _dateExtractor = dateExtractor;
-        _basePath = "/var/lib/ged/documents";
+        _basePath = configuration?["Document:StoragePath"] ?? "/var/lib/ged/documents";
         Directory.CreateDirectory(_basePath);
     }
 

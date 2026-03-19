@@ -54,6 +54,9 @@ public class NlpService : INlpService
         "ابحث","اعرض","أظهر","جد","قدم"
     };
 
+    // French accent characters for language detection - static to avoid reallocation
+    private static readonly char[] FrenchAccents = { 'é', 'è', 'ê', 'ë', 'à', 'â', 'ù', 'û', 'ô', 'î', 'ï', 'ç', 'œ', 'æ' };
+
     public NlpService(
         HttpClient httpClient,
         ILogger<NlpService> logger,
@@ -66,6 +69,12 @@ public class NlpService : INlpService
         _embedEndpoint = configuration["NLP:EmbedApiEndpoint"]
                          ?? "http://localhost:11434/api/embed";
         _embedModel  = configuration["NLP:EmbedModel"] ?? "nomic-embed-text";
+
+        // Warn if HttpClient doesn't have a timeout configured
+        if (_httpClient.Timeout == TimeSpan.FromMilliseconds(Timeout.Infinite))
+        {
+            _logger.LogWarning("HttpClient has no timeout configured. Consider setting HttpClient.Timeout in DI configuration.");
+        }
     }
 
     // ── INlpService ───────────────────────────────────────────────────────────
@@ -257,8 +266,7 @@ public class NlpService : INlpService
         if ((float)arabicChars / totalLetters > 0.15f) return "ar";
 
         // French signals: accented characters or French-specific tokens
-        var frenchAccents = new[] { 'é', 'è', 'ê', 'ë', 'à', 'â', 'ù', 'û', 'ô', 'î', 'ï', 'ç', 'œ', 'æ' };
-        var hasFrenchAccent = text.Any(c => frenchAccents.Contains(char.ToLower(c)));
+        var hasFrenchAccent = text.Any(c => FrenchAccents.Contains(char.ToLower(c)));
 
         var lowerText = text.ToLower();
         var frenchTokens = new[] { "les", "des", "est", "dans", "avec", "pour", "sur", "qui", "que", "une", "par", "tout" };

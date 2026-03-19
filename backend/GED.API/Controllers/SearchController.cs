@@ -58,8 +58,7 @@ public class SearchController : ControllerBase
 
         if (!string.IsNullOrEmpty(username))
         {
-            var user = _authService.GetAllUsers()
-                .FirstOrDefault(u => u.Username == username);
+            var user = _authService.GetUserByUsername(username);
 
             request.UserId                = user?.Id.ToString();
             request.UserRole              = role;

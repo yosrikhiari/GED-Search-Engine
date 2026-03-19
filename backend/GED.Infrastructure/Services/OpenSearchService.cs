@@ -31,8 +31,8 @@ public class OpenSearchService : ISearchService
     private readonly GedDbContext                  _db;          // ← NEW: for ACL lookups
     private readonly ILogger<OpenSearchService>    _logger;
 
-    private const string DocumentIndex = "ged-documents";
-    private const int    EmbeddingDim  = 768;
+    private readonly string _documentIndex;
+    private const int       EmbeddingDim  = 768;
 
     private readonly float _bm25Weight;
     private readonly float _semanticWeight;
@@ -71,6 +71,7 @@ public class OpenSearchService : ISearchService
         _nlpService        = nlpService;
         _db                = db;                    // ← NEW
         _logger            = logger;
+        _documentIndex     = configuration["Search:IndexName"] ?? "ged-documents";
         _bm25Weight        = configuration.GetValue<float>("Search:Bm25Weight",       0.6f);
         _semanticWeight    = configuration.GetValue<float>("Search:SemanticWeight",    0.4f);
         _semanticThreshold = configuration.GetValue<float>("Search:SemanticThreshold", 0.30f);
@@ -213,7 +214,7 @@ public class OpenSearchService : ISearchService
         try
         {
             var response = await _client.SearchAsync<DocumentIndexModel>(s => s
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .From((request.Page - 1) * request.PageSize)
                 .Size(request.PageSize)
                 .Query(q => BuildPrecisionQuery(q, processedQuery, request, nlQuery))
@@ -254,7 +255,7 @@ public class OpenSearchService : ISearchService
             var k = Math.Min(request.PageSize * 3, 50);
 
             var response = await _client.SearchAsync<DocumentIndexModel>(s => s
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .Size(k)
                 .Query(q => q
                     .Bool(b =>
@@ -266,8 +267,17 @@ public class OpenSearchService : ISearchService
                         };
 
                         // ── ACL filter for non-admins ─────────────────────────
-                        // NEW: same logic as BuildPrecisionQuery
-                        if (request.UserRole != "Admin" && request.UserId != null)
+                        // If user is authenticated but UserId is null, return no results
+                        // This prevents data leakage when authentication fails silently
+                        bool isNonAdminWithValidId = request.UserRole != "Admin" && !string.IsNullOrEmpty(request.UserId);
+                        bool isNonAdminWithoutId = request.UserRole != "Admin" && string.IsNullOrEmpty(request.UserId);
+
+                        if (isNonAdminWithoutId)
+                        {
+                            // User is not Admin but has no UserId - return no results
+                            filters.Add(fq => fq.Term(t => t.Field("id").Value(Guid.Empty.ToString())));
+                        }
+                        else if (isNonAdminWithValidId)
                         {
                             var userId = request.UserId;
                             var cats   = request.UserAllowedCategories ?? new List<string>();
@@ -352,7 +362,7 @@ public class OpenSearchService : ISearchService
         if (missingIds.Any())
         {
             var fetchResponse = await _client.MultiGetAsync(mg => mg
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .GetMany<DocumentIndexModel>(missingIds.Select(id => id.ToString())),
                 cancellationToken);
 
@@ -437,13 +447,13 @@ public class OpenSearchService : ISearchService
             }
 
             var response = await _client.IndexAsync(indexModel, i => i
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .Id(document.Id.ToString()),
                 cancellationToken);
 
             if (response.IsValid)
             {
-                await _client.Indices.RefreshAsync(DocumentIndex, r => r, cancellationToken);
+                await _client.Indices.RefreshAsync(_documentIndex, r => r, cancellationToken);
                 _logger.LogInformation(
                     "✅ Document {Id} indexed (embedding={HasEmb}, aclUsers={AclCount})",
                     document.Id, indexModel.Embedding != null, aclUserIds.Count);
@@ -549,6 +559,7 @@ public class OpenSearchService : ISearchService
         string query,
         int topK = 5,
         List<string>? categories = null,
+        List<Guid>? documentIds = null,
         string? userId = null,
         string? userRole = null,
         List<string>? userAllowedCategories = null,
@@ -560,7 +571,7 @@ public class OpenSearchService : ISearchService
 
         var searchResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
             .Index("ged-chunks")
-            .Size(topK * 2) // Get more results before filtering
+            .Size(topK * 2)
             .Query(q =>
             {
                 var knn = q.Knn(k => k
@@ -568,8 +579,15 @@ public class OpenSearchService : ISearchService
                     .Vector(queryEmbedding)
                     .K(topK * 2));
 
-                // Build filters list
                 var filters = new List<Func<QueryContainerDescriptor<ChunkIndexModel>, QueryContainer>>();
+
+                // Document ID filter — restricts chunk search to specific documents
+                if (documentIds?.Any() == true)
+                {
+                    filters.Add(f => f.Terms(t => t
+                        .Field("document_id")
+                        .Terms(documentIds.Select(id => id.ToString()))));
+                }
 
                 // Category filter
                 if (categories?.Any() == true)
@@ -580,23 +598,16 @@ public class OpenSearchService : ISearchService
                 }
 
                 // ── ACL filter for non-admins ─────────────────────────────────────
-                // Same 3-path ACL logic as BuildPrecisionQuery:
-                //   1. Document is open (accessLevel == "open")
-                //   2. User's ID is in allowedUserIds
-                //   3. Document's category is in user's AllowedCategories
                 if (userRole != "Admin" && userId != null)
                 {
                     var cats = userAllowedCategories ?? new List<string>();
 
                     var aclShould = new List<Func<QueryContainerDescriptor<ChunkIndexModel>, QueryContainer>>
                     {
-                        // Path 1 — chunk is open to all authenticated users
                         s => s.Term(t => t.Field("accessLevel").Value("open")),
-                        // Path 2 — user has an explicit ACL grant
                         s => s.Term(t => t.Field("allowedUserIds").Value(userId))
                     };
 
-                    // Path 3 — category-based access (user's AllowedCategories list)
                     foreach (var cat in cats)
                     {
                         var c = cat;
@@ -609,7 +620,6 @@ public class OpenSearchService : ISearchService
                 }
                 else if (userRole != "Admin")
                 {
-                    // Non-admin user with no userId provided — deny all
                     filters.Add(fq => fq.Term(t => t.Field("accessLevel").Value("__impossible__")));
                 }
 
@@ -768,13 +778,22 @@ public class OpenSearchService : ISearchService
         // ── Hard filter: only indexed documents ───────────────────────────────
         filterQueries.Add(fq => fq.Term(t => t.Field("status").Value("Indexed")));
 
-        // ── NEW: ACL filter for non-admin users ───────────────────────────────
+        // ── ACL filter for non-admin users ─────────────────────────────────────
         // Admin bypasses this filter entirely — sees all documents.
         // Everyone else must satisfy at least one of:
         //   1. Document is explicitly open (accessLevel == "open")
         //   2. User's ID is in allowedUserIds
         //   3. Document's category is in the user's AllowedCategories list
-        if (request.UserRole != "Admin" && request.UserId != null)
+        // If user is authenticated but UserId is null, return no results to prevent data leakage
+        bool isNonAdminWithValidId = request.UserRole != "Admin" && !string.IsNullOrEmpty(request.UserId);
+        bool isNonAdminWithoutId = request.UserRole != "Admin" && string.IsNullOrEmpty(request.UserId);
+
+        if (isNonAdminWithoutId)
+        {
+            // User is not Admin but has no UserId - return no results
+            filterQueries.Add(fq => fq.Term(t => t.Field("id").Value(Guid.Empty.ToString())));
+        }
+        else if (isNonAdminWithValidId)
         {
             var userId = request.UserId;
             var cats   = request.UserAllowedCategories ?? new List<string>();
@@ -1115,7 +1134,7 @@ public class OpenSearchService : ISearchService
         try
         {
             var response = await _client.DeleteAsync<DocumentIndexModel>(
-                documentId.ToString(), d => d.Index(DocumentIndex), cancellationToken);
+                documentId.ToString(), d => d.Index(_documentIndex), cancellationToken);
             return response.IsValid;
         }
         catch (Exception ex)
@@ -1174,13 +1193,13 @@ public class OpenSearchService : ISearchService
             indexModels.AddRange(await Task.WhenAll(tasks));
 
             var response = await _client.BulkAsync(b => b
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .IndexMany(indexModels),
                 cancellationToken);
 
             if (response.IsValid && !response.ItemsWithErrors.Any())
             {
-                await _client.Indices.RefreshAsync(DocumentIndex, r => r, cancellationToken);
+                await _client.Indices.RefreshAsync(_documentIndex, r => r, cancellationToken);
                 return true;
             }
 
@@ -1200,13 +1219,13 @@ public class OpenSearchService : ISearchService
         try
         {
             var docResponse = await _client.GetAsync<DocumentIndexModel>(
-                documentId.ToString(), g => g.Index(DocumentIndex), cancellationToken);
+                documentId.ToString(), g => g.Index(_documentIndex), cancellationToken);
 
             if (docResponse.Found && docResponse.Source.Embedding != null)
             {
                 var embedding   = docResponse.Source.Embedding;
                 var knnResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
-                    .Index(DocumentIndex)
+                    .Index(_documentIndex)
                     .Size(count + 1)
                     .Query(q => q.Bool(b => b
                         .Filter(f => f.Term(t => t.Field("status").Value("Indexed")))
@@ -1232,7 +1251,7 @@ public class OpenSearchService : ISearchService
             }
 
             var mltResponse = await _client.SearchAsync<DocumentIndexModel>(s => s
-                .Index(DocumentIndex)
+                .Index(_documentIndex)
                 .Size(count + 1)
                 .Query(q => q.MoreLikeThis(mlt => mlt
                     .Fields(f => f.Field(d => d.Title).Field(d => d.Description)

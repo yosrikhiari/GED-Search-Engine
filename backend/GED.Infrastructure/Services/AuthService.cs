@@ -148,6 +148,8 @@ private void PurgeExpiredSessions()
             };
 
             _users.Add(user);
+            // Maintain username index
+            _usersByUsername[user.Username.ToLowerInvariant()] = user;
             SaveUsers();
 
             _logger.LogInformation(
@@ -211,11 +213,33 @@ private void PurgeExpiredSessions()
     {
         lock (_lock)
         {
-            var user = _users.FirstOrDefault(u =>
-                u.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
+            var user = GetUserByUsernameInternal(username);
             return user?.AllowedCategories;
         }
     }
+
+    /// <summary>
+    /// Fast O(1) lookup by username using case-insensitive comparison.
+    /// Returns null if user not found.
+    /// </summary>
+    public UserDto? GetUserByUsername(string username)
+    {
+        lock (_lock)
+        {
+            var user = GetUserByUsernameInternal(username);
+            return user == null ? null : MapToDto(user);
+        }
+    }
+
+    private AppUser? GetUserByUsernameInternal(string username)
+    {
+        // Use the username index for O(1) lookup
+        var key = username.ToLowerInvariant();
+        return _usersByUsername.TryGetValue(key, out var user) ? user : null;
+    }
+
+    // Username lookup index - maintained in sync with _users list
+    private Dictionary<string, AppUser> _usersByUsername = new(StringComparer.OrdinalIgnoreCase);
 
     // ── Private ───────────────────────────────────────────────────────────────
     private static string HashPassword(string password)
@@ -321,7 +345,15 @@ private void EnsureDefaultAdmin()
             if (!File.Exists(_usersFilePath)) return;
             var json  = File.ReadAllText(_usersFilePath);
             var users = JsonSerializer.Deserialize<List<AppUser>>(json);
-            if (users != null) _users.AddRange(users);
+            if (users != null)
+            {
+                _users.AddRange(users);
+                // Build username index for O(1) lookup
+                foreach (var u in users)
+                {
+                    _usersByUsername[u.Username.ToLowerInvariant()] = u;
+                }
+            }
             _logger.LogInformation("✅ Loaded {Count} users from {Path}", _users.Count, _usersFilePath);
         }
         catch (Exception ex)

@@ -216,6 +216,7 @@ public class RagService : IRagService
             chunkHits = await _openSearch.SearchChunksAsync(
                 request.Query, topK: _topK,
                 categories: effectiveCategories,
+                documentIds: request.DocumentIds,
                 userId: request.UserId ?? request.Username,
                 userRole: userRole,
                 userAllowedCategories: effectiveCategories,
