@@ -241,7 +241,7 @@
           </div>
         </div>
         <!-- RAG answer panel -->
-        <div v-if="ragMode && (ragAnswer || ragLoading)" class="rag-answer-panel">
+        <div v-if="ragMode && (ragAnswer || ragLoading || ragHistory.length > 0)" class="rag-answer-panel">
           <!-- ── Header ───────────────────────────────────────────────── -->
           <div class="rag-answer-header">
             <div class="elise-avatar-row">
@@ -252,12 +252,23 @@
               </div>
             </div>
             <div class="rag-header-actions">
+              <button v-if="ragHistory.length > 0" @click="ragHistory = []; ragAnswer = ''; ragSources = []" class="rag-clear-btn" title="Nouvelle conversation">🗑 Nouvelle</button>
               <span v-if="ragSources.length" class="rag-source-count">{{ ragSources.length }} source(s)</span>
-              <button @click="ragAnswer = ''; ragSources = []" class="rag-close">✕</button>
+              <button @click="ragAnswer = ''; ragSources = []; ragHistory = []" class="rag-close">✕</button>
             </div>
           </div>
 
-          <!-- ── Loading state ────────────────────────────────────────── -->
+          <!-- ── Conversation history ───────────────────────────────────── -->
+          <div class="rag-conversation">
+            <div v-for="(msg, i) in ragHistory" :key="i" :class="['rag-msg', msg.role === 'user' ? 'rag-msg-user' : 'rag-msg-elise']">
+              <div class="rag-msg-avatar">{{ msg.role === 'user' ? userInitials : '✨' }}</div>
+              <div class="rag-msg-bubble">
+                <p class="rag-msg-text">{{ msg.content }}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Loading indicator ─────────────────────────────────────── -->
           <div v-if="ragLoading" class="rag-thinking">
             <svg class="spinner" style="width:16px;height:16px" fill="none" viewBox="0 0 24 24">
               <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
@@ -265,19 +276,6 @@
             </svg>
             Elise analyse vos documents…
           </div>
-
-          <!-- ── Two-part answer ──────────────────────────────────────── -->
-          <template v-else-if="ragAnswer">
-            <!-- Part 1: Elise conversational intro -->
-            <div class="elise-intro-block">
-              <p class="elise-intro-text">Voici ce que j'ai trouvé dans vos documents :</p>
-            </div>
-
-            <!-- Part 2: Actual query result -->
-            <div class="elise-result-block">
-              <p class="rag-answer-text">{{ ragAnswer }}</p>
-            </div>
-          </template>
 
           <!-- ── Sources ──────────────────────────────────────────────── -->
           <div v-if="ragSources.length" class="rag-sources-grid">
@@ -769,6 +767,8 @@ const ragModeForced = ref(false)   // true if user explicitly forced RAG mode
 const ragAnswer     = ref('')
 const ragSources    = ref([])
 const ragLoading    = ref(false)
+const ragHistory    = ref([])       // conversation memory: { role, content, sources }
+const ragAbortCtrl  = ref(null)    // abort controller for streaming
 const showDocPicker    = ref(false)
 const attachedDocIds   = ref([])
 const pickerDocs       = ref([])
@@ -858,6 +858,9 @@ const toggleRagMode = (fromShortcut = false) => {
     ragTriggerReason.value = null
   } else if (fromShortcut) {
     ragTriggerReason.value = 'Activé via raccourci clavier'
+  }
+  if (ragMode.value && !ragModeForced.value) {
+    ragHistory.value = []
   }
 }
 
@@ -1124,8 +1127,11 @@ const searchByTag = (tag) => { closeDocumentViewer(); searchQuery.value = tag; h
 const deleteDoc = async (doc) => {
   if (!confirm(`Supprimer "${doc.title}" ? Cette action est irréversible.`)) return
   const r = await fetch(`/api/documents/${doc.id}`, { method:'DELETE', headers:{ ...authHeaders(), 'Content-Type':'application/json' } })
-  if (r.ok) { closeDocumentViewer(); handleSearch() }
-  else alert('Erreur lors de la suppression.')
+  if (r.ok) {
+    window.__gedNotify?.(`Document supprimé : ${doc.title}`, 'success', '🗑️')
+    closeDocumentViewer(); handleSearch()
+  }
+  else window.__gedNotify?.('Erreur lors de la suppression.', 'error', '❌')
 }
 
 
@@ -1165,6 +1171,13 @@ const handleSearch = () => {
 const askRag = async () => {
   const query = searchQuery.value.trim()
   if (!query) return
+
+  // Cancel any in-flight stream
+  if (ragAbortCtrl.value) { ragAbortCtrl.value.abort(); ragAbortCtrl.value = null }
+
+  // Push user message to history
+  ragHistory.value.push({ role: 'user', content: query })
+
   ragAnswer.value  = ''
   ragSources.value = []
   ragLoading.value = true
@@ -1172,8 +1185,14 @@ const askRag = async () => {
   searchResults.value     = null
   nlpInterpretation.value = null
   searchError.value       = null
+
+  // Push empty assistant placeholder
+  const assistantMsg = { role: 'assistant', content: '', sources: [] }
+  ragHistory.value.push(assistantMsg)
+
   try {
-    const res = await fetch('/api/rag/ask', {
+    ragAbortCtrl.value = new AbortController()
+    const res = await fetch('/api/rag/ask/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({
@@ -1183,16 +1202,54 @@ const askRag = async () => {
         fromDate:    filters.dateFrom         || undefined,
         toDate:      filters.dateTo           || undefined,
         documentIds: attachedDocIds.value.length ? attachedDocIds.value : undefined,
-      })
+      }),
+      signal: ragAbortCtrl.value.signal
     })
-    if (!res.ok) { searchError.value = `Erreur IA (HTTP ${res.status})`; return }
-    const data = await res.json()
-    ragAnswer.value  = data.answer  || ''
-    ragSources.value = data.sources || []
-  } catch {
-    searchError.value = 'Impossible de contacter le service IA.'
+
+    if (!res.ok) {
+      searchError.value = `Erreur IA (HTTP ${res.status})`
+      assistantMsg.content = `Erreur: HTTP ${res.status}`
+      return
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const msg = JSON.parse(line.slice(6))
+          if (msg.error) {
+            assistantMsg.content += `[Erreur] ${msg.error}`
+          } else if (msg.done) {
+            // Final message contains sources
+          } else if (msg.token) {
+            assistantMsg.content += msg.token
+            ragAnswer.value = assistantMsg.content
+          }
+        } catch { /* malformed JSON, skip */ }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      assistantMsg.content += '\n[Réponse annulée]'
+    } else {
+      searchError.value = 'Impossible de contacter le service IA.'
+      assistantMsg.content = 'Le service IA est indisponible.'
+    }
   } finally {
     ragLoading.value = false
+    ragAbortCtrl.value = null
+    ragAnswer.value = assistantMsg.content
   }
 }
 
@@ -1317,19 +1374,22 @@ const uploadDocuments = async () => {
         successCount++
       } else {
         errorCount++
+        const err = await r.json().catch(() => ({}))
+        window.__gedNotify?.(`Échec upload: ${file.name} — ${err.error || r.status}`, 'error', '❌')
       }
       uploadProgress.value = i + 1
     }
     
     if (successCount > 0) {
+      const msg = `${successCount} document(s) importé(s) avec succès !${errorCount > 0 ? ` ${errorCount} échecs.` : ''}`
+      window.__gedNotify?.(msg, errorCount > 0 ? 'info' : 'success', '✅')
       closeUploadModal()
-      alert(`${successCount} document(s) importé(s) avec succès !${errorCount > 0 ? `\n${errorCount} échecs.` : ''}`)
       if (searchResults.value) handleSearch()
     } else {
-      alert('Échec de l\'import de tous les fichiers.')
+      window.__gedNotify?.('Échec de l\'import de tous les fichiers.', 'error', '❌')
     }
   } catch { 
-    alert("Erreur réseau lors de l'import.") 
+    window.__gedNotify?.("Erreur réseau lors de l'import.", 'error', '❌')
   }
   finally { 
     uploading.value = false 
@@ -1801,6 +1861,20 @@ const uploadDocuments = async () => {
 .src-excerpt { font-size:.75rem; color:#6b7280; font-style:italic; margin-top:.25rem; line-height:1.5; }
 .src-view-btn { flex-shrink:0; padding:.3rem .65rem; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; border-radius:7px; font-size:.75rem; font-weight:600; cursor:pointer; white-space:nowrap; }
 .src-view-btn:hover { background:#dbeafe; }
+
+/* ── RAG Conversation History ── */
+.rag-conversation { display:flex; flex-direction:column; gap:.875rem; padding:1rem 1.25rem; max-height:420px; overflow-y:auto; }
+.rag-msg { display:flex; align-items:flex-start; gap:.6rem; }
+.rag-msg-user { flex-direction:row-reverse; }
+.rag-msg-user .rag-msg-bubble { background:#2563eb; color:white; border-radius:14px 4px 14px 14px; }
+.rag-msg-user .rag-msg-text { color:white; }
+.rag-msg-user .rag-msg-avatar { background:#1d4ed8; color:white; font-size:.65rem; font-weight:700; }
+.rag-msg-elise .rag-msg-bubble { background:#f0f4ff; border:1px solid #dde4ff; border-radius:4px 14px 14px 14px; }
+.rag-msg-avatar { width:30px; height:30px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:.8rem; }
+.rag-msg-bubble { padding:.55rem .875rem; max-width:75%; }
+.rag-msg-text { font-size:.875rem; line-height:1.6; white-space:pre-wrap; word-break:break-word; color:#1f2937; }
+.rag-clear-btn { background:rgba(255,255,255,.15); border:1px solid rgba(255,255,255,.3); color:white; border-radius:7px; padding:.2rem .6rem; font-size:.72rem; font-weight:600; cursor:pointer; transition:background .2s; }
+.rag-clear-btn:hover { background:rgba(255,255,255,.3); }
 
 .elise-attach-btn { padding: .65rem .9rem; border: 2px dashed #a5b4fc; border-radius: 9px; background: #f5f3ff; color: #4f46e5; font-size: .82rem; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
 .elise-attach-btn:hover { background: #ede9fe; border-color: #6366f1; }

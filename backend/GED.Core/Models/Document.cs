@@ -66,7 +66,8 @@ public enum DocumentStatus
     Processing,
     Indexed,
     Failed,
-    Deleted
+    Deleted,
+    Expired
 }
 
 public class DocumentMetadata

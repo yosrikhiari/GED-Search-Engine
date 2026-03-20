@@ -1227,7 +1227,75 @@ public class OpenSearchService : ISearchService
     /// <inheritdoc />
     public async Task<bool> UpdateDocumentIndexAsync(
         Document document, CancellationToken cancellationToken = default)
-        => await IndexDocumentAsync(document, cancellationToken);
+    {
+        var result = await IndexDocumentAsync(document, cancellationToken);
+        
+        // Also re-index all chunks to update their ACL fields immediately
+        if (result)
+        {
+            await RefreshChunksAclAsync(document.Id, cancellationToken);
+        }
+        
+        return result;
+    }
+
+    /// <summary>
+    /// Refreshes ACL fields on all chunks for a document.
+    /// Called after ACL grants/revokes to ensure chunks respect the latest access control.
+    /// </summary>
+    private async Task RefreshChunksAclAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Fetch current ACL grants
+            var aclUserIds = await _db.DocumentAcls
+                .Where(a => a.DocumentId == documentId &&
+                            (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
+                .Select(a => a.UserId.ToString())
+                .ToListAsync(cancellationToken);
+
+            var accessLevel = aclUserIds.Count > 0 ? "restricted" : "open";
+
+            // Search for existing chunks
+            var chunksResponse = await _client.SearchAsync<ChunkIndexModel>(s => s
+                .Index("ged-chunks")
+                .Size(1000)
+                .Query(q => q.Term(t => t.Field("document_id").Value(documentId.ToString()))),
+                cancellationToken);
+
+            if (!chunksResponse.IsValid || !chunksResponse.Hits.Any())
+                return;
+
+            // Update ACL fields on each chunk
+            foreach (var hit in chunksResponse.Hits)
+            {
+                hit.Source.AllowedUserIds = aclUserIds;
+                hit.Source.AccessLevel = accessLevel;
+            }
+
+            // Bulk update chunks with refreshed ACL
+            var bulkResponse = await _client.BulkAsync(b => b
+                .Index("ged-chunks")
+                .IndexMany(chunksResponse.Hits.Select(h => h.Source)),
+                cancellationToken);
+
+            if (bulkResponse.IsValid)
+            {
+                await _client.Indices.RefreshAsync("ged-chunks", r => r, cancellationToken);
+                _logger.LogInformation(
+                    "✅ Refreshed ACL on {Count} chunks for document {DocId}",
+                    chunksResponse.Hits.Count, documentId);
+            }
+            else
+            {
+                _logger.LogWarning("Failed to refresh chunk ACL for document {DocId}", documentId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error refreshing chunk ACL for document {DocId}", documentId);
+        }
+    }
 
     /// <inheritdoc />
     public async Task<bool> DeleteDocumentIndexAsync(
@@ -1235,8 +1303,13 @@ public class OpenSearchService : ISearchService
     {
         try
         {
+            // Delete document from main index
             var response = await _client.DeleteAsync<DocumentIndexModel>(
                 documentId.ToString(), d => d.Index(_documentIndex), cancellationToken);
+
+            // Also delete all chunks for this document
+            await DeleteChunksForDocumentAsync(documentId, cancellationToken);
+
             return response.IsValid;
         }
         catch (Exception ex)

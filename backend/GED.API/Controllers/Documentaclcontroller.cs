@@ -26,19 +26,22 @@ public class DocumentAclController : ControllerBase
     private readonly ISearchService                     _searchService;
     private readonly IDocumentService                   _documentService;
     private readonly ILogger<DocumentAclController>     _logger;
+    private readonly IWebhookService                    _webhookService;
 
     public DocumentAclController(
         GedDbContext                   db,
         AuthService                    authService,
         ISearchService                 searchService,
         IDocumentService               documentService,
-        ILogger<DocumentAclController>  logger)
+        ILogger<DocumentAclController>  logger,
+        IWebhookService                webhookService)
     {
         _db              = db;
         _authService     = authService;
         _searchService   = searchService;
         _documentService = documentService;
         _logger          = logger;
+        _webhookService  = webhookService;
     }
 
     // ── Admin: list ACL entries for a document ────────────────────────────────
@@ -129,7 +132,7 @@ public class DocumentAclController : ControllerBase
             adminId, request.Permission, documentId, request.UserId,
             request.ExpiresAt?.ToString("yyyy-MM-dd") ?? "never");
 
-        return Ok(new DocumentAclDto
+        var result = new DocumentAclDto
         {
             Id         = existing?.Id ?? Guid.NewGuid(),
             DocumentId = documentId,
@@ -140,7 +143,21 @@ public class DocumentAclController : ControllerBase
             GrantedAt  = DateTime.UtcNow,
             ExpiresAt  = request.ExpiresAt,
             IsActive   = true
+        };
+
+        FireWebhook("document.access_granted", new WebhookPayload
+        {
+            Event = "document.access_granted",
+            Access = new WebhookAclData
+            {
+                DocumentId = documentId,
+                UserId = request.UserId,
+                Permission = request.Permission.ToString(),
+                GrantedBy = adminId.ToString()
+            }
         });
+
+        return Ok(result);
     }
 
     // ── Admin: revoke access ──────────────────────────────────────────────────
@@ -168,6 +185,18 @@ public class DocumentAclController : ControllerBase
         }
 
         _logger.LogInformation("ACL entry {AclId} revoked for document {DocId}", aclId, documentId);
+
+        FireWebhook("document.access_revoked", new WebhookPayload
+        {
+            Event = "document.access_revoked",
+            Access = new WebhookAclData
+            {
+                DocumentId = documentId,
+                UserId = acl.UserId,
+                Permission = acl.Permission.ToString()
+            }
+        });
+
         return Ok(new { message = "Access revoked." });
     }
 
@@ -214,6 +243,284 @@ public class DocumentAclController : ControllerBase
         return Ok(result);
     }
 
+    // ── Batch ACL operations ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Bulk grant access to multiple documents for multiple users.
+    /// </summary>
+    [HttpPost("acl/batch")]
+    [Authorize(Roles = "Admin")]
+    public async Task<ActionResult<BatchAclResult>> BatchGrantAccess(
+        [FromBody] BatchAclRequest request)
+    {
+        var adminId = GetCurrentUserId();
+        if (adminId == null) return Unauthorized();
+
+        if ((request.DocumentIds == null || !request.DocumentIds.Any()) &&
+            (request.UserIds == null || !request.UserIds.Any()))
+            return BadRequest(new { error = "Provide at least documentIds or userIds." });
+
+        var results = new BatchAclResult { TotalRequested = 0, Succeeded = 0, Failed = 0 };
+        var tasks = new List<Task>();
+
+        // Cross-product: grant every user access to every document
+        var docIds = request.DocumentIds?.Distinct().ToList() ?? new List<Guid>();
+        var userIds = request.UserIds?.Distinct().ToList() ?? new List<Guid>();
+
+        if (docIds.Count == 0 || userIds.Count == 0)
+            return BadRequest(new { error = "Both documentIds and userIds must be provided for batch grant." });
+
+        if (docIds.Count * userIds.Count > 500)
+            return BadRequest(new { error = "Maximum 500 access grants per request." });
+
+        foreach (var docId in docIds)
+        {
+            foreach (var userId in userIds)
+            {
+                results.TotalRequested++;
+                tasks.Add(GrantSingleAclAsync(docId, userId, request.Permission, request.ExpiresAt, adminId.Value, results));
+            }
+        }
+
+        await Task.WhenAll(tasks);
+
+        _logger.LogInformation(
+            "Batch ACL grant: {Total} operations, {Succeeded} succeeded, {Failed} failed",
+            results.TotalRequested, results.Succeeded, results.Failed);
+
+        return Ok(results);
+    }
+
+    /// <summary>
+    /// Bulk revoke access from multiple users across multiple documents.
+    /// </summary>
+    [HttpDelete("acl/batch")]
+    [Authorize(Roles = "Admin")]
+    public async Task<ActionResult<BatchAclResult>> BatchRevokeAccess(
+        [FromBody] BatchRevokeRequest request)
+    {
+        var adminId = GetCurrentUserId();
+        if (adminId == null) return Unauthorized();
+
+        if (request.AclIds == null || !request.AclIds.Any())
+            return BadRequest(new { error = "Provide ACL entry IDs to revoke." });
+
+        if (request.AclIds.Count > 500)
+            return BadRequest(new { error = "Maximum 500 revocations per request." });
+
+        var results = new BatchAclResult { TotalRequested = request.AclIds.Count, Succeeded = 0, Failed = 0 };
+        var revokedDocIds = new HashSet<Guid>();
+        var revokedEntries = new List<(Guid DocId, Guid UserId, string Permission)>();
+
+        foreach (var aclId in request.AclIds)
+        {
+            try
+            {
+                var acl = await _db.DocumentAcls.FirstOrDefaultAsync(a => a.Id == aclId);
+                if (acl == null)
+                {
+                    results.Failed++;
+                    results.Errors.Add($"ACL {aclId}: not found");
+                    continue;
+                }
+
+                revokedEntries.Add((acl.DocumentId, acl.UserId, acl.Permission.ToString()));
+                _db.DocumentAcls.Remove(acl);
+                revokedDocIds.Add(acl.DocumentId);
+                results.Succeeded++;
+            }
+            catch (Exception ex)
+            {
+                results.Failed++;
+                results.Errors.Add($"ACL {aclId}: {ex.Message}");
+            }
+        }
+
+        await _db.SaveChangesAsync();
+
+        // Re-index affected documents
+        foreach (var docId in revokedDocIds)
+        {
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+        }
+
+        foreach (var (docId, userId, permission) in revokedEntries)
+        {
+            FireWebhook("document.access_revoked", new WebhookPayload
+            {
+                Event = "document.access_revoked",
+                Access = new WebhookAclData
+                {
+                    DocumentId = docId,
+                    UserId = userId,
+                    Permission = permission
+                }
+            });
+        }
+
+        _logger.LogInformation(
+            "Batch ACL revoke: {Total} requested, {Succeeded} succeeded, {Failed} failed",
+            results.TotalRequested, results.Succeeded, results.Failed);
+
+        return Ok(results);
+    }
+
+    /// <summary>
+    /// Grant access to multiple users for a single document.
+    /// </summary>
+    [HttpPost("{documentId:guid}/acl/users")]
+    [Authorize(Roles = "Admin")]
+    public async Task<ActionResult<BatchAclResult>> GrantAccessToUsers(
+        Guid documentId,
+        [FromBody] GrantAccessToUsersRequest request)
+    {
+        var adminId = GetCurrentUserId();
+        if (adminId == null) return Unauthorized();
+
+        if (request.UserIds == null || !request.UserIds.Any())
+            return BadRequest(new { error = "Provide user IDs." });
+
+        if (request.UserIds.Count > 100)
+            return BadRequest(new { error = "Maximum 100 users per request." });
+
+        var results = new BatchAclResult { TotalRequested = request.UserIds.Count, Succeeded = 0, Failed = 0 };
+
+        foreach (var userId in request.UserIds)
+        {
+            await GrantSingleAclAsync(documentId, userId, request.Permission, request.ExpiresAt, adminId.Value, results);
+        }
+
+        // Re-index document after all grants
+        var doc = await _documentService.GetDocumentByIdAsync(documentId);
+        if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+
+        return Ok(results);
+    }
+
+    /// <summary>
+    /// Bulk revoke all access to documents matching a filter.
+    /// </summary>
+    [HttpPost("acl/bulk-revoke")]
+    [Authorize(Roles = "Admin")]
+    public async Task<ActionResult<BatchAclResult>> BulkRevokeByFilter(
+        [FromBody] BulkRevokeByFilterRequest request)
+    {
+        var adminId = GetCurrentUserId();
+        if (adminId == null) return Unauthorized();
+
+        var query = _db.DocumentAcls.AsQueryable();
+
+        if (request.DocumentIds?.Any() == true)
+            query = query.Where(a => request.DocumentIds.Contains(a.DocumentId));
+
+        if (request.UserIds?.Any() == true)
+            query = query.Where(a => request.UserIds.Contains(a.UserId));
+
+        if (request.ExpiredOnly == true)
+            query = query.Where(a => a.ExpiresAt != null && a.ExpiresAt <= DateTime.UtcNow);
+
+        var toRemove = await query.ToListAsync();
+
+        if (toRemove.Count == 0)
+            return Ok(new BatchAclResult { TotalRequested = 0, Succeeded = 0, Failed = 0 });
+
+        var docIds = toRemove.Select(a => a.DocumentId).Distinct().ToHashSet();
+        _db.DocumentAcls.RemoveRange(toRemove);
+        await _db.SaveChangesAsync();
+
+        foreach (var docId in docIds)
+        {
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+        }
+
+        foreach (var removed in toRemove)
+        {
+            FireWebhook("document.access_revoked", new WebhookPayload
+            {
+                Event = "document.access_revoked",
+                Access = new WebhookAclData
+                {
+                    DocumentId = removed.DocumentId,
+                    UserId = removed.UserId,
+                    Permission = removed.Permission.ToString()
+                }
+            });
+        }
+
+        return Ok(new BatchAclResult
+        {
+            TotalRequested = toRemove.Count,
+            Succeeded = toRemove.Count,
+            Failed = 0
+        });
+    }
+
+    private async Task GrantSingleAclAsync(
+        Guid docId, Guid userId, int permission, DateTime? expiresAt, Guid adminId, BatchAclResult results)
+    {
+        try
+        {
+            var existing = await _db.DocumentAcls
+                .FirstOrDefaultAsync(a => a.DocumentId == docId && a.UserId == userId);
+
+            var aclPermission = permission switch
+            {
+                >= 3 => AclPermission.FullControl,
+                2 => AclPermission.Delete,
+                1 => AclPermission.Write,
+                _ => AclPermission.Read
+            };
+
+            if (existing != null)
+            {
+                existing.Permission = aclPermission;
+                existing.ExpiresAt = expiresAt;
+                existing.GrantedAt = DateTime.UtcNow;
+                existing.GrantedBy = adminId;
+            }
+            else
+            {
+                _db.DocumentAcls.Add(new DocumentAcl
+                {
+                    Id = Guid.NewGuid(),
+                    DocumentId = docId,
+                    UserId = userId,
+                    Permission = aclPermission,
+                    GrantedAt = DateTime.UtcNow,
+                    GrantedBy = adminId,
+                    ExpiresAt = expiresAt
+                });
+            }
+
+            await _db.SaveChangesAsync();
+
+            // Re-index document
+            var doc = await _documentService.GetDocumentByIdAsync(docId);
+            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+
+            FireWebhook("document.access_granted", new WebhookPayload
+            {
+                Event = "document.access_granted",
+                Access = new WebhookAclData
+                {
+                    DocumentId = docId,
+                    UserId = userId,
+                    Permission = aclPermission.ToString(),
+                    GrantedBy = adminId.ToString()
+                }
+            });
+
+            results.Succeeded++;
+        }
+        catch (Exception ex)
+        {
+            results.Failed++;
+            results.Errors.Add($"Doc {docId} / User {userId}: {ex.Message}");
+        }
+    }
+
     // ── Helper ────────────────────────────────────────────────────────────────
 
     private Guid? GetCurrentUserId()
@@ -221,4 +528,56 @@ public class DocumentAclController : ControllerBase
         var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         return Guid.TryParse(claim, out var id) ? id : null;
     }
+
+    private void FireWebhook(string eventName, WebhookPayload payload)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _webhookService.TriggerEventAsync(eventName, payload);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Webhook delivery failed for event {Event}", eventName);
+            }
+        });
+    }
+}
+
+// ── Batch ACL request/result models ─────────────────────────────────────────
+
+public class BatchAclRequest
+{
+    public List<Guid>? DocumentIds { get; set; }
+    public List<Guid>? UserIds { get; set; }
+    public int Permission { get; set; } = 1;
+    public DateTime? ExpiresAt { get; set; }
+}
+
+public class BatchAclResult
+{
+    public int TotalRequested { get; set; }
+    public int Succeeded { get; set; }
+    public int Failed { get; set; }
+    public List<string> Errors { get; set; } = new();
+}
+
+public class BatchRevokeRequest
+{
+    public List<Guid> AclIds { get; set; } = new();
+}
+
+public class GrantAccessToUsersRequest
+{
+    public List<Guid> UserIds { get; set; } = new();
+    public int Permission { get; set; } = 1;
+    public DateTime? ExpiresAt { get; set; }
+}
+
+public class BulkRevokeByFilterRequest
+{
+    public List<Guid>? DocumentIds { get; set; }
+    public List<Guid>? UserIds { get; set; }
+    public bool? ExpiredOnly { get; set; }
 }

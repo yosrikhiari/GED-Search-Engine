@@ -241,4 +241,54 @@ public class DocumentChunkingServiceTests
         allText.Should().Contain("AAAA");
         allText.Should().Contain("EEEEE");
     }
+
+    [Fact]
+    public void ChunkText_SlidingWindow_FullOverlap_DoesNotInfiniteLoop()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                { "RAG:ChunkSize", "100" },
+                { "RAG:ChunkOverlap", "100" },
+                { "RAG:MinChunkLen", "10" }
+            })
+            .Build();
+
+        var service = new DocumentChunkingService(
+            NullLogger<DocumentChunkingService>.Instance,
+            config);
+
+        var docId = Guid.NewGuid();
+        var text = new string('A', 250);
+
+        var result = service.ChunkText(docId, text);
+
+        result.Should().NotBeEmpty();
+        result.Should().HaveCountLessOrEqualTo(text.Length);
+    }
+
+    [Fact]
+    public void ChunkText_SlidingWindow_ZeroOverlap_CoversAllContent()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                { "RAG:ChunkSize", "100" },
+                { "RAG:ChunkOverlap", "0" },
+                { "RAG:MinChunkLen", "10" }
+            })
+            .Build();
+
+        var service = new DocumentChunkingService(
+            NullLogger<DocumentChunkingService>.Instance,
+            config);
+
+        var docId = Guid.NewGuid();
+        var text = new string('X', 300);
+
+        var result = service.ChunkText(docId, text);
+
+        result.Should().HaveCount(3, "300 chars with 100-char chunks = 3 non-overlapping chunks");
+        result.Sum(c => c.Text.Length).Should().Be(300, "total chars covered should equal text length");
+    }
 }

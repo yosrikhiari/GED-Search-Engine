@@ -92,6 +92,8 @@ public class RagController : ControllerBase
 
     // ── POST /api/rag/ask/stream ──────────────────────────────────────────────
 
+    private const int StreamTimeoutSeconds = 300; // 5 minutes max
+
     [HttpPost("ask/stream")]
     public async Task AskStream([FromBody] RagRequest request, CancellationToken cancellationToken)
     {
@@ -114,20 +116,47 @@ public class RagController : ControllerBase
         Response.Headers["Cache-Control"]     = "no-cache";
         Response.Headers["X-Accel-Buffering"] = "no";
 
+        // Create linked cancellation token with timeout to prevent memory leaks
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(StreamTimeoutSeconds));
+
         try
         {
-            await foreach (var token in _ragService.AskStreamAsync(request, cancellationToken))
+            await foreach (var token in _ragService.AskStreamAsync(request, timeoutCts.Token))
             {
                 var data = JsonSerializer.Serialize(new { token });
-                await Response.WriteAsync($"data: {data}\n\n", cancellationToken);
-                await Response.Body.FlushAsync(cancellationToken);
+                await Response.WriteAsync($"data: {data}\n\n", timeoutCts.Token);
+                await Response.Body.FlushAsync(timeoutCts.Token);
             }
+
+            await Response.WriteAsync("data: {\"done\":true}\n\n", CancellationToken.None);
+            await Response.Body.FlushAsync(CancellationToken.None);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("RAG stream timed out after {Seconds}s", StreamTimeoutSeconds);
+            try
+            {
+                var timeoutMsg = JsonSerializer.Serialize(new { error = "Stream timed out", timedOut = true });
+                await Response.WriteAsync($"data: {timeoutMsg}\n\n", CancellationToken.None);
+                await Response.Body.FlushAsync(CancellationToken.None);
+            }
+            catch { /* client disconnected */ }
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogError(ex, "Error processing RAG stream request");
-            var error = JsonSerializer.Serialize(new { error = "RAG processing failed" });
-            await Response.WriteAsync($"data: {error}\n\n", cancellationToken);
+            try
+            {
+                var error = JsonSerializer.Serialize(new { error = "RAG processing failed" });
+                await Response.WriteAsync($"data: {error}\n\n", CancellationToken.None);
+                await Response.Body.FlushAsync(CancellationToken.None);
+            }
+            catch { /* client disconnected */ }
+        }
+        finally
+        {
+            try { Response.Body.Close(); } catch { /* ignore */ }
         }
     }
 

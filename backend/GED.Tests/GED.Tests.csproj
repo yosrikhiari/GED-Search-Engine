@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\GED.Core\GED.Core.csproj" />
     <ProjectReference Include="..\GED.Infrastructure\GED.Infrastructure.csproj" />
+    <ProjectReference Include="..\GED.API\GED.API.csproj" />
   </ItemGroup>
 
 </Project>

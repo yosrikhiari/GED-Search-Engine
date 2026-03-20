@@ -17,6 +17,8 @@ public class GedDbContext : DbContext
     public DbSet<DocumentGroupMember>    DocumentGroupMembers  { get; set; }
     public DbSet<AppUser> Users { get; set; }
     public DbSet<UserGroupAssignment>    UserGroupAssignments  { get; set; }
+    public DbSet<DocumentVersion>        DocumentVersions      { get; set; }
+    public DbSet<WebhookDelivery>        WebhookDeliveries     { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -210,6 +212,53 @@ public class GedDbContext : DbContext
             e.Property(m => m.RetryCount).HasColumnName("retry_count");
             e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");
         });
+
+        // ── DocumentVersions table ──────────────────────────────────────────────
+        modelBuilder.Entity<DocumentVersion>(e =>
+        {
+            e.ToTable("document_versions");
+            e.HasKey(v => v.Id);
+            e.Property(v => v.Id).HasColumnName("id");
+            e.Property(v => v.DocumentId).HasColumnName("document_id");
+            e.Property(v => v.VersionNumber).HasColumnName("version_number");
+            e.Property(v => v.Title).HasColumnName("title").HasMaxLength(500);
+            e.Property(v => v.Description).HasColumnName("description").HasMaxLength(2000);
+            e.Property(v => v.FileName).HasColumnName("file_name").HasMaxLength(500);
+            e.Property(v => v.FileSize).HasColumnName("file_size");
+            e.Property(v => v.ContentType).HasColumnName("content_type").HasMaxLength(200);
+            e.Property(v => v.Category).HasColumnName("category").HasMaxLength(200);
+            e.Property(v => v.Tags).HasColumnName("tags").HasColumnType("nvarchar(max)");
+            e.Property(v => v.Metadata).HasColumnName("metadata").HasColumnType("nvarchar(max)");
+            e.Property(v => v.ChangedBy).HasColumnName("changed_by").HasMaxLength(500);
+            e.Property(v => v.ChangeReason).HasColumnName("change_reason").HasMaxLength(1000);
+            e.Property(v => v.CreatedAt).HasColumnName("created_at");
+            e.Property(v => v.FilePath).HasColumnName("file_path");
+            e.HasIndex(v => v.DocumentId).HasDatabaseName("ix_versions_document_id");
+            e.HasIndex(v => new { v.DocumentId, v.VersionNumber })
+              .IsUnique()
+              .HasDatabaseName("ix_versions_doc_version");
+        });
+
+        // ── WebhookDeliveries table ─────────────────────────────────────────────
+        modelBuilder.Entity<WebhookDelivery>(e =>
+        {
+            e.ToTable("webhook_deliveries");
+            e.HasKey(d => d.Id);
+            e.Property(d => d.Id).HasColumnName("id").HasColumnType("uniqueidentifier");
+            e.Property(d => d.WebhookConfigId).HasColumnName("webhook_config_id").HasColumnType("uniqueidentifier");
+            e.Property(d => d.Event).HasColumnName("event").HasMaxLength(100).IsRequired();
+            e.Property(d => d.Payload).HasColumnName("payload").HasColumnType("nvarchar(max)");
+            e.Property(d => d.ResponseStatusCode).HasColumnName("response_status_code");
+            e.Property(d => d.ResponseBody).HasColumnName("response_body").HasColumnType("nvarchar(max)");
+            e.Property(d => d.AttemptNumber).HasColumnName("attempt_number");
+            e.Property(d => d.Succeeded).HasColumnName("succeeded");
+            e.Property(d => d.ErrorMessage).HasColumnName("error_message").HasMaxLength(2000);
+            e.Property(d => d.DurationMs).HasColumnName("duration_ms");
+            e.Property(d => d.CreatedAt).HasColumnName("created_at");
+            e.HasIndex(d => d.WebhookConfigId).HasDatabaseName("ix_webhook_deliveries_config_id");
+            e.HasIndex(d => d.CreatedAt).HasDatabaseName("ix_webhook_deliveries_created_at");
+            e.HasIndex(d => new { d.Event, d.Succeeded }).HasDatabaseName("ix_webhook_deliveries_event_status");
+        });
     }
 }
 
@@ -253,4 +302,19 @@ public class DocumentMetadataEntity
     public DateTime CreatedAt { get; set; }
 
     public virtual DocumentEntity? Document { get; set; }
+}
+
+public class WebhookDelivery
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? WebhookConfigId { get; set; }
+    public string Event { get; set; } = string.Empty;
+    public string? Payload { get; set; }
+    public int? ResponseStatusCode { get; set; }
+    public string? ResponseBody { get; set; }
+    public int AttemptNumber { get; set; } = 1;
+    public bool Succeeded { get; set; }
+    public string? ErrorMessage { get; set; }
+    public long DurationMs { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

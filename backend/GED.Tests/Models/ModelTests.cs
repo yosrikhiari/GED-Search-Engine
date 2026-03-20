@@ -1,5 +1,6 @@
 using FluentAssertions;
 using GED.Core.Models;
+using GED.Infrastructure.Data;
 
 namespace GED.Tests.Models;
 
@@ -186,5 +187,75 @@ public class RagRequestModelTests
         request.Query.Should().Be("summarize these documents");
         request.Username.Should().Be("testuser");
         request.DocumentIds.Should().HaveCount(2);
+    }
+}
+
+public class WebhookDeliveryTests
+{
+    [Fact]
+    public void WebhookDelivery_DefaultValues_AreCorrect()
+    {
+        var delivery = new WebhookDelivery();
+
+        delivery.Id.Should().NotBe(Guid.Empty);
+        delivery.WebhookConfigId.Should().BeNull();
+        delivery.Event.Should().BeEmpty();
+        delivery.Payload.Should().BeNull();
+        delivery.ResponseStatusCode.Should().BeNull();
+        delivery.ResponseBody.Should().BeNull();
+        delivery.AttemptNumber.Should().Be(1);
+        delivery.Succeeded.Should().BeFalse();
+        delivery.ErrorMessage.Should().BeNull();
+        delivery.DurationMs.Should().Be(0);
+        delivery.CreatedAt.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void WebhookDelivery_SetsAllProperties()
+    {
+        var id = Guid.NewGuid();
+        var webhookConfigId = Guid.NewGuid();
+        var createdAt = DateTime.UtcNow.AddHours(-1);
+
+        var delivery = new WebhookDelivery
+        {
+            Id = id,
+            WebhookConfigId = webhookConfigId,
+            Event = "document.created",
+            Payload = "{\"docId\":\"123\"}",
+            ResponseStatusCode = 200,
+            ResponseBody = "{\"ok\":true}",
+            AttemptNumber = 3,
+            Succeeded = true,
+            ErrorMessage = null,
+            DurationMs = 150,
+            CreatedAt = createdAt
+        };
+
+        delivery.Id.Should().Be(id);
+        delivery.WebhookConfigId.Should().Be(webhookConfigId);
+        delivery.Event.Should().Be("document.created");
+        delivery.Payload.Should().Contain("docId");
+        delivery.ResponseStatusCode.Should().Be(200);
+        delivery.AttemptNumber.Should().Be(3);
+        delivery.Succeeded.Should().BeTrue();
+        delivery.DurationMs.Should().Be(150);
+        delivery.CreatedAt.Should().Be(createdAt);
+    }
+
+    [Fact]
+    public void WebhookDelivery_FailedDelivery_HasErrorMessage()
+    {
+        var delivery = new WebhookDelivery
+        {
+            Event = "document.deleted",
+            ResponseStatusCode = 500,
+            Succeeded = false,
+            ErrorMessage = "Connection refused"
+        };
+
+        delivery.Succeeded.Should().BeFalse();
+        delivery.ErrorMessage.Should().Be("Connection refused");
+        delivery.ResponseStatusCode.Should().Be(500);
     }
 }

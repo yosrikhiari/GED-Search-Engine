@@ -196,6 +196,55 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_user_group_assignments
     CREATE INDEX ix_user_group_assignments_user ON dbo.user_group_assignments (user_id);
 
 
+-- ─── document_versions ──────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.document_versions', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.document_versions (
+        id             UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        document_id    UNIQUEIDENTIFIER  NOT NULL,
+        version_number INT               NOT NULL DEFAULT 1,
+        title          NVARCHAR(500),
+        description    NVARCHAR(2000),
+        file_name      NVARCHAR(500),
+        file_size      BIGINT,
+        content_type   NVARCHAR(200),
+        category       NVARCHAR(200),
+        tags           NVARCHAR(MAX),
+        metadata       NVARCHAR(MAX),
+        changed_by     NVARCHAR(500),
+        change_reason  NVARCHAR(1000),
+        created_at     DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        file_path      NVARCHAR(1000)
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_versions_document_id' AND object_id = OBJECT_ID('dbo.document_versions'))
+    CREATE INDEX ix_versions_document_id ON dbo.document_versions (document_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_versions_doc_version' AND object_id = OBJECT_ID('dbo.document_versions'))
+    CREATE UNIQUE INDEX ix_versions_doc_version ON dbo.document_versions (document_id, version_number);
+
+
+-- ─── webhooks ──────────────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.webhooks', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.webhooks (
+        id              UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        name            NVARCHAR(200)     NOT NULL,
+        url             NVARCHAR(2000)    NOT NULL,
+        secret          NVARCHAR(500),
+        events          NVARCHAR(MAX)     NOT NULL,
+        is_active       BIT               NOT NULL DEFAULT 1,
+        timeout_seconds INT               NOT NULL DEFAULT 30,
+        max_retries     INT               NOT NULL DEFAULT 3,
+        created_at      DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        last_triggered_at DATETIME2,
+        success_count   INT               NOT NULL DEFAULT 0,
+        failure_count   INT               NOT NULL DEFAULT 0
+    );
+END
+
+
 -- ─── EF Migrations history ────────────────────────────────────────────────────
 -- EF Core automatically creates this table on first migration run.
 -- Pre-creating it here prevents migration history insert failures on fresh databases.
