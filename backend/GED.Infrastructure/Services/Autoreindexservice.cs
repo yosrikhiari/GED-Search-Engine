@@ -391,102 +391,6 @@ public class AutoReindexService : BackgroundService
     }
 
     /// <summary>
-    /// Triggers a full reindex of all indexed documents.
-    /// Can be called manually via the API.
-    /// </summary>
-    public async Task<ReindexResult> TriggerFullReindexAsync(CancellationToken ct = default)
-    {
-        _logger.LogInformation("🔄 Full reindex triggered manually");
-
-        using var scope        = _serviceProvider.CreateScope();
-        var db                = scope.ServiceProvider.GetRequiredService<GedDbContext>();
-        var searchService     = scope.ServiceProvider.GetRequiredService<ISearchService>();
-
-        try
-        {
-            var totalDocs = await db.Documents
-                .CountAsync(d => d.Status == DocumentStatus.Indexed, ct);
-
-            if (totalDocs == 0)
-            {
-                _logger.LogInformation("No documents to reindex");
-                return new ReindexResult { Total = 0, Succeeded = 0, Failed = 0 };
-            }
-
-            _logger.LogInformation("🔄 Full reindex: {Total} documents to process", totalDocs);
-
-            var processed = 0;
-            var failed    = 0;
-
-            var batches = Enumerable.Range(0, (int)Math.Ceiling(totalDocs / (double)_batchSize));
-
-            foreach (var batchNum in batches)
-            {
-                var batch = await db.Documents
-                    .AsNoTracking()
-                    .Where(d => d.Status == DocumentStatus.Indexed)
-                    .OrderBy(d => d.CreatedAt)
-                    .Skip(batchNum * _batchSize)
-                    .Take(_batchSize)
-                    .ToListAsync(ct);
-
-                if (!batch.Any()) break;
-
-                try
-                {
-                    var domainDocs = batch.Select(MapToDomain).ToList();
-                    await searchService.BulkIndexDocumentsAsync(domainDocs, ct);
-
-                    // Update last_indexed_at
-                    var ids = batch.Select(d => d.Id).ToList();
-                    var tracked = await db.Documents
-                        .Where(d => ids.Contains(d.Id))
-                        .ToListAsync(ct);
-
-                    foreach (var entity in tracked)
-                    {
-                        entity.Metadata ??= new Dictionary<string, object>();
-                        entity.Metadata["last_indexed_at"] = DateTime.UtcNow.ToString("o");
-                    }
-                    await db.SaveChangesAsync(ct);
-
-                    processed += batch.Count;
-                    _logger.LogInformation("✅ Reindex batch {Batch}: {Count}/{Total} docs indexed",
-                        batchNum + 1, processed, totalDocs);
-                }
-                catch (Exception ex)
-                {
-                    failed += batch.Count;
-                    _logger.LogError(ex, "❌ Reindex batch {Batch} failed", batchNum + 1);
-                }
-            }
-
-            _logger.LogInformation(
-                "🏁 Full reindex complete: {Processed} succeeded, {Failed} failed",
-                processed, failed);
-
-            return new ReindexResult
-            {
-                Total = totalDocs,
-                Succeeded = processed,
-                Failed = failed,
-                Message = $"Reindexed {processed}/{totalDocs} documents ({failed} failed)"
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "❌ Full reindex failed");
-            return new ReindexResult
-            {
-                Total = 0,
-                Succeeded = 0,
-                Failed = 0,
-                Message = $"Reindex failed: {ex.Message}"
-            };
-        }
-    }
-
-    /// <summary>
     /// Maps a database entity to a domain <see cref="Document"/> model.
     /// </summary>
     private static Document MapToDomain(DocumentEntity e) => new()
@@ -509,13 +413,4 @@ public class AutoReindexService : BackgroundService
         Metadata      = e.Metadata,
         IsOcrProcessed = e.IsOcrProcessed
     };
-}
-
-public class ReindexResult
-{
-    public int Total { get; set; }
-    public int Succeeded { get; set; }
-    public int Failed { get; set; }
-    public string Message { get; set; } = string.Empty;
-    public DateTime CompletedAt { get; set; } = DateTime.UtcNow;
 }

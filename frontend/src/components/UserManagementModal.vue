@@ -1,49 +1,119 @@
 <template>
-  <div class="modal-overlay" @click.self="$emit('close')">
+  <div
+    class="modal-overlay"
+    @click.self="$emit('close')"
+  >
     <div class="modal">
       <div class="modal-header">
         <h2 class="modal-title">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/>
+          <svg
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
+            />
           </svg>
           Gestion des utilisateurs
         </h2>
-        <button @click="$emit('close')" class="close-btn">✕</button>
+        <button
+          class="close-btn"
+          @click="$emit('close')"
+        >
+          ✕
+        </button>
       </div>
 
       <div class="modal-body">
         <!-- Error / success banners -->
-        <div v-if="error"   class="banner error">{{ error }}</div>
-        <div v-if="success" class="banner success">{{ success }}</div>
+        <div
+          v-if="error"
+          class="banner error"
+        >
+          {{ error }}
+        </div>
+        <div
+          v-if="success"
+          class="banner success"
+        >
+          {{ success }}
+        </div>
 
         <!-- Add user form -->
         <div class="add-form">
-          <h3 class="section-title">Créer un utilisateur</h3>
+          <h3 class="section-title">
+            Créer un utilisateur
+          </h3>
           <div class="form-grid">
-            <input v-model="form.username" placeholder="Nom d'utilisateur *" class="input" />
-            <input v-model="form.password" type="password" placeholder="Mot de passe *" class="input" />
-            <input v-model="form.fullName" placeholder="Nom complet" class="input" />
-            <input v-model="form.email"    placeholder="Email" class="input" />
-            <select v-model="form.role" class="input">
-              <option value="User">Utilisateur</option>
-              <option value="Manager">Responsable</option>
-              <option value="ReadOnly">Lecture seule</option>
-              <option value="Admin">Administrateur</option>
+            <input
+              v-model="form.username"
+              placeholder="Nom d'utilisateur *"
+              class="input"
+            >
+            <input
+              v-model="form.password"
+              type="password"
+              placeholder="Mot de passe *"
+              class="input"
+            >
+            <input
+              v-model="form.fullName"
+              placeholder="Nom complet"
+              class="input"
+            >
+            <input
+              v-model="form.email"
+              placeholder="Email"
+              class="input"
+            >
+            <select
+              v-model="form.role"
+              class="input"
+            >
+              <option value="User">
+                Utilisateur
+              </option>
+              <option value="Manager">
+                Responsable
+              </option>
+              <option value="ReadOnly">
+                Lecture seule
+              </option>
+              <option value="Admin">
+                Administrateur
+              </option>
             </select>
           </div>
-          <button @click="createUser" :disabled="saving" class="btn-primary">
+          <button
+            :disabled="saving"
+            class="btn-primary"
+            @click="createUser"
+          >
             {{ saving ? 'Création...' : '+ Créer l\'utilisateur' }}
           </button>
         </div>
 
         <!-- Users table -->
         <div class="users-section">
-          <h3 class="section-title">Utilisateurs existants</h3>
+          <h3 class="section-title">
+            Utilisateurs existants
+          </h3>
 
-          <div v-if="loading" class="loading-state">Chargement…</div>
+          <div
+            v-if="loading"
+            class="loading-state"
+          >
+            Chargement…
+          </div>
 
-          <div v-else class="table-wrapper">
+          <div
+            v-else
+            class="table-wrapper"
+          >
             <table class="users-table">
               <thead>
                 <tr>
@@ -55,21 +125,36 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="u in users" :key="u.id">
+                <tr
+                  v-for="u in users"
+                  :key="u.id"
+                >
                   <td>
                     <div class="user-cell">
-                      <div class="mini-avatar">{{ initials(u) }}</div>
+                      <div class="mini-avatar">
+                        {{ initials(u) }}
+                      </div>
                       <div>
-                        <p class="cell-name">{{ u.fullName || u.username }}</p>
-                        <p class="cell-sub">{{ u.username }}</p>
+                        <p class="cell-name">
+                          {{ u.fullName || u.username }}
+                        </p>
+                        <p class="cell-sub">
+                          {{ u.username }}
+                        </p>
                       </div>
                     </div>
                   </td>
                   <td>
-                    <span class="role-badge" :class="roleCss(u.role)">{{ roleLabel(u.role) }}</span>
+                    <span
+                      class="role-badge"
+                      :class="roleCss(u.role)"
+                    >{{ roleLabel(u.role) }}</span>
                   </td>
                   <td>
-                    <span class="status-badge" :class="u.isActive ? 'status-active' : 'status-inactive'">
+                    <span
+                      class="status-badge"
+                      :class="u.isActive ? 'status-active' : 'status-inactive'"
+                    >
                       {{ u.isActive ? 'Actif' : 'Désactivé' }}
                     </span>
                   </td>
@@ -79,13 +164,16 @@
                   <td>
                     <button
                       v-if="u.isActive"
-                      @click="deactivate(u)"
                       class="btn-danger-sm"
                       title="Désactiver"
+                      @click="deactivate(u)"
                     >
                       Désactiver
                     </button>
-                    <span v-else class="cell-sub">Désactivé</span>
+                    <span
+                      v-else
+                      class="cell-sub"
+                    >Désactivé</span>
                   </td>
                 </tr>
               </tbody>

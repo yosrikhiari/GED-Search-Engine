@@ -25,29 +25,12 @@ public class DocumentsController : ControllerBase
     private readonly IDistributedCache _cache;
     private readonly IConfiguration _configuration;
     private readonly AuthService _authService;
-    private readonly IWebhookService _webhookService;
 
     private static readonly string[] AllowedCategories =
     {
         "Invoice", "Contract", "Report", "Letter",
         "Memo", "Presentation", "Spreadsheet", "Image", "Other"
     };
-
-    private static readonly string[] AllowedMimeTypes =
-    {
-        "application/pdf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "image/jpeg", "image/png", "image/gif", "image/webp", "image/tiff",
-        "text/plain", "text/csv",
-        "audio/mpeg", "audio/wav", "video/mp4"
-    };
-
-    private const long MaxFileSizeBytes = 500 * 1024 * 1024; // 500 MB
 
     public DocumentsController(
         IDocumentService documentService,
@@ -58,8 +41,7 @@ public class DocumentsController : ControllerBase
         ILogger<DocumentsController> logger,
         IConfiguration configuration,
         IDistributedCache cache,
-        AuthService authService,
-        IWebhookService webhookService)
+        AuthService authService)
     {
         _documentService = documentService;
         _searchService   = searchService;
@@ -70,7 +52,6 @@ public class DocumentsController : ControllerBase
         _configuration   = configuration;
         _cache           = cache;
         _authService     = authService;
-        _webhookService  = webhookService;
     }
 
     private static readonly string[] AdminOnlyCategories = { };
@@ -136,18 +117,6 @@ public async Task<ActionResult<Document>> UploadDocument(
             {
                 error        = $"File type '{file.ContentType}' is not allowed.",
                 allowedTypes = allowedTypes
-            });
-        }
-
-        if (!AllowedMimeTypes.Contains(file.ContentType, StringComparer.OrdinalIgnoreCase))
-        {
-            _logger.LogWarning(
-                "Upload rejected — MIME type '{MimeType}' not in AllowedMimeTypes list",
-                file.ContentType);
-            return BadRequest(new
-            {
-                error = $"File type '{file.ContentType}' is not supported.",
-                allowedTypes = AllowedMimeTypes
             });
         }
 
@@ -248,33 +217,6 @@ public async Task<ActionResult<Document>> UploadDocument(
                             AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(24)
                         });
                 }
-
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await _webhookService.TriggerEventAsync("document.created", new WebhookPayload
-                        {
-                            Event = "document.created",
-                            Document = new WebhookDocumentData
-                            {
-                                Id = document.Id,
-                                Title = document.Title,
-                                Category = document.Category,
-                                FileName = document.FileName,
-                                ContentType = document.ContentType,
-                                FileSize = document.FileSize,
-                                CreatedBy = document.CreatedBy,
-                                CreatedAt = document.CreatedAt
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Webhook delivery failed for document.created: {DocId}", document.Id);
-                    }
-                });
-
                 return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
         }
         catch (Exception ex)
@@ -449,25 +391,6 @@ public async Task<ActionResult<Document>> UploadDocument(
         }
     }
 
-    [HttpGet]
-    public async Task<ActionResult<List<Document>>> GetAllDocuments([FromQuery] int page = 1, [FromQuery] int pageSize = 50)
-    {
-        try
-        {
-            var documents = await _db.Documents
-                .OrderByDescending(d => d.CreatedAt)
-                .Skip((page - 1) * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
-            return Ok(documents);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting all documents");
-            return StatusCode(500, new { error = "Failed to get documents", message = ex.Message });
-        }
-    }
-
     [HttpGet("{id}")]
     public async Task<ActionResult<Document>> GetDocument(Guid id)
     {
@@ -506,38 +429,10 @@ public async Task<ActionResult<Document>> UploadDocument(
     {
         try
         {
-            var doc = await _db.Documents.AsNoTracking().FirstOrDefaultAsync(d => d.Id == id);
             var deleted = await _documentService.DeleteDocumentAsync(id);
             if (!deleted) return NotFound();
 
             await _searchService.DeleteDocumentIndexAsync(id);
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _webhookService.TriggerEventAsync("document.deleted", new WebhookPayload
-                    {
-                        Event = "document.deleted",
-                        Document = doc != null ? new WebhookDocumentData
-                        {
-                            Id = doc.Id,
-                            Title = doc.Title,
-                            Category = doc.Category,
-                            FileName = doc.FileName,
-                            ContentType = doc.ContentType,
-                            FileSize = doc.FileSize,
-                            CreatedBy = doc.CreatedBy,
-                            CreatedAt = doc.CreatedAt
-                        } : null
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Webhook delivery failed for document.deleted: {DocId}", id);
-                }
-            });
-
             return NoContent();
         }
         catch (Exception ex)
@@ -557,33 +452,6 @@ public async Task<ActionResult<Document>> UploadDocument(
 
             var updated = await _documentService.UpdateDocumentAsync(id, document);
             await _searchService.UpdateDocumentIndexAsync(updated);
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _webhookService.TriggerEventAsync("document.updated", new WebhookPayload
-                    {
-                        Event = "document.updated",
-                        Document = new WebhookDocumentData
-                        {
-                            Id = updated.Id,
-                            Title = updated.Title,
-                            Category = updated.Category,
-                            FileName = updated.FileName,
-                            ContentType = updated.ContentType,
-                            FileSize = updated.FileSize,
-                            CreatedBy = updated.CreatedBy,
-                            CreatedAt = updated.CreatedAt
-                        }
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Webhook delivery failed for document.updated: {DocId}", updated.Id);
-                }
-            });
-
             return Ok(updated);
         }
         catch (Exception ex)

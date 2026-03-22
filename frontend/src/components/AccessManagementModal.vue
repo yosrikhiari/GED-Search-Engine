@@ -1,17 +1,30 @@
 <template>
-  <div class="modal-overlay" @click.self="$emit('close')">
+  <div
+    class="modal-overlay"
+    @click.self="$emit('close')"
+  >
     <div class="modal">
-
       <!-- Header -->
       <div class="modal-header">
         <div class="header-left">
-          <div class="header-icon">🔐</div>
+          <div class="header-icon">
+            🔐
+          </div>
           <div>
-            <h2 class="modal-title">Gestion des accès</h2>
-            <p class="modal-subtitle">Groupes de documents · Droits utilisateurs · Rôles</p>
+            <h2 class="modal-title">
+              Gestion des accès
+            </h2>
+            <p class="modal-subtitle">
+              Groupes de documents · Droits utilisateurs · Rôles
+            </p>
           </div>
         </div>
-        <button @click="$emit('close')" class="close-btn">✕</button>
+        <button
+          class="close-btn"
+          @click="$emit('close')"
+        >
+          ✕
+        </button>
       </div>
 
       <!-- Tabs -->
@@ -19,79 +32,164 @@
         <button
           v-for="tab in tabs"
           :key="tab.id"
-          @click="activeTab = tab.id"
           class="tab-btn"
           :class="{ active: activeTab === tab.id }"
+          @click="activeTab = tab.id"
         >
           <span class="tab-icon">{{ tab.icon }}</span>
           {{ tab.label }}
-          <span v-if="tab.badge" class="tab-badge">{{ tab.badge }}</span>
+          <span
+            v-if="tab.badge"
+            class="tab-badge"
+          >{{ tab.badge }}</span>
         </button>
       </div>
 
       <!-- Body -->
       <div class="modal-body">
-
         <!-- GLOBAL BANNERS -->
-        <div v-if="globalError"   class="banner error">{{ globalError }}</div>
-        <div v-if="globalSuccess" class="banner success">{{ globalSuccess }}</div>
+        <div
+          v-if="globalError"
+          class="banner error"
+        >
+          {{ globalError }}
+        </div>
+        <div
+          v-if="globalSuccess"
+          class="banner success"
+        >
+          {{ globalSuccess }}
+        </div>
 
         <!-- ═══════════════════════════════════════════════════════
              TAB 1 — DOCUMENT GROUPS
         ═══════════════════════════════════════════════════════ -->
         <div v-if="activeTab === 'groups'">
-
           <!-- Group list -->
-          <div v-if="!activeGroup" class="section">
+          <div
+            v-if="!activeGroup"
+            class="section"
+          >
             <div class="section-header">
-              <h3 class="section-title">Groupes de documents</h3>
-              <button @click="showCreateGroup = !showCreateGroup" class="btn-primary-sm">
+              <h3 class="section-title">
+                Groupes de documents
+              </h3>
+              <button
+                class="btn-primary-sm"
+                @click="showCreateGroup = !showCreateGroup"
+              >
                 {{ showCreateGroup ? 'Annuler' : '+ Nouveau groupe' }}
               </button>
             </div>
 
             <!-- Create form -->
-            <div v-if="showCreateGroup" class="create-form">
-              <h4 class="form-title">Créer un groupe</h4>
+            <div
+              v-if="showCreateGroup"
+              class="create-form"
+            >
+              <h4 class="form-title">
+                Créer un groupe
+              </h4>
               <div class="form-grid-3">
-                <input v-model="groupForm.name"     placeholder="Nom du groupe *" class="input" />
-                <input v-model="groupForm.category" placeholder="Catégorie (ex: RH, Finance…)" class="input" />
+                <input
+                  v-model="groupForm.name"
+                  placeholder="Nom du groupe *"
+                  class="input"
+                >
+                <input
+                  v-model="groupForm.category"
+                  placeholder="Catégorie (ex: RH, Finance…)"
+                  class="input"
+                >
                 <div class="icon-color-row">
-                  <input v-model="groupForm.icon"  placeholder="Icône" class="input icon-input" maxlength="4" />
-                  <input v-model="groupForm.color" type="color" class="input color-input" title="Couleur" />
+                  <input
+                    v-model="groupForm.icon"
+                    placeholder="Icône"
+                    class="input icon-input"
+                    maxlength="4"
+                  >
+                  <input
+                    v-model="groupForm.color"
+                    type="color"
+                    class="input color-input"
+                    title="Couleur"
+                  >
                 </div>
               </div>
-              <textarea v-model="groupForm.description" placeholder="Description (optionnel)" class="input textarea" rows="2"></textarea>
-              <button @click="createGroup" :disabled="saving" class="btn-primary">
+              <textarea
+                v-model="groupForm.description"
+                placeholder="Description (optionnel)"
+                class="input textarea"
+                rows="2"
+              />
+              <button
+                :disabled="saving"
+                class="btn-primary"
+                @click="createGroup"
+              >
                 {{ saving ? 'Création…' : 'Créer le groupe' }}
               </button>
             </div>
 
             <!-- Groups list -->
-            <div v-if="loadingGroups" class="loading">Chargement…</div>
-            <div v-else-if="!groups.length" class="empty-state">
+            <div
+              v-if="loadingGroups"
+              class="loading"
+            >
+              Chargement…
+            </div>
+            <div
+              v-else-if="!groups.length"
+              class="empty-state"
+            >
               Aucun groupe créé. Créez votre premier groupe pour commencer.
             </div>
-            <div v-else class="groups-grid">
+            <div
+              v-else
+              class="groups-grid"
+            >
               <div
-                v-for="g in groups" :key="g.id"
+                v-for="g in groups"
+                :key="g.id"
                 class="group-card"
                 :style="{ borderLeftColor: g.color || '#2563eb' }"
                 @click="openGroup(g)"
               >
                 <div class="group-card-top">
-                  <div class="group-icon" :style="{ background: (g.color || '#2563eb') + '22' }">
+                  <div
+                    class="group-icon"
+                    :style="{ background: (g.color || '#2563eb') + '22' }"
+                  >
                     {{ g.icon || '📁' }}
                   </div>
                   <div class="group-info">
-                    <p class="group-name">{{ g.name }}</p>
-                    <p class="group-category">{{ g.category || 'Sans catégorie' }}</p>
+                    <p class="group-name">
+                      {{ g.name }}
+                    </p>
+                    <p class="group-category">
+                      {{ g.category || 'Sans catégorie' }}
+                    </p>
                   </div>
-                  <svg class="chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                  <svg
+                    class="chevron"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M9 5l7 7-7 7"
+                    />
                   </svg>
                 </div>
-                <p v-if="g.description" class="group-desc">{{ g.description }}</p>
+                <p
+                  v-if="g.description"
+                  class="group-desc"
+                >
+                  {{ g.description }}
+                </p>
                 <div class="group-stats">
                   <span class="stat">📄 {{ g.documentCount }} document{{ g.documentCount !== 1 ? 's' : '' }}</span>
                   <span class="stat">👤 {{ g.userCount }} utilisateur{{ g.userCount !== 1 ? 's' : '' }}</span>
@@ -101,23 +199,40 @@
           </div>
 
           <!-- ── Group detail view ── -->
-          <div v-else class="section">
-            <button @click="activeGroup = null; loadGroups()" class="back-btn">
+          <div
+            v-else
+            class="section"
+          >
+            <button
+              class="back-btn"
+              @click="activeGroup = null; loadGroups()"
+            >
               ← Retour aux groupes
             </button>
 
-            <div class="group-detail-header" :style="{ borderLeftColor: activeGroup.color || '#2563eb' }">
-              <div class="group-icon-lg" :style="{ background: (activeGroup.color || '#2563eb') + '22' }">
+            <div
+              class="group-detail-header"
+              :style="{ borderLeftColor: activeGroup.color || '#2563eb' }"
+            >
+              <div
+                class="group-icon-lg"
+                :style="{ background: (activeGroup.color || '#2563eb') + '22' }"
+              >
                 {{ activeGroup.icon || '📁' }}
               </div>
               <div>
-                <h3 class="group-detail-name">{{ activeGroup.name }}</h3>
+                <h3 class="group-detail-name">
+                  {{ activeGroup.name }}
+                </h3>
                 <p class="group-detail-meta">
                   {{ activeGroup.category || 'Sans catégorie' }}
                   <span v-if="activeGroup.description"> · {{ activeGroup.description }}</span>
                 </p>
               </div>
-              <button @click="confirmDeleteGroup(activeGroup)" class="btn-danger-sm ml-auto">
+              <button
+                class="btn-danger-sm ml-auto"
+                @click="confirmDeleteGroup(activeGroup)"
+              >
                 Supprimer le groupe
               </button>
             </div>
@@ -125,11 +240,14 @@
             <!-- Sub-tabs -->
             <div class="subtab-bar">
               <button
-                v-for="st in groupSubtabs" :key="st.id"
-                @click="activeGroupSubtab = st.id"
+                v-for="st in groupSubtabs"
+                :key="st.id"
                 class="subtab-btn"
                 :class="{ active: activeGroupSubtab === st.id }"
-              >{{ st.label }}</button>
+                @click="activeGroupSubtab = st.id"
+              >
+                {{ st.label }}
+              </button>
             </div>
 
             <!-- ══════════════════════════════════════════
@@ -140,41 +258,79 @@
                 <p class="subsection-title">
                   Documents dans ce groupe ({{ activeGroup.documents?.length || 0 }})
                 </p>
-                <button @click="toggleAddDocs" class="btn-primary-sm">
+                <button
+                  class="btn-primary-sm"
+                  @click="toggleAddDocs"
+                >
                   {{ showAddDocs ? 'Annuler' : '+ Ajouter des documents' }}
                 </button>
               </div>
 
               <!-- Card-grid document picker with drag & drop -->
-              <div v-if="showAddDocs" class="add-docs-panel">
-
+              <div
+                v-if="showAddDocs"
+                class="add-docs-panel"
+              >
                 <!-- Toolbar -->
                 <div class="picker-toolbar">
                   <div class="picker-search-wrap">
-                    <svg class="picker-search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    <svg
+                      class="picker-search-icon"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                      />
                     </svg>
                     <input
                       v-model="docSearch"
-                      @input="onPickerSearch"
                       placeholder="Rechercher un document…"
                       class="picker-search-input"
-                    />
-                    <button v-if="docSearch" @click="docSearch = ''; onPickerSearch()" class="picker-search-clear">✕</button>
+                      @input="onPickerSearch"
+                    >
+                    <button
+                      v-if="docSearch"
+                      class="picker-search-clear"
+                      @click="docSearch = ''; onPickerSearch()"
+                    >
+                      ✕
+                    </button>
                   </div>
                   <div class="picker-view-toggle">
-                    <button @click="pickerView = 'grid'" :class="['pview-btn', { active: pickerView === 'grid' }]" title="Grille">⊞</button>
-                    <button @click="pickerView = 'list'" :class="['pview-btn', { active: pickerView === 'list' }]" title="Liste">☰</button>
+                    <button
+                      :class="['pview-btn', { active: pickerView === 'grid' }]"
+                      title="Grille"
+                      @click="pickerView = 'grid'"
+                    >
+                      ⊞
+                    </button>
+                    <button
+                      :class="['pview-btn', { active: pickerView === 'list' }]"
+                      title="Liste"
+                      @click="pickerView = 'list'"
+                    >
+                      ☰
+                    </button>
                   </div>
-                  <span v-if="selectedDocIds.length" class="picker-selection-badge">
+                  <span
+                    v-if="selectedDocIds.length"
+                    class="picker-selection-badge"
+                  >
                     {{ selectedDocIds.length }} sélectionné(s)
                   </span>
                 </div>
 
                 <!-- Loading state -->
-                <div v-if="loadingDocs" class="picker-loading">
-                  <div class="spinner-ring-sm"></div>
+                <div
+                  v-if="loadingDocs"
+                  class="picker-loading"
+                >
+                  <div class="spinner-ring-sm" />
                   Chargement des documents…
                 </div>
 
@@ -208,28 +364,57 @@
                     @dragend="draggedDoc = null"
                     @click="toggleDocSelection(doc.id)"
                   >
-                    <div class="doc-card-check" :class="{ checked: selectedDocIds.includes(doc.id) }">
-                      <svg v-if="selectedDocIds.includes(doc.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                    <div
+                      class="doc-card-check"
+                      :class="{ checked: selectedDocIds.includes(doc.id) }"
+                    >
+                      <svg
+                        v-if="selectedDocIds.includes(doc.id)"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="3"
+                          d="M5 13l4 4L19 7"
+                        />
                       </svg>
                     </div>
-                    <div class="doc-card-icon">{{ getFileIcon(doc.contentType) }}</div>
-                    <div class="doc-card-body">
-                      <p class="doc-card-title">{{ doc.title }}</p>
-                      <p class="doc-card-meta">{{ doc.category || '—' }}</p>
-                      <p class="doc-card-file">{{ doc.fileName }}</p>
+                    <div class="doc-card-icon">
+                      {{ getFileIcon(doc.contentType) }}
                     </div>
-                    <div class="doc-card-drag-hint">⠿</div>
+                    <div class="doc-card-body">
+                      <p class="doc-card-title">
+                        {{ doc.title }}
+                      </p>
+                      <p class="doc-card-meta">
+                        {{ doc.category || '—' }}
+                      </p>
+                      <p class="doc-card-file">
+                        {{ doc.fileName }}
+                      </p>
+                    </div>
+                    <div class="doc-card-drag-hint">
+                      ⠿
+                    </div>
                   </div>
 
-                  <div v-if="!filteredAvailableDocs.length && !loadingDocs" class="picker-empty">
+                  <div
+                    v-if="!filteredAvailableDocs.length && !loadingDocs"
+                    class="picker-empty"
+                  >
                     <span style="font-size:2rem">🔍</span>
                     <p>{{ docSearch ? 'Aucun résultat pour "' + docSearch + '"' : 'Tous les documents sont déjà dans ce groupe.' }}</p>
                   </div>
                 </div>
 
                 <!-- LIST VIEW -->
-                <div v-else class="doc-picker-list-view">
+                <div
+                  v-else
+                  class="doc-picker-list-view"
+                >
                   <label
                     v-for="doc in filteredAvailableDocs"
                     :key="doc.id"
@@ -239,10 +424,28 @@
                     @dragstart="onDragStart(doc)"
                     @dragend="draggedDoc = null"
                   >
-                    <input type="checkbox" :value="doc.id" v-model="selectedDocIds" class="sr-only" />
-                    <div class="doc-list-check" :class="{ checked: selectedDocIds.includes(doc.id) }">
-                      <svg v-if="selectedDocIds.includes(doc.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                    <input
+                      v-model="selectedDocIds"
+                      type="checkbox"
+                      :value="doc.id"
+                      class="sr-only"
+                    >
+                    <div
+                      class="doc-list-check"
+                      :class="{ checked: selectedDocIds.includes(doc.id) }"
+                    >
+                      <svg
+                        v-if="selectedDocIds.includes(doc.id)"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="3"
+                          d="M5 13l4 4L19 7"
+                        />
                       </svg>
                     </div>
                     <span class="doc-list-icon">{{ getFileIcon(doc.contentType) }}</span>
@@ -250,27 +453,46 @@
                       <p class="doc-picker-title">{{ doc.title }}</p>
                       <p class="doc-picker-sub">{{ doc.category || '—' }} · {{ doc.fileName }}</p>
                     </div>
-                    <span v-if="selectedDocIds.includes(doc.id)" class="check-mark">✓</span>
+                    <span
+                      v-if="selectedDocIds.includes(doc.id)"
+                      class="check-mark"
+                    >✓</span>
                   </label>
-                  <p v-if="!filteredAvailableDocs.length" class="empty-picker">
+                  <p
+                    v-if="!filteredAvailableDocs.length"
+                    class="empty-picker"
+                  >
                     {{ docSearch ? 'Aucun résultat.' : 'Aucun document disponible.' }}
                   </p>
                 </div>
 
                 <!-- Footer -->
                 <div class="add-docs-footer">
-                  <button @click="selectedDocIds = []" v-if="selectedDocIds.length" class="btn-ghost-sm">
+                  <button
+                    v-if="selectedDocIds.length"
+                    class="btn-ghost-sm"
+                    @click="selectedDocIds = []"
+                  >
                     Tout désélectionner
                   </button>
-                  <select v-model="addDocsPermission" class="input input-sm">
-                    <option value="Read">Lecture</option>
-                    <option value="Write">Écriture</option>
-                    <option value="FullControl">Contrôle total</option>
+                  <select
+                    v-model="addDocsPermission"
+                    class="input input-sm"
+                  >
+                    <option value="Read">
+                      Lecture
+                    </option>
+                    <option value="Write">
+                      Écriture
+                    </option>
+                    <option value="FullControl">
+                      Contrôle total
+                    </option>
                   </select>
                   <button
-                    @click="addDocsToGroup"
                     :disabled="!selectedDocIds.length || saving"
                     class="btn-primary"
+                    @click="addDocsToGroup"
                   >
                     {{ saving ? 'Ajout…' : `Ajouter (${selectedDocIds.length})` }}
                   </button>
@@ -279,7 +501,10 @@
               <!-- end add-docs-panel -->
 
               <!-- Documents already in group -->
-              <div v-if="activeGroup.documents?.length" class="mini-table-wrap">
+              <div
+                v-if="activeGroup.documents?.length"
+                class="mini-table-wrap"
+              >
                 <table class="mini-table">
                   <thead>
                     <tr>
@@ -287,26 +512,45 @@
                       <th>Catégorie</th>
                       <th>Permission par défaut</th>
                       <th>Ajouté le</th>
-                      <th></th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="doc in activeGroup.documents" :key="doc.memberId">
+                    <tr
+                      v-for="doc in activeGroup.documents"
+                      :key="doc.memberId"
+                    >
                       <td>
                         <span class="doc-title-cell">{{ getFileIcon(doc.contentType) }} {{ doc.title }}</span>
                         <span class="doc-filename">{{ doc.fileName }}</span>
                       </td>
                       <td><span class="category-pill">{{ doc.category || '—' }}</span></td>
-                      <td><span class="perm-badge" :class="permCss(doc.defaultPermission)">{{ permLabel(doc.defaultPermission) }}</span></td>
-                      <td class="cell-date">{{ formatDate(doc.addedAt) }}</td>
                       <td>
-                        <button @click="removeDocFromGroup(doc)" class="btn-icon-danger" title="Retirer">✕</button>
+                        <span
+                          class="perm-badge"
+                          :class="permCss(doc.defaultPermission)"
+                        >{{ permLabel(doc.defaultPermission) }}</span>
+                      </td>
+                      <td class="cell-date">
+                        {{ formatDate(doc.addedAt) }}
+                      </td>
+                      <td>
+                        <button
+                          class="btn-icon-danger"
+                          title="Retirer"
+                          @click="removeDocFromGroup(doc)"
+                        >
+                          ✕
+                        </button>
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <div v-else-if="!showAddDocs" class="empty-state">
+              <div
+                v-else-if="!showAddDocs"
+                class="empty-state"
+              >
                 Aucun document dans ce groupe.
               </div>
             </div>
@@ -315,68 +559,150 @@
             <!-- Assignees sub-tab -->
             <div v-if="activeGroupSubtab === 'users'">
               <div class="subsection-header">
-                <p class="subsection-title">Utilisateurs assignés ({{ activeGroup.assignments?.length || 0 }})</p>
-                <button @click="showAssignUser = !showAssignUser" class="btn-primary-sm">
+                <p class="subsection-title">
+                  Utilisateurs assignés ({{ activeGroup.assignments?.length || 0 }})
+                </p>
+                <button
+                  class="btn-primary-sm"
+                  @click="showAssignUser = !showAssignUser"
+                >
                   {{ showAssignUser ? 'Annuler' : '+ Assigner un utilisateur' }}
                 </button>
               </div>
 
-              <div v-if="showAssignUser" class="assign-form">
-                <select v-model="assignForm.userId" class="input">
-                  <option value="">Choisir un utilisateur…</option>
-                  <option v-for="u in allUsers" :key="u.id" :value="u.id">
+              <div
+                v-if="showAssignUser"
+                class="assign-form"
+              >
+                <select
+                  v-model="assignForm.userId"
+                  class="input"
+                >
+                  <option value="">
+                    Choisir un utilisateur…
+                  </option>
+                  <option
+                    v-for="u in allUsers"
+                    :key="u.id"
+                    :value="u.id"
+                  >
                     {{ u.fullName || u.username }} ({{ roleLabel(u.role) }})
                   </option>
                 </select>
-                <select v-model="assignForm.permission" class="input">
-                  <option value="Read">Lecture</option>
-                  <option value="Write">Écriture</option>
-                  <option value="Delete">Suppression</option>
-                  <option value="FullControl">Contrôle total</option>
+                <select
+                  v-model="assignForm.permission"
+                  class="input"
+                >
+                  <option value="Read">
+                    Lecture
+                  </option>
+                  <option value="Write">
+                    Écriture
+                  </option>
+                  <option value="Delete">
+                    Suppression
+                  </option>
+                  <option value="FullControl">
+                    Contrôle total
+                  </option>
                 </select>
-                <input v-model="assignForm.expiresAt" type="date" class="input" :min="today" title="Expiration (vide = permanent)" />
-                <button @click="assignGroupToUser" :disabled="!assignForm.userId || saving" class="btn-primary">
+                <input
+                  v-model="assignForm.expiresAt"
+                  type="date"
+                  class="input"
+                  :min="today"
+                  title="Expiration (vide = permanent)"
+                >
+                <button
+                  :disabled="!assignForm.userId || saving"
+                  class="btn-primary"
+                  @click="assignGroupToUser"
+                >
                   {{ saving ? 'Assignation…' : 'Assigner le groupe' }}
                 </button>
               </div>
 
-              <div v-if="activeGroup.assignments?.length" class="mini-table-wrap">
+              <div
+                v-if="activeGroup.assignments?.length"
+                class="mini-table-wrap"
+              >
                 <table class="mini-table">
                   <thead>
                     <tr>
                       <th>Utilisateur</th><th>Rôle système</th><th>Permission</th>
-                      <th>Assigné le</th><th>Expiration</th><th></th>
+                      <th>Assigné le</th><th>Expiration</th><th />
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="a in activeGroup.assignments" :key="a.assignmentId" :class="{ expired: !a.isActive }">
+                    <tr
+                      v-for="a in activeGroup.assignments"
+                      :key="a.assignmentId"
+                      :class="{ expired: !a.isActive }"
+                    >
                       <td>
                         <div class="user-cell">
-                          <div class="mini-avatar">{{ initials(a) }}</div>
+                          <div class="mini-avatar">
+                            {{ initials(a) }}
+                          </div>
                           <div>
-                            <p class="cell-name">{{ a.fullName || a.username }}</p>
-                            <p class="cell-sub">{{ a.username }}</p>
+                            <p class="cell-name">
+                              {{ a.fullName || a.username }}
+                            </p>
+                            <p class="cell-sub">
+                              {{ a.username }}
+                            </p>
                           </div>
                         </div>
                       </td>
-                      <td><span class="role-badge" :class="roleCss(a.userRole)">{{ roleLabel(a.userRole) }}</span></td>
-                      <td><span class="perm-badge" :class="permCss(a.permission)">{{ permLabel(a.permission) }}</span></td>
-                      <td class="cell-date">{{ formatDate(a.assignedAt) }}</td>
-                      <td class="cell-date">
-                        <span v-if="a.expiresAt" :class="{ 'text-red': !a.isActive }">
-                          {{ formatDate(a.expiresAt) }}
-                          <span v-if="!a.isActive" class="expired-tag">Expiré</span>
-                        </span>
-                        <span v-else class="perm-badge badge-permanent">Permanent</span>
+                      <td>
+                        <span
+                          class="role-badge"
+                          :class="roleCss(a.userRole)"
+                        >{{ roleLabel(a.userRole) }}</span>
                       </td>
                       <td>
-                        <button @click="revokeAssignment(a)" class="btn-danger-sm">Révoquer</button>
+                        <span
+                          class="perm-badge"
+                          :class="permCss(a.permission)"
+                        >{{ permLabel(a.permission) }}</span>
+                      </td>
+                      <td class="cell-date">
+                        {{ formatDate(a.assignedAt) }}
+                      </td>
+                      <td class="cell-date">
+                        <span
+                          v-if="a.expiresAt"
+                          :class="{ 'text-red': !a.isActive }"
+                        >
+                          {{ formatDate(a.expiresAt) }}
+                          <span
+                            v-if="!a.isActive"
+                            class="expired-tag"
+                          >Expiré</span>
+                        </span>
+                        <span
+                          v-else
+                          class="perm-badge badge-permanent"
+                        >Permanent</span>
+                      </td>
+                      <td>
+                        <button
+                          class="btn-danger-sm"
+                          @click="revokeAssignment(a)"
+                        >
+                          Révoquer
+                        </button>
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <div v-else class="empty-state">Aucun utilisateur assigné à ce groupe.</div>
+              <div
+                v-else
+                class="empty-state"
+              >
+                Aucun utilisateur assigné à ce groupe.
+              </div>
             </div>
           </div>
         </div>
@@ -386,75 +712,163 @@
         ═══════════════════════════════════════════════════════ -->
         <div v-if="activeTab === 'rights'">
           <div class="section-header">
-            <h3 class="section-title">Droits par utilisateur</h3>
-            <input v-model="userSearch" placeholder="Rechercher…" class="input input-sm search-input" />
+            <h3 class="section-title">
+              Droits par utilisateur
+            </h3>
+            <input
+              v-model="userSearch"
+              placeholder="Rechercher…"
+              class="input input-sm search-input"
+            >
           </div>
 
-          <div v-if="loadingRights" class="loading">Chargement…</div>
-          <div v-else class="users-rights-list">
+          <div
+            v-if="loadingRights"
+            class="loading"
+          >
+            Chargement…
+          </div>
+          <div
+            v-else
+            class="users-rights-list"
+          >
             <div
-              v-for="u in filteredUsersRights" :key="u.userId"
+              v-for="u in filteredUsersRights"
+              :key="u.userId"
               class="user-rights-card"
               :class="{ inactive: !u.isActive }"
             >
-              <div class="user-rights-header" @click="toggleUserExpanded(u.userId)">
+              <div
+                class="user-rights-header"
+                @click="toggleUserExpanded(u.userId)"
+              >
                 <div class="user-cell">
-                  <div class="mini-avatar" :class="roleCss(u.role)">{{ initialsFromUser(u) }}</div>
+                  <div
+                    class="mini-avatar"
+                    :class="roleCss(u.role)"
+                  >
+                    {{ initialsFromUser(u) }}
+                  </div>
                   <div>
-                    <p class="cell-name">{{ u.fullName || u.username }}</p>
-                    <p class="cell-sub">{{ u.username }} · <span class="role-badge-inline" :class="roleCss(u.role)">{{ roleLabel(u.role) }}</span></p>
+                    <p class="cell-name">
+                      {{ u.fullName || u.username }}
+                    </p>
+                    <p class="cell-sub">
+                      {{ u.username }} · <span
+                        class="role-badge-inline"
+                        :class="roleCss(u.role)"
+                      >{{ roleLabel(u.role) }}</span>
+                    </p>
                   </div>
                 </div>
                 <div class="user-rights-summary">
                   <span class="stat">📦 {{ u.groups.length }} groupe{{ u.groups.length !== 1 ? 's' : '' }}</span>
                   <span class="stat">📄 {{ u.directGrants.length }} accès direct{{ u.directGrants.length !== 1 ? 's' : '' }}</span>
-                  <span v-if="!u.isActive" class="expired-tag">Désactivé</span>
+                  <span
+                    v-if="!u.isActive"
+                    class="expired-tag"
+                  >Désactivé</span>
                 </div>
-                <svg class="chevron" :class="{ rotated: expandedUsers.includes(u.userId) }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                <svg
+                  class="chevron"
+                  :class="{ rotated: expandedUsers.includes(u.userId) }"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M19 9l-7 7-7-7"
+                  />
                 </svg>
               </div>
 
-              <div v-if="expandedUsers.includes(u.userId)" class="user-rights-detail">
-                <div v-if="u.groups.length" class="rights-subsection">
-                  <p class="rights-subsection-title">Groupes assignés</p>
+              <div
+                v-if="expandedUsers.includes(u.userId)"
+                class="user-rights-detail"
+              >
+                <div
+                  v-if="u.groups.length"
+                  class="rights-subsection"
+                >
+                  <p class="rights-subsection-title">
+                    Groupes assignés
+                  </p>
                   <div class="group-tags">
                     <div
-                      v-for="g in u.groups" :key="g.assignmentId"
+                      v-for="g in u.groups"
+                      :key="g.assignmentId"
                       class="group-tag"
                       :style="{ borderColor: g.groupColor || '#2563eb', background: (g.groupColor || '#2563eb') + '11' }"
                     >
                       <span>{{ g.groupIcon || '📁' }} {{ g.groupName }}</span>
-                      <span class="perm-badge" :class="permCss(g.permission)">{{ permLabel(g.permission) }}</span>
+                      <span
+                        class="perm-badge"
+                        :class="permCss(g.permission)"
+                      >{{ permLabel(g.permission) }}</span>
                       <span class="stat">{{ g.documentCount }} docs</span>
-                      <button @click="revokeGroupFromUser(u, g)" class="btn-icon-danger" title="Révoquer">✕</button>
+                      <button
+                        class="btn-icon-danger"
+                        title="Révoquer"
+                        @click="revokeGroupFromUser(u, g)"
+                      >
+                        ✕
+                      </button>
                     </div>
                   </div>
                 </div>
 
-                <div v-if="u.directGrants.length" class="rights-subsection">
-                  <p class="rights-subsection-title">Accès directs (hors groupes)</p>
+                <div
+                  v-if="u.directGrants.length"
+                  class="rights-subsection"
+                >
+                  <p class="rights-subsection-title">
+                    Accès directs (hors groupes)
+                  </p>
                   <div class="mini-table-wrap">
                     <table class="mini-table">
                       <thead>
-                        <tr><th>Document</th><th>Permission</th><th>Accordé le</th><th>Expiration</th><th></th></tr>
+                        <tr><th>Document</th><th>Permission</th><th>Accordé le</th><th>Expiration</th><th /></tr>
                       </thead>
                       <tbody>
-                        <tr v-for="grant in u.directGrants" :key="grant.id">
+                        <tr
+                          v-for="grant in u.directGrants"
+                          :key="grant.id"
+                        >
                           <td>
                             <span class="doc-title-cell">
                               {{ allDocs.find(d => d.id === grant.documentId)?.title || '—' }}
                             </span>
                             <span class="doc-filename">{{ grant.documentId.slice(0, 8) }}…</span>
                           </td>
-                          <td><span class="perm-badge" :class="permCss(grant.permission)">{{ permLabel(grant.permission) }}</span></td>
-                          <td class="cell-date">{{ formatDate(grant.grantedAt) }}</td>
+                          <td>
+                            <span
+                              class="perm-badge"
+                              :class="permCss(grant.permission)"
+                            >{{ permLabel(grant.permission) }}</span>
+                          </td>
                           <td class="cell-date">
-                            <span v-if="grant.expiresAt" :class="{ 'text-red': !grant.isActive }">{{ formatDate(grant.expiresAt) }}</span>
-                            <span v-else class="perm-badge badge-permanent">Permanent</span>
+                            {{ formatDate(grant.grantedAt) }}
+                          </td>
+                          <td class="cell-date">
+                            <span
+                              v-if="grant.expiresAt"
+                              :class="{ 'text-red': !grant.isActive }"
+                            >{{ formatDate(grant.expiresAt) }}</span>
+                            <span
+                              v-else
+                              class="perm-badge badge-permanent"
+                            >Permanent</span>
                           </td>
                           <td>
-                            <button @click="revokeDirectGrant(grant)" class="btn-danger-sm">Révoquer</button>
+                            <button
+                              class="btn-danger-sm"
+                              @click="revokeDirectGrant(grant)"
+                            >
+                              Révoquer
+                            </button>
                           </td>
                         </tr>
                       </tbody>
@@ -462,12 +876,20 @@
                   </div>
                 </div>
 
-                <p v-if="!u.groups.length && !u.directGrants.length" class="empty-state">
+                <p
+                  v-if="!u.groups.length && !u.directGrants.length"
+                  class="empty-state"
+                >
                   Aucun accès accordé à cet utilisateur.
                 </p>
               </div>
             </div>
-            <div v-if="!filteredUsersRights.length" class="empty-state">Aucun utilisateur trouvé.</div>
+            <div
+              v-if="!filteredUsersRights.length"
+              class="empty-state"
+            >
+              Aucun utilisateur trouvé.
+            </div>
           </div>
         </div>
 
@@ -476,23 +898,48 @@
         ═══════════════════════════════════════════════════════ -->
         <div v-if="activeTab === 'roles'">
           <div class="section-header">
-            <h3 class="section-title">Rôles système</h3>
+            <h3 class="section-title">
+              Rôles système
+            </h3>
           </div>
 
           <div class="role-legend">
-            <div v-for="r in roleDefs" :key="r.role" class="role-def-card" :class="'role-def-' + r.role.toLowerCase()">
+            <div
+              v-for="r in roleDefs"
+              :key="r.role"
+              class="role-def-card"
+              :class="'role-def-' + r.role.toLowerCase()"
+            >
               <div class="role-def-header">
-                <span class="role-badge" :class="roleCss(r.role)">{{ roleLabel(r.role) }}</span>
+                <span
+                  class="role-badge"
+                  :class="roleCss(r.role)"
+                >{{ roleLabel(r.role) }}</span>
               </div>
-              <p class="role-def-desc">{{ r.description }}</p>
+              <p class="role-def-desc">
+                {{ r.description }}
+              </p>
               <ul class="role-def-perms">
-                <li v-for="p in r.permissions" :key="p">✓ {{ p }}</li>
+                <li
+                  v-for="p in r.permissions"
+                  :key="p"
+                >
+                  ✓ {{ p }}
+                </li>
               </ul>
             </div>
           </div>
 
-          <div v-if="loadingUsers" class="loading">Chargement…</div>
-          <div v-else class="mini-table-wrap">
+          <div
+            v-if="loadingUsers"
+            class="loading"
+          >
+            Chargement…
+          </div>
+          <div
+            v-else
+            class="mini-table-wrap"
+          >
             <table class="mini-table">
               <thead>
                 <tr>
@@ -501,36 +948,71 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="u in allUsers" :key="u.id">
+                <tr
+                  v-for="u in allUsers"
+                  :key="u.id"
+                >
                   <td>
                     <div class="user-cell">
-                      <div class="mini-avatar" :class="roleCss(u.role)">{{ initials(u) }}</div>
+                      <div
+                        class="mini-avatar"
+                        :class="roleCss(u.role)"
+                      >
+                        {{ initials(u) }}
+                      </div>
                       <div>
-                        <p class="cell-name">{{ u.fullName || u.username }}</p>
-                        <p class="cell-sub">{{ u.username }}</p>
+                        <p class="cell-name">
+                          {{ u.fullName || u.username }}
+                        </p>
+                        <p class="cell-sub">
+                          {{ u.username }}
+                        </p>
                       </div>
                     </div>
                   </td>
-                  <td><span class="role-badge" :class="roleCss(u.role)">{{ roleLabel(u.role) }}</span></td>
                   <td>
-                    <span class="status-badge" :class="u.isActive ? 'status-active' : 'status-inactive'">
+                    <span
+                      class="role-badge"
+                      :class="roleCss(u.role)"
+                    >{{ roleLabel(u.role) }}</span>
+                  </td>
+                  <td>
+                    <span
+                      class="status-badge"
+                      :class="u.isActive ? 'status-active' : 'status-inactive'"
+                    >
                       {{ u.isActive ? 'Actif' : 'Désactivé' }}
                     </span>
                   </td>
-                  <td class="cell-date">{{ u.lastLoginAt ? formatDate(u.lastLoginAt) : '—' }}</td>
+                  <td class="cell-date">
+                    {{ u.lastLoginAt ? formatDate(u.lastLoginAt) : '—' }}
+                  </td>
                   <td>
                     <div class="role-change-row">
-                      <select v-model="roleChanges[u.id]" class="input input-sm">
-                        <option value="User">Utilisateur</option>
-                        <option value="Manager">Responsable</option>
-                        <option value="ReadOnly">Lecture seule</option>
-                        <option value="Admin">Administrateur</option>
+                      <select
+                        v-model="roleChanges[u.id]"
+                        class="input input-sm"
+                      >
+                        <option value="User">
+                          Utilisateur
+                        </option>
+                        <option value="Manager">
+                          Responsable
+                        </option>
+                        <option value="ReadOnly">
+                          Lecture seule
+                        </option>
+                        <option value="Admin">
+                          Administrateur
+                        </option>
                       </select>
                       <button
-                        @click="changeRole(u)"
                         :disabled="roleChanges[u.id] === u.role || saving"
                         class="btn-primary-sm"
-                      >Appliquer</button>
+                        @click="changeRole(u)"
+                      >
+                        Appliquer
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -538,7 +1020,6 @@
             </table>
           </div>
         </div>
-
       </div><!-- end modal-body -->
     </div>
   </div>
@@ -731,11 +1212,13 @@ const loadAllDocs = async (query = '') => {
     // When no query, use empty string to get all accessible documents
     // The backend search will apply ACL filters based on current user
     const searchQuery = query.trim() ? query.trim() : ''
+    // Use wildcard search to get all documents when query is empty
+    const isEmptyQuery = !searchQuery.trim()
     const res = await apiFetch('/api/search/query', {
       method: 'POST',
       body: JSON.stringify({
-        query:      searchQuery,
-        searchType: 0, // Natural search
+        query:      isEmptyQuery ? '*' : searchQuery,
+        searchType: isEmptyQuery ? 3 : 0, // Wildcard for empty, natural for actual queries
         page:       1,
         pageSize:   1000, // Get all accessible docs
       })

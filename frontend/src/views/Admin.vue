@@ -4,9 +4,17 @@
     <aside class="sidebar">
       <div class="sidebar-brand">
         <div class="brand-icon">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          <svg
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            />
           </svg>
         </div>
         <span class="brand-name">GED Admin</span>
@@ -14,28 +22,50 @@
 
       <nav class="sidebar-nav">
         <button
-          v-for="tab in tabs" :key="tab.id"
-          @click="activeTab = tab.id"
+          v-for="tab in tabs"
+          :key="tab.id"
           class="nav-item"
           :class="{ active: activeTab === tab.id }"
+          @click="activeTab = tab.id"
         >
-          <span class="nav-icon" v-html="tab.icon"></span>
+          <span
+            class="nav-icon"
+            v-html="tab.icon"
+          />
           <span>{{ tab.label }}</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
         <div class="admin-badge">
-          <div class="admin-avatar">{{ userInitials }}</div>
+          <div class="admin-avatar">
+            {{ userInitials }}
+          </div>
           <div class="admin-info">
-            <p class="admin-name">{{ user?.fullName || user?.username }}</p>
-            <p class="admin-role-tag">Administrateur</p>
+            <p class="admin-name">
+              {{ user?.fullName || user?.username }}
+            </p>
+            <p class="admin-role-tag">
+              Administrateur
+            </p>
           </div>
         </div>
-        <button @click="logout" class="logout-btn" title="Se déconnecter">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+        <button
+          class="logout-btn"
+          title="Se déconnecter"
+          @click="logout"
+        >
+          <svg
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
+            />
           </svg>
         </button>
       </div>
@@ -43,209 +73,486 @@
 
     <!-- Main content -->
     <main class="admin-main">
-
       <!-- ── DOCUMENTS TAB ──────────────────────────────────────────────── -->
-      <section v-if="activeTab === 'documents'" class="search-section">
+      <section
+        v-if="activeTab === 'documents'"
+        class="search-section"
+      >
+        <AppBreadcrumb :crumbs="documentsBreadcrumbs" />
         <div class="page-header">
           <div>
-            <h1 class="page-title">Gestion des documents</h1>
-            <p class="page-subtitle">{{ totalResults !== null ? totalResults + ' résultat(s)' : documents.length + ' document(s) dans le système' }}</p>
+            <h1 class="page-title">
+              Gestion des documents
+            </h1>
+            <p class="page-subtitle">
+              {{ totalResults !== null ? totalResults + ' résultat(s)' : documents.length + ' document(s) dans le système' }}
+            </p>
           </div>
         </div>
 
         <!-- ── Smart Search bar (mirrors User.vue) ── -->
         <div class="search-card">
           <div class="search-bar-wrapper">
-            <div class="search-input-wrapper" style="position:relative">
-              <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+            <div
+              class="search-input-wrapper"
+              style="position:relative"
+            >
+              <svg
+                class="search-icon"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
               </svg>
-              <input v-model="docSearch"
+              <input
+                v-model="docSearch"
+                type="text"
+                placeholder="Recherche en langage naturel… ex : « contrats 2024 »"
+                class="search-input"
                 @keyup.enter="handleSearch"
                 @input="onSearchInput"
                 @keydown.down.prevent="selectSuggestion(1)"
                 @keydown.up.prevent="selectSuggestion(-1)"
                 @keydown.escape="showAutocomplete = false"
                 @blur="onSearchBlur"
-                type="text"
-                placeholder="Recherche en langage naturel… ex : « contrats 2024 »"
-                class="search-input"/>
-              <div v-if="showAutocomplete && autocompleteSuggestions.length" class="autocomplete-dropdown">
-                <div v-for="(sug, i) in autocompleteSuggestions" :key="i"
-                  class="autocomplete-item" :class="{ 'ac-active': i === selectedAcIndex }"
-                  @mousedown.prevent="applyAutocomplete(sug)">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:13px;height:13px;color:#9ca3af;flex-shrink:0">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+              >
+              <div
+                v-if="showAutocomplete && autocompleteSuggestions.length"
+                class="autocomplete-dropdown"
+              >
+                <div
+                  v-for="(sug, i) in autocompleteSuggestions"
+                  :key="i"
+                  class="autocomplete-item"
+                  :class="{ 'ac-active': i === selectedAcIndex }"
+                  @mousedown.prevent="applyAutocomplete(sug)"
+                >
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    style="width:13px;height:13px;color:#9ca3af;flex-shrink:0"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                    />
                   </svg>
                   {{ sug }}
                 </div>
               </div>
             </div>
-            <button @click="openDocPicker" class="elise-attach-btn" :class="{ 'has-attachments': attachedDocIds.length > 0 }">
+            <button
+              class="elise-attach-btn"
+              :class="{ 'has-attachments': attachedDocIds.length > 0 }"
+              @click="openDocPicker"
+            >
               📎 {{ attachedDocIds.length ? attachedDocIds.length + ' joint(s)' : 'Joindre' }}
             </button>
 
             <!-- Doc picker modal (teleported to body) -->
             <teleport to="body">
-              <div v-if="showDocPicker" class="picker-overlay" @click.self="showDocPicker = false">
+              <div
+                v-if="showDocPicker"
+                class="picker-overlay"
+                @click.self="showDocPicker = false"
+              >
                 <div class="picker-modal">
                   <div class="picker-modal-header">
-                    <h3 class="picker-modal-title">📎 Joindre des documents à Elise</h3>
-                    <button @click="showDocPicker = false" class="picker-modal-close">✕</button>
+                    <h3 class="picker-modal-title">
+                      📎 Joindre des documents à Elise
+                    </h3>
+                    <button
+                      class="picker-modal-close"
+                      @click="showDocPicker = false"
+                    >
+                      ✕
+                    </button>
                   </div>
 
                   <div class="picker-modal-search">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px;color:#9ca3af;flex-shrink:0">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    <svg
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      style="width:16px;height:16px;color:#9ca3af;flex-shrink:0"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                      />
                     </svg>
-                    <input v-model="pickerSearch" type="text" placeholder="Rechercher un document…" class="picker-modal-search-input" />
-                    <button v-if="pickerSearch" @click="pickerSearch = ''" class="picker-modal-search-clear">✕</button>
+                    <input
+                      v-model="pickerSearch"
+                      type="text"
+                      placeholder="Rechercher un document…"
+                      class="picker-modal-search-input"
+                    >
+                    <button
+                      v-if="pickerSearch"
+                      class="picker-modal-search-clear"
+                      @click="pickerSearch = ''"
+                    >
+                      ✕
+                    </button>
                   </div>
 
                   <div class="picker-modal-body">
-                    <div v-if="pickerLoading" class="picker-modal-loading">
-                      <svg class="spinner" style="width:20px;height:20px" fill="none" viewBox="0 0 24 24">
-                        <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                        <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    <div
+                      v-if="pickerLoading"
+                      class="picker-modal-loading"
+                    >
+                      <svg
+                        class="spinner"
+                        style="width:20px;height:20px"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          class="spinner-bg"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          stroke-width="4"
+                        />
+                        <path
+                          class="spinner-path"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        />
                       </svg>
                       Chargement…
                     </div>
-                    <div v-else-if="!filteredPickerDocs.length" class="picker-modal-empty">
+                    <div
+                      v-else-if="!filteredPickerDocs.length"
+                      class="picker-modal-empty"
+                    >
                       Aucun document trouvé
                     </div>
-                    <label v-else v-for="doc in filteredPickerDocs" :key="doc.id" class="picker-modal-item" :class="{ selected: attachedDocIds.includes(doc.id) }">
-                      <input type="checkbox" :value="doc.id" v-model="attachedDocIds" style="display:none" />
+                    <label
+                      v-for="doc in filteredPickerDocs"
+                      v-else
+                      :key="doc.id"
+                      class="picker-modal-item"
+                      :class="{ selected: attachedDocIds.includes(doc.id) }"
+                    >
+                      <input
+                        v-model="attachedDocIds"
+                        type="checkbox"
+                        :value="doc.id"
+                        style="display:none"
+                      >
                       <span class="picker-modal-icon">{{ getFileIcon(doc.contentType) }}</span>
                       <div class="picker-modal-info">
                         <span class="picker-modal-name">{{ doc.title }}</span>
                         <span class="picker-modal-meta">{{ doc.category || '—' }}</span>
                       </div>
-                      <span v-if="attachedDocIds.includes(doc.id)" class="picker-modal-check">✓</span>
+                      <span
+                        v-if="attachedDocIds.includes(doc.id)"
+                        class="picker-modal-check"
+                      >✓</span>
                     </label>
                   </div>
 
                   <div class="picker-modal-footer">
                     <span class="picker-modal-count">{{ attachedDocIds.length }} sélectionné(s)</span>
-                    <button @click="attachedDocIds = []" class="picker-modal-clear-btn">Tout désélectionner</button>
-                    <button @click="confirmAttachments" class="picker-modal-confirm-btn">Confirmer</button>
+                    <button
+                      class="picker-modal-clear-btn"
+                      @click="attachedDocIds = []"
+                    >
+                      Tout désélectionner
+                    </button>
+                    <button
+                      class="picker-modal-confirm-btn"
+                      @click="confirmAttachments"
+                    >
+                      Confirmer
+                    </button>
                   </div>
                 </div>
               </div>
             </teleport>
-            <button @click="handleSearch" :disabled="searchLoading" class="search-btn">
+            <button
+              :disabled="searchLoading"
+              class="search-btn"
+              @click="handleSearch"
+            >
               <span v-if="!searchLoading">Rechercher</span>
-              <span v-else class="loading-text">
-                <svg class="spinner" fill="none" viewBox="0 0 24 24">
-                  <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                  <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              <span
+                v-else
+                class="loading-text"
+              >
+                <svg
+                  class="spinner"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    class="spinner-bg"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    stroke-width="4"
+                  />
+                  <path
+                    class="spinner-path"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
                 </svg>
                 Recherche…
               </span>
             </button>
-            <button @click="showUpload = true" class="upload-btn">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            <button
+              class="upload-btn"
+              @click="showUpload = true"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                />
               </svg>
               Importer
             </button>
           </div>
 
           <!-- NLP interpretation banner -->
-          <div v-if="nlpInterpretation" class="nlp-banner">
+          <div
+            v-if="nlpInterpretation"
+            class="nlp-banner"
+          >
             <span class="nlp-icon">🧠</span>
             <span class="nlp-text">Compris comme : <strong>{{ nlpInterpretation }}</strong></span>
-            <button class="nlp-dismiss" @click="nlpInterpretation = null">✕</button>
+            <button
+              class="nlp-dismiss"
+              @click="nlpInterpretation = null"
+            >
+              ✕
+            </button>
           </div>
 
           <!-- Show when query is not understood -->
-          <div v-if="searchError" class="search-error-banner">
+          <div
+            v-if="searchError"
+            class="search-error-banner"
+          >
             {{ searchError }}
           </div>
 
           <div class="quick-searches">
             <span class="quick-label">Essayez :</span>
-            <button v-for="s in quickSearches" :key="s" @click="docSearch = s; handleSearch()" class="quick-btn">{{ s }}</button>
+            <button
+              v-for="s in quickSearches"
+              :key="s"
+              class="quick-btn"
+              @click="docSearch = s; handleSearch()"
+            >
+              {{ s }}
+            </button>
           </div>
 
-          <button @click="showFilters = !showFilters" class="filters-toggle">
-            <svg class="toggle-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/>
+          <button
+            class="filters-toggle"
+            @click="showFilters = !showFilters"
+          >
+            <svg
+              class="toggle-icon"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
+              />
             </svg>
             {{ showFilters ? 'Masquer' : 'Afficher' }} les filtres avancés
           </button>
 
-          <div v-if="showFilters" class="filters-panel">
+          <div
+            v-if="showFilters"
+            class="filters-panel"
+          >
             <div class="filters-grid">
               <div class="filter-group">
                 <label class="filter-label">Catégorie</label>
-                <select v-model="filters.category" class="filter-select">
-                  <option value="">Toutes</option>
-                  <option value="Invoice">📄 Facture</option>
-                  <option value="Contract">📜 Contrat</option>
-                  <option value="Report">📊 Rapport</option>
-                  <option value="Letter">✉️ Courrier</option>
-                  <option value="Memo">📝 Mémo</option>
-                  <option value="Presentation">📽️ Présentation</option>
-                  <option value="Spreadsheet">📈 Tableur</option>
-                  <option value="Image">🖼️ Image</option>
-                  <option value="Other">📎 Autre</option>
+                <select
+                  v-model="filters.category"
+                  class="filter-select"
+                >
+                  <option value="">
+                    Toutes
+                  </option>
+                  <option value="Invoice">
+                    📄 Facture
+                  </option>
+                  <option value="Contract">
+                    📜 Contrat
+                  </option>
+                  <option value="Report">
+                    📊 Rapport
+                  </option>
+                  <option value="Letter">
+                    ✉️ Courrier
+                  </option>
+                  <option value="Memo">
+                    📝 Mémo
+                  </option>
+                  <option value="Presentation">
+                    📽️ Présentation
+                  </option>
+                  <option value="Spreadsheet">
+                    📈 Tableur
+                  </option>
+                  <option value="Image">
+                    🖼️ Image
+                  </option>
+                  <option value="Other">
+                    📎 Autre
+                  </option>
                 </select>
               </div>
               <div class="filter-group">
                 <label class="filter-label">Type de fichier</label>
-                <select v-model="filters.contentType" class="filter-select">
-                  <option value="">Tous</option>
-                  <option value="application/pdf">📄 PDF</option>
-                  <option value="application/vnd.openxmlformats-officedocument.wordprocessingml.document">📝 Word</option>
-                  <option value="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">📊 Excel</option>
-                  <option value="text/plain">📃 Texte brut</option>
-                  <option value="image/jpeg">🖼️ JPEG</option>
-                  <option value="image/png">🖼️ PNG</option>
+                <select
+                  v-model="filters.contentType"
+                  class="filter-select"
+                >
+                  <option value="">
+                    Tous
+                  </option>
+                  <option value="application/pdf">
+                    📄 PDF
+                  </option>
+                  <option value="application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+                    📝 Word
+                  </option>
+                  <option value="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+                    📊 Excel
+                  </option>
+                  <option value="text/plain">
+                    📃 Texte brut
+                  </option>
+                  <option value="image/jpeg">
+                    🖼️ JPEG
+                  </option>
+                  <option value="image/png">
+                    🖼️ PNG
+                  </option>
                 </select>
               </div>
               <div class="filter-group">
                 <label class="filter-label">Date début</label>
-                <input v-model="filters.dateFrom" type="date" class="filter-input"/>
+                <input
+                  v-model="filters.dateFrom"
+                  type="date"
+                  class="filter-input"
+                >
               </div>
               <div class="filter-group">
                 <label class="filter-label">Date fin</label>
-                <input v-model="filters.dateTo" type="date" class="filter-input"/>
+                <input
+                  v-model="filters.dateTo"
+                  type="date"
+                  class="filter-input"
+                >
               </div>
               <div class="filter-group">
                 <label class="filter-label">Statut OCR</label>
-                <select v-model="filters.ocrStatus" class="filter-select">
-                  <option value="">Tous</option>
-                  <option value="4">✅ OCR terminé</option>
-                  <option value="0">⏳ En attente</option>
-                  <option value="1">🔄 En traitement</option>
-                  <option value="5">❌ Échec OCR</option>
+                <select
+                  v-model="filters.ocrStatus"
+                  class="filter-select"
+                >
+                  <option value="">
+                    Tous
+                  </option>
+                  <option value="4">
+                    ✅ OCR terminé
+                  </option>
+                  <option value="0">
+                    ⏳ En attente
+                  </option>
+                  <option value="1">
+                    🔄 En traitement
+                  </option>
+                  <option value="5">
+                    ❌ Échec OCR
+                  </option>
                 </select>
               </div>
               <div class="filter-group">
                 <label class="filter-label">Service</label>
-                <select v-model="filters.service" class="filter-select">
-                  <option value="">Tous les services</option>
-                  <option value="Finance">💼 Finance</option>
-                  <option value="RH">👥 Ressources Humaines</option>
-                  <option value="Juridique">⚖️ Juridique</option>
-                  <option value="Commercial">📈 Commercial</option>
-                  <option value="Informatique">💻 Informatique</option>
-                  <option value="Direction">🏢 Direction</option>
-                  <option value="Autre">📁 Autre</option>
+                <select
+                  v-model="filters.service"
+                  class="filter-select"
+                >
+                  <option value="">
+                    Tous les services
+                  </option>
+                  <option value="Finance">
+                    💼 Finance
+                  </option>
+                  <option value="RH">
+                    👥 Ressources Humaines
+                  </option>
+                  <option value="Juridique">
+                    ⚖️ Juridique
+                  </option>
+                  <option value="Commercial">
+                    📈 Commercial
+                  </option>
+                  <option value="Informatique">
+                    💻 Informatique
+                  </option>
+                  <option value="Direction">
+                    🏢 Direction
+                  </option>
+                  <option value="Autre">
+                    📁 Autre
+                  </option>
                 </select>
               </div>
             </div>
-            <div v-if="hasActiveFilters" class="filters-reset-row">
-              <button @click="resetFilters" class="filters-reset-btn">✕ Réinitialiser tous les filtres</button>
+            <div
+              v-if="hasActiveFilters"
+              class="filters-reset-row"
+            >
+              <button
+                class="filters-reset-btn"
+                @click="resetFilters"
+              >
+                ✕ Réinitialiser tous les filtres
+              </button>
             </div>
           </div>
         </div>
 
         <!-- RAG answer panel -->
-        <div v-if="ragMode && (ragAnswer || ragLoading)" class="rag-answer-panel">
+        <div
+          v-if="ragMode && (ragAnswer || ragLoading)"
+          class="rag-answer-panel"
+        >
           <!-- ── Header ───────────────────────────────────────────────── -->
           <div class="rag-answer-header">
             <div class="elise-avatar-row">
@@ -256,16 +563,43 @@
               </div>
             </div>
             <div class="rag-header-actions">
-              <span v-if="ragSources.length" class="rag-source-count">{{ ragSources.length }} source(s)</span>
-              <button @click="ragAnswer = ''; ragSources = []" class="rag-close">✕</button>
+              <span
+                v-if="ragSources.length"
+                class="rag-source-count"
+              >{{ ragSources.length }} source(s)</span>
+              <button
+                class="rag-close"
+                @click="ragAnswer = ''; ragSources = []"
+              >
+                ✕
+              </button>
             </div>
           </div>
 
           <!-- ── Loading state ────────────────────────────────────────── -->
-          <div v-if="ragLoading" class="rag-thinking">
-            <svg class="spinner" style="width:16px;height:16px" fill="none" viewBox="0 0 24 24">
-              <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-              <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          <div
+            v-if="ragLoading"
+            class="rag-thinking"
+          >
+            <svg
+              class="spinner"
+              style="width:16px;height:16px"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                class="spinner-bg"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                stroke-width="4"
+              />
+              <path
+                class="spinner-path"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
             </svg>
             Elise analyse vos documents…
           </div>
@@ -274,46 +608,81 @@
           <template v-else-if="ragAnswer">
             <!-- Part 1: Elise conversational intro -->
             <div class="elise-intro-block">
-              <p class="elise-intro-text">Voici ce que j'ai trouvé dans vos documents :</p>
+              <p class="elise-intro-text">
+                Voici ce que j'ai trouvé dans vos documents :
+              </p>
             </div>
 
             <!-- Part 2: Actual query result -->
             <div class="elise-result-block">
-              <p class="rag-answer-text">{{ ragAnswer }}</p>
+              <p class="rag-answer-text">
+                {{ ragAnswer }}
+              </p>
             </div>
           </template>
 
           <!-- ── Sources ──────────────────────────────────────────────── -->
-          <div v-if="ragSources.length" class="rag-sources-grid">
-            <div v-for="(src, i) in ragSources" :key="i" class="rag-source-chip">
+          <div
+            v-if="ragSources.length"
+            class="rag-sources-grid"
+          >
+            <div
+              v-for="(src, i) in ragSources"
+              :key="i"
+              class="rag-source-chip"
+            >
               <span class="src-num">{{ i + 1 }}</span>
               <div class="src-body">
-                <p class="src-title">{{ src.title }}</p>
+                <p class="src-title">
+                  {{ src.title }}
+                </p>
                 <p class="src-meta">
                   <span v-if="src.category">{{ src.category }} · </span>
                   {{ Math.round(src.relevanceScore * 100) }}% pertinent
                 </p>
-                <p v-if="src.excerpt" class="src-excerpt">{{ src.excerpt }}</p>
+                <p
+                  v-if="src.excerpt"
+                  class="src-excerpt"
+                >
+                  {{ src.excerpt }}
+                </p>
               </div>
-              <button @click="viewDocument({ id: src.documentId, title: src.title, fileName: src.title, contentType: 'application/pdf', score: src.relevanceScore })" class="src-view-btn">Voir</button>
+              <button
+                class="src-view-btn"
+                @click="viewDocument({ id: src.documentId, title: src.title, fileName: src.title, contentType: 'application/pdf', score: src.relevanceScore })"
+              >
+                Voir
+              </button>
             </div>
           </div>
         </div>
 
         <!-- Results summary -->
-        <div v-if="searchResults && searchResults.documents?.length > 0" class="results-summary">
+        <div
+          v-if="searchResults && searchResults.documents?.length > 0"
+          class="results-summary"
+        >
           <div class="summary-card">
             <span class="summary-count">{{ searchResults.totalResults }}</span>
             <span class="summary-text"> résultat(s)</span>
             <span class="summary-divider">·</span>
             <span class="summary-time">{{ searchResults.searchTimeMs }}ms</span>
           </div>
-          <div class="summary-page">Page {{ searchResults.page }} / {{ searchResults.totalPages }}</div>
+          <div class="summary-page">
+            Page {{ searchResults.page }} / {{ searchResults.totalPages }}
+          </div>
         </div>
 
         <!-- Documents grid -->
-        <div v-if="searchResults && searchResults.documents?.length > 0" class="documents-grid">
-          <article v-for="doc in searchResults.documents" :key="doc.id" class="document-card">
+        <div
+          v-if="searchResults && searchResults.documents?.length > 0"
+          class="documents-grid"
+        >
+          <article
+            v-for="doc in searchResults.documents"
+            :key="doc.id"
+            class="document-card"
+          >
             <div class="card-content">
               <div class="doc-info">
                 <div class="doc-header">
@@ -321,37 +690,93 @@
                     <span class="icon-emoji">{{ getFileIcon(doc.contentType) }}</span>
                   </div>
                   <div class="doc-details">
-                    <h3 class="doc-title">{{ doc.title }}</h3>
-                    <p v-if="doc.description" class="doc-description">{{ doc.description }}</p>
-                    <div v-if="doc.highlights && doc.highlights.length" class="highlights">
-                      <div v-for="(h,i) in doc.highlights.slice(0,2)" :key="i" class="highlight-item" v-html="h"></div>
+                    <h3 class="doc-title">
+                      {{ doc.title }}
+                    </h3>
+                    <p
+                      v-if="doc.description"
+                      class="doc-description"
+                    >
+                      {{ doc.description }}
+                    </p>
+                    <div
+                      v-if="doc.highlights && doc.highlights.length"
+                      class="highlights"
+                    >
+                      <div
+                        v-for="(h,i) in doc.highlights.slice(0,2)"
+                        :key="i"
+                        class="highlight-item"
+                        v-html="h"
+                      />
                     </div>
                     <div class="metadata-row">
                       <span class="meta-item">{{ doc.fileName }}</span>
-                      <span v-if="doc.documentDate" class="meta-item meta-highlight">📅 {{ formatDate(doc.documentDate) }}</span>
+                      <span
+                        v-if="doc.documentDate"
+                        class="meta-item meta-highlight"
+                      >📅 {{ formatDate(doc.documentDate) }}</span>
                       <span class="meta-item">{{ formatSize(doc.fileSize) }}</span>
-                      <span v-if="doc.category" class="category-badge">{{ doc.category }}</span>
-                      <span class="status-dot" :class="statusClass(doc.status)">{{ doc.status }}</span>
-                      <span v-if="doc.isOcrProcessed" class="ocr-badge ocr-badge-done" title="Contenu indexé via OCR">🔬 OCR</span>
-                      <span v-else-if="doc.ocrStatus !== undefined && doc.ocrStatus < 4" class="ocr-badge ocr-badge-pending" title="OCR en cours">⏳ OCR</span>
-                      <span v-if="doc.ocrQualityScore !== undefined && doc.ocrQualityScore !== null"
+                      <span
+                        v-if="doc.category"
+                        class="category-badge"
+                      >{{ doc.category }}</span>
+                      <span
+                        class="status-dot"
+                        :class="statusClass(doc.status)"
+                      >{{ doc.status }}</span>
+                      <span
+                        v-if="doc.isOcrProcessed"
+                        class="ocr-badge ocr-badge-done"
+                        title="Contenu indexé via OCR"
+                      >🔬 OCR</span>
+                      <span
+                        v-else-if="doc.ocrStatus !== undefined && doc.ocrStatus < 4"
+                        class="ocr-badge ocr-badge-pending"
+                        title="OCR en cours"
+                      >⏳ OCR</span>
+                      <span
+                        v-if="doc.ocrQualityScore !== undefined && doc.ocrQualityScore !== null"
                         class="ocr-quality-badge"
                         :class="doc.ocrQualityScore >= 0.8 ? 'oq-good' : doc.ocrQualityScore >= 0.5 ? 'oq-medium' : 'oq-low'"
-                        :title="`Qualité OCR : ${Math.round(doc.ocrQualityScore*100)}%`">
+                        :title="`Qualité OCR : ${Math.round(doc.ocrQualityScore*100)}%`"
+                      >
                         Q: {{ Math.round(doc.ocrQualityScore*100) }}%
                       </span>
-                      <span v-if="doc.service" class="service-badge">{{ doc.service }}</span>
+                      <span
+                        v-if="doc.service"
+                        class="service-badge"
+                      >{{ doc.service }}</span>
                     </div>
-                    <div v-if="doc.tags && doc.tags.length" class="tags-row">
-                      <span v-for="tag in doc.tags.slice(0,5)" :key="tag" class="tag">#{{ tag }}</span>
-                      <span v-if="doc.tags.length > 5" class="tag-more">+{{ doc.tags.length - 5 }}</span>
+                    <div
+                      v-if="doc.tags && doc.tags.length"
+                      class="tags-row"
+                    >
+                      <span
+                        v-for="tag in doc.tags.slice(0,5)"
+                        :key="tag"
+                        class="tag"
+                      >#{{ tag }}</span>
+                      <span
+                        v-if="doc.tags.length > 5"
+                        class="tag-more"
+                      >+{{ doc.tags.length - 5 }}</span>
                     </div>
                     <!-- Auto-summary -->
-                    <div v-if="doc.summary || doc.description" class="doc-summary-row">
-                      <button @click.stop="toggleSummary(doc.id)" class="summary-toggle-btn">
+                    <div
+                      v-if="doc.summary || doc.description"
+                      class="doc-summary-row"
+                    >
+                      <button
+                        class="summary-toggle-btn"
+                        @click.stop="toggleSummary(doc.id)"
+                      >
                         {{ expandedSummaries.has(doc.id) ? '▲ Masquer' : '▼ Résumé automatique' }}
                       </button>
-                      <div v-if="expandedSummaries.has(doc.id)" class="doc-summary-text">
+                      <div
+                        v-if="expandedSummaries.has(doc.id)"
+                        class="doc-summary-text"
+                      >
                         {{ doc.summary || doc.description }}
                       </div>
                     </div>
@@ -361,36 +786,93 @@
               <div class="doc-actions">
                 <div class="score-wrapper">
                   <div class="score-circle">
-                    <svg class="circle-svg" viewBox="0 0 100 100">
-                      <circle cx="50" cy="50" r="40" class="circle-bg"/>
-                      <circle cx="50" cy="50" r="40" class="circle-progress"
-                        :style="`stroke-dashoffset: ${251 - 251 * (doc.score || 0)}`"/>
+                    <svg
+                      class="circle-svg"
+                      viewBox="0 0 100 100"
+                    >
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="40"
+                        class="circle-bg"
+                      />
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="40"
+                        class="circle-progress"
+                        :style="`stroke-dashoffset: ${251 - 251 * (doc.score || 0)}`"
+                      />
                     </svg>
                     <div class="score-text">
                       <span class="score-value">{{ Math.round((doc.score || 0) * 100) }}%</span>
                     </div>
                   </div>
-                  <p class="score-label">Pertinence</p>
+                  <p class="score-label">
+                    Pertinence
+                  </p>
                 </div>
                 <!-- Admin actions -->
-                <button @click="viewDocument(doc)" class="view-btn" title="Voir / Modifier">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                <button
+                  class="view-btn"
+                  title="Voir / Modifier"
+                  @click="viewDocument(doc)"
+                >
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                    />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                    />
                   </svg>
                   Voir
                 </button>
-                <button @click="openAcl(doc)" class="acl-btn" title="Gérer les accès">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                <button
+                  class="acl-btn"
+                  title="Gérer les accès"
+                  @click="openAcl(doc)"
+                >
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                    />
                   </svg>
                   Accès
                 </button>
-                <button @click="deleteDoc(doc)" class="delete-btn" title="Supprimer">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                <button
+                  class="delete-btn"
+                  title="Supprimer"
+                  @click="deleteDoc(doc)"
+                >
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
                   </svg>
                   Supprimer
                 </button>
@@ -400,31 +882,60 @@
         </div>
 
         <!-- Pagination -->
-        <nav v-if="searchResults && searchResults.totalPages > 1" class="pagination">
-          <button v-for="page in paginationPages" :key="page"
-            @click="goToPage(page)" :class="['page-btn', { active: page === searchResults.page }]">
+        <nav
+          v-if="searchResults && searchResults.totalPages > 1"
+          class="pagination"
+        >
+          <button
+            v-for="page in paginationPages"
+            :key="page"
+            :class="['page-btn', { active: page === searchResults.page }]"
+            @click="goToPage(page)"
+          >
             {{ page }}
           </button>
         </nav>
 
         <!-- Empty / initial states -->
-        <div v-else-if="!searchLoading && searched && (!searchResults || searchResults.documents.length === 0)" class="state-box empty-state">
+        <div
+          v-else-if="!searchLoading && searched && (!searchResults || searchResults.documents.length === 0)"
+          class="state-box empty-state"
+        >
           <div class="state-icon">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
             </svg>
           </div>
           <h3>Aucun document trouvé</h3>
           <p>Essayez d'ajuster votre requête ou vos filtres</p>
-          <button @click="docSearch = ''; searchResults = null; searched = false; fetchDocuments()" class="clear-btn">Réinitialiser</button>
+          <button
+            class="clear-btn"
+            @click="docSearch = ''; searchResults = null; searched = false; fetchDocuments()"
+          >
+            Réinitialiser
+          </button>
         </div>
 
-        <div v-else-if="!searched && loadingDocs" class="state-box loading-state">
-          <div class="spinner-ring"></div> Chargement…
+        <div
+          v-else-if="!searched && loadingDocs"
+          class="state-box loading-state"
+        >
+          <div class="spinner-ring" /> Chargement…
         </div>
 
-        <div v-else-if="!searched && !loadingDocs && documents.length === 0" class="state-box empty-state">
+        <div
+          v-else-if="!searched && !loadingDocs && documents.length === 0"
+          class="state-box empty-state"
+        >
           <h3>Aucun document dans le système</h3>
           <p>Importez votre premier document pour commencer</p>
         </div>
@@ -432,21 +943,35 @@
 
       <!-- ── USERS TAB ─────────────────────────────────────────────────── -->
       <section v-if="activeTab === 'users'">
+        <AppBreadcrumb :crumbs="usersBreadcrumbs" />
         <div class="page-header">
           <div>
-            <h1 class="page-title">Gestion des utilisateurs</h1>
-            <p class="page-subtitle">{{ users.length }} utilisateur(s) enregistré(s)</p>
+            <h1 class="page-title">
+              Gestion des utilisateurs
+            </h1>
+            <p class="page-subtitle">
+              {{ users.length }} utilisateur(s) enregistré(s)
+            </p>
           </div>
-          <button @click="showCreateUser = true" class="btn-primary">
+          <button
+            class="btn-primary"
+            @click="showCreateUser = true"
+          >
             + Créer un utilisateur
           </button>
         </div>
 
         <div class="table-card">
-          <div v-if="loadingUsers" class="loading-state">
-            <div class="spinner-ring"></div> Chargement…
+          <div
+            v-if="loadingUsers"
+            class="loading-state"
+          >
+            <div class="spinner-ring" /> Chargement…
           </div>
-          <table v-else class="doc-table">
+          <table
+            v-else
+            class="doc-table"
+          >
             <thead>
               <tr>
                 <th>Utilisateur</th>
@@ -457,22 +982,52 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="u in users" :key="u.id">
+              <tr
+                v-for="u in users"
+                :key="u.id"
+              >
                 <td>
                   <div class="user-cell">
-                    <div class="user-mini-avatar">{{ initials(u) }}</div>
+                    <div class="user-mini-avatar">
+                      {{ initials(u) }}
+                    </div>
                     <div>
-                      <p class="doc-name">{{ u.fullName || u.username }}</p>
-                      <p class="doc-filename">{{ u.username }}</p>
+                      <p class="doc-name">
+                        {{ u.fullName || u.username }}
+                      </p>
+                      <p class="doc-filename">
+                        {{ u.username }}
+                      </p>
                     </div>
                   </div>
                 </td>
-                <td><span class="role-tag" :class="roleClass(u.role)">{{ roleLabel(u.role) }}</span></td>
-                <td><span class="status-dot" :class="u.isActive ? 'active' : 'inactive'">{{ u.isActive ? 'Actif' : 'Désactivé' }}</span></td>
-                <td class="muted">{{ u.lastLoginAt ? formatDate(u.lastLoginAt) : '—' }}</td>
                 <td>
-                  <button v-if="u.isActive" @click="deactivateUser(u)" class="btn-icon-sm danger">Désactiver</button>
-                  <span v-else class="muted">—</span>
+                  <span
+                    class="role-tag"
+                    :class="roleClass(u.role)"
+                  >{{ roleLabel(u.role) }}</span>
+                </td>
+                <td>
+                  <span
+                    class="status-dot"
+                    :class="u.isActive ? 'active' : 'inactive'"
+                  >{{ u.isActive ? 'Actif' : 'Désactivé' }}</span>
+                </td>
+                <td class="muted">
+                  {{ u.lastLoginAt ? formatDate(u.lastLoginAt) : '—' }}
+                </td>
+                <td>
+                  <button
+                    v-if="u.isActive"
+                    class="btn-icon-sm danger"
+                    @click="deactivateUser(u)"
+                  >
+                    Désactiver
+                  </button>
+                  <span
+                    v-else
+                    class="muted"
+                  >—</span>
                 </td>
               </tr>
             </tbody>
@@ -481,15 +1036,37 @@
       </section>
 
       <!-- ── STATISTICS TAB ─────────────────────────────────────────────── -->
-      <section v-if="activeTab === 'stats'" class="stats-section">
+      <section
+        v-if="activeTab === 'stats'"
+        class="stats-section"
+      >
+        <AppBreadcrumb :crumbs="statsBreadcrumbs" />
         <div class="page-header">
           <div>
-            <h1 class="page-title">Statistiques système</h1>
-            <p class="page-subtitle">Vue d'ensemble de la GED et de la file OCR</p>
+            <h1 class="page-title">
+              Statistiques système
+            </h1>
+            <p class="page-subtitle">
+              Vue d'ensemble de la GED et de la file OCR
+            </p>
           </div>
-          <button @click="fetchStats" class="btn-secondary" :disabled="statsLoading">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:15px;height:15px">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          <button
+            class="btn-secondary"
+            :disabled="statsLoading"
+            @click="fetchStats"
+          >
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              style="width:15px;height:15px"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
             </svg>
             Actualiser
           </button>
@@ -498,31 +1075,55 @@
         <!-- KPI cards -->
         <div class="stats-kpi-grid">
           <div class="kpi-card kpi-blue">
-            <div class="kpi-icon">📄</div>
+            <div class="kpi-icon">
+              📄
+            </div>
             <div class="kpi-body">
-              <p class="kpi-label">Documents indexés</p>
-              <p class="kpi-value">{{ statsLoading ? '…' : (stats?.totalDocuments ?? '—') }}</p>
+              <p class="kpi-label">
+                Documents indexés
+              </p>
+              <p class="kpi-value">
+                {{ statsLoading ? '…' : (stats?.totalDocuments ?? '—') }}
+              </p>
             </div>
           </div>
           <div class="kpi-card kpi-green">
-            <div class="kpi-icon">👥</div>
+            <div class="kpi-icon">
+              👥
+            </div>
             <div class="kpi-body">
-              <p class="kpi-label">Utilisateurs actifs</p>
-              <p class="kpi-value">{{ users.filter(u => u.isActive).length }}</p>
+              <p class="kpi-label">
+                Utilisateurs actifs
+              </p>
+              <p class="kpi-value">
+                {{ users.filter(u => u.isActive).length }}
+              </p>
             </div>
           </div>
           <div class="kpi-card kpi-amber">
-            <div class="kpi-icon">⏳</div>
+            <div class="kpi-icon">
+              ⏳
+            </div>
             <div class="kpi-body">
-              <p class="kpi-label">File OCR en cours</p>
-              <p class="kpi-value">{{ ocrQueue.length }}</p>
+              <p class="kpi-label">
+                File OCR en cours
+              </p>
+              <p class="kpi-value">
+                {{ ocrQueue.length }}
+              </p>
             </div>
           </div>
           <div class="kpi-card kpi-purple">
-            <div class="kpi-icon">⚡</div>
+            <div class="kpi-icon">
+              ⚡
+            </div>
             <div class="kpi-body">
-              <p class="kpi-label">Temps de recherche</p>
-              <p class="kpi-value">{{ stats?.searchTimeMs != null ? stats.searchTimeMs + ' ms' : '—' }}</p>
+              <p class="kpi-label">
+                Temps de recherche
+              </p>
+              <p class="kpi-value">
+                {{ stats?.searchTimeMs != null ? stats.searchTimeMs + ' ms' : '—' }}
+              </p>
             </div>
           </div>
         </div>
@@ -530,44 +1131,115 @@
         <!-- Reindex panel -->
         <div class="stats-card">
           <h2 class="stats-card-title">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              style="width:16px;height:16px"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
             </svg>
             Ré-indexation OpenSearch
           </h2>
-          <p class="stats-card-desc">Déclenche un ré-indexation complète de tous les documents dans OpenSearch. Utile après une modification du mapping ou une restauration de données.</p>
+          <p class="stats-card-desc">
+            Déclenche un ré-indexation complète de tous les documents dans OpenSearch. Utile après une modification du mapping ou une restauration de données.
+          </p>
           <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-            <button @click="triggerReindex" :disabled="reindexing" class="reindex-btn">
-              <svg v-if="!reindexing" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:15px;height:15px">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            <button
+              :disabled="reindexing"
+              class="reindex-btn"
+              @click="triggerReindex"
+            >
+              <svg
+                v-if="!reindexing"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                style="width:15px;height:15px"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
               </svg>
-              <svg v-else class="spinner" fill="none" viewBox="0 0 24 24" style="width:15px;height:15px">
-                <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              <svg
+                v-else
+                class="spinner"
+                fill="none"
+                viewBox="0 0 24 24"
+                style="width:15px;height:15px"
+              >
+                <circle
+                  class="spinner-bg"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                />
+                <path
+                  class="spinner-path"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
               </svg>
               {{ reindexing ? 'Ré-indexation en cours…' : 'Lancer la ré-indexation' }}
             </button>
-            <span v-if="reindexMsg" class="reindex-msg">{{ reindexMsg }}</span>
+            <span
+              v-if="reindexMsg"
+              class="reindex-msg"
+            >{{ reindexMsg }}</span>
           </div>
         </div>
 
         <!-- OCR queue -->
         <div class="stats-card">
           <h2 class="stats-card-title">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              style="width:16px;height:16px"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+              />
             </svg>
             File de traitement OCR
           </h2>
-          <div v-if="ocrQueue.length === 0" class="stats-empty">
+          <div
+            v-if="ocrQueue.length === 0"
+            class="stats-empty"
+          >
             ✅ Aucun document en attente de traitement OCR.
           </div>
-          <div v-else class="ocr-queue-list">
-            <div v-for="doc in ocrQueue" :key="doc.id" class="ocr-queue-item">
+          <div
+            v-else
+            class="ocr-queue-list"
+          >
+            <div
+              v-for="doc in ocrQueue"
+              :key="doc.id"
+              class="ocr-queue-item"
+            >
               <span class="oq-icon">{{ getFileIcon(doc.contentType) }}</span>
               <div class="oq-info">
-                <p class="oq-title">{{ doc.title }}</p>
-                <p class="oq-meta">{{ doc.fileName }} · {{ formatSize(doc.fileSize) }}</p>
+                <p class="oq-title">
+                  {{ doc.title }}
+                </p>
+                <p class="oq-meta">
+                  {{ doc.fileName }} · {{ formatSize(doc.fileSize) }}
+                </p>
               </div>
               <span class="oq-status-badge">🔄 En traitement</span>
             </div>
@@ -577,43 +1249,163 @@
         <!-- Users breakdown -->
         <div class="stats-card">
           <h2 class="stats-card-title">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px;height:16px">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              style="width:16px;height:16px"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"
+              />
             </svg>
             Répartition des utilisateurs par rôle
           </h2>
           <div class="role-breakdown">
-            <div v-for="role in ['Admin','Manager','User','ReadOnly']" :key="role" class="role-row">
-              <span class="role-name-pill" :class="roleClass(role)">{{ roleLabel(role) }}</span>
+            <div
+              v-for="role in ['Admin','Manager','User','ReadOnly']"
+              :key="role"
+              class="role-row"
+            >
+              <span
+                class="role-name-pill"
+                :class="roleClass(role)"
+              >{{ roleLabel(role) }}</span>
               <div class="role-bar-wrap">
                 <div class="role-bar">
-                  <div class="role-bar-fill" :class="'rfill-'+role.toLowerCase()"
-                    :style="`width:${users.length ? Math.round(users.filter(u=>u.role===role).length/users.length*100) : 0}%`">
-                  </div>
+                  <div
+                    class="role-bar-fill"
+                    :class="'rfill-'+role.toLowerCase()"
+                    :style="`width:${users.length ? Math.round(users.filter(u=>u.role===role).length/users.length*100) : 0}%`"
+                  />
                 </div>
                 <span class="role-count">{{ users.filter(u => u.role === role).length }}</span>
               </div>
             </div>
           </div>
         </div>
+
+        <!-- Charts row -->
+        <div class="stats-charts-row">
+          <div class="stats-card stats-chart-card">
+            <h2 class="stats-card-title">
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                style="width:16px;height:16px"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+                />
+              </svg>
+              Types de documents
+            </h2>
+            <p class="stats-card-desc">
+              Répartition par type de fichier
+            </p>
+            <ChartWidget
+              v-if="documentTypeChartData.length > 0"
+              type="donut"
+              title="documents"
+              :data="documentTypeChartData"
+              :line-color="'#3b82f6'"
+            />
+            <div
+              v-else
+              class="stats-empty"
+            >
+              <span v-if="statsLoading">Chargement…</span>
+              <span v-else>Aucune donnée disponible</span>
+            </div>
+          </div>
+
+          <div class="stats-card stats-chart-card">
+            <h2 class="stats-card-title">
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                style="width:16px;height:16px"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+                />
+              </svg>
+              Catégories
+            </h2>
+            <p class="stats-card-desc">
+              Documents par catégorie
+            </p>
+            <ChartWidget
+              v-if="categoryChartData.length > 0"
+              type="bar"
+              :data="categoryChartData"
+            />
+            <div
+              v-else
+              class="stats-empty"
+            >
+              <span v-if="statsLoading">Chargement…</span>
+              <span v-else>Aucune donnée disponible</span>
+            </div>
+          </div>
+
+          <div class="stats-card stats-recent-card">
+            <RecentDocumentsWidget
+              :documents="recentDocs"
+              :loading="recentDocsLoading"
+              title="Documents récents"
+              subtitle="Derniers documents ajoutés"
+              :show-view-all="false"
+              @select="(doc) => { /* TODO: navigate to document */ }"
+            />
+          </div>
+        </div>
       </section>
       <!-- ── ACCESS MANAGEMENT TAB ────────────────────────────────────────── -->
       
-      <section v-if="activeTab === 'access'" class="access-dashboard">
-
+      <section
+        v-if="activeTab === 'access'"
+        class="access-dashboard"
+      >
+        <AppBreadcrumb :crumbs="accessBreadcrumbs" />
         <div class="page-header">
           <div>
-            <h1 class="page-title">Gestion des accès</h1>
+            <h1 class="page-title">
+              Gestion des accès
+            </h1>
             <p class="page-subtitle">
               {{ accessStats.groups }} groupe(s) ·
               {{ accessStats.activeGrants }} accès actifs ·
               {{ accessStats.expiredGrants }} expirés
             </p>
           </div>
-          <button @click="openAccessModal('groups')" class="btn-primary">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:18px;height:18px">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+          <button
+            class="btn-primary"
+            @click="openAccessModal('groups')"
+          >
+            <svg
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              style="width:18px;height:18px"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+              />
             </svg>
             Gérer les accès
           </button>
@@ -621,47 +1413,136 @@
 
         <!-- KPI rapides -->
         <div class="access-kpi-row">
-          <div class="access-kpi-card" @click="openAccessModal('groups')">
-            <div class="akpi-icon" style="background:#eff6ff; color:#2563eb">📦</div>
-            <div class="akpi-body">
-              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.groups }}</p>
-              <p class="akpi-label">Groupes de documents</p>
+          <div
+            class="access-kpi-card"
+            @click="openAccessModal('groups')"
+          >
+            <div
+              class="akpi-icon"
+              style="background:#eff6ff; color:#2563eb"
+            >
+              📦
             </div>
-            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            <div class="akpi-body">
+              <p class="akpi-value">
+                {{ accessLoading ? '…' : accessStats.groups }}
+              </p>
+              <p class="akpi-label">
+                Groupes de documents
+              </p>
+            </div>
+            <svg
+              class="akpi-arrow"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 5l7 7-7 7"
+              />
             </svg>
           </div>
 
-          <div class="access-kpi-card" @click="openAccessModal('rights')">
-            <div class="akpi-icon" style="background:#f0fdf4; color:#16a34a">🔑</div>
-            <div class="akpi-body">
-              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.activeGrants }}</p>
-              <p class="akpi-label">Accès actifs</p>
+          <div
+            class="access-kpi-card"
+            @click="openAccessModal('rights')"
+          >
+            <div
+              class="akpi-icon"
+              style="background:#f0fdf4; color:#16a34a"
+            >
+              🔑
             </div>
-            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            <div class="akpi-body">
+              <p class="akpi-value">
+                {{ accessLoading ? '…' : accessStats.activeGrants }}
+              </p>
+              <p class="akpi-label">
+                Accès actifs
+              </p>
+            </div>
+            <svg
+              class="akpi-arrow"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 5l7 7-7 7"
+              />
             </svg>
           </div>
 
-          <div class="access-kpi-card" :class="{ 'akpi-warning': accessStats.expiredGrants > 0 }" @click="openAccessModal('rights')">
-            <div class="akpi-icon" style="background:#fff7ed; color:#ea580c">⏰</div>
-            <div class="akpi-body">
-              <p class="akpi-value">{{ accessLoading ? '…' : accessStats.expiredGrants }}</p>
-              <p class="akpi-label">Accès expirés</p>
+          <div
+            class="access-kpi-card"
+            :class="{ 'akpi-warning': accessStats.expiredGrants > 0 }"
+            @click="openAccessModal('rights')"
+          >
+            <div
+              class="akpi-icon"
+              style="background:#fff7ed; color:#ea580c"
+            >
+              ⏰
             </div>
-            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            <div class="akpi-body">
+              <p class="akpi-value">
+                {{ accessLoading ? '…' : accessStats.expiredGrants }}
+              </p>
+              <p class="akpi-label">
+                Accès expirés
+              </p>
+            </div>
+            <svg
+              class="akpi-arrow"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 5l7 7-7 7"
+              />
             </svg>
           </div>
 
-          <div class="access-kpi-card" @click="openAccessModal('roles')">
-            <div class="akpi-icon" style="background:#faf5ff; color:#7c3aed">👤</div>
-            <div class="akpi-body">
-              <p class="akpi-value">{{ accessLoading ? '…' : users.filter(u => u.isActive).length }}</p>
-              <p class="akpi-label">Utilisateurs actifs</p>
+          <div
+            class="access-kpi-card"
+            @click="openAccessModal('roles')"
+          >
+            <div
+              class="akpi-icon"
+              style="background:#faf5ff; color:#7c3aed"
+            >
+              👤
             </div>
-            <svg class="akpi-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            <div class="akpi-body">
+              <p class="akpi-value">
+                {{ accessLoading ? '…' : users.filter(u => u.isActive).length }}
+              </p>
+              <p class="akpi-label">
+                Utilisateurs actifs
+              </p>
+            </div>
+            <svg
+              class="akpi-arrow"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 5l7 7-7 7"
+              />
             </svg>
           </div>
         </div>
@@ -672,24 +1553,46 @@
             <h2 class="apc-title">
               <span>📦</span> Groupes récents
             </h2>
-            <button @click="openAccessModal('groups')" class="apc-see-all">
+            <button
+              class="apc-see-all"
+              @click="openAccessModal('groups')"
+            >
               Voir tout →
             </button>
           </div>
 
-          <div v-if="accessLoading" class="apc-loading">
-            <div class="spinner-ring"></div> Chargement…
+          <div
+            v-if="accessLoading"
+            class="apc-loading"
+          >
+            <div class="spinner-ring" /> Chargement…
           </div>
-          <div v-else-if="!accessGroups.length" class="apc-empty">
+          <div
+            v-else-if="!accessGroups.length"
+            class="apc-empty"
+          >
             Aucun groupe créé. Cliquez sur "Gérer les accès" pour commencer.
           </div>
-          <div v-else class="apc-groups-list">
-            <div v-for="g in accessGroups.slice(0, 5)" :key="g.id" class="apc-group-row" @click="openAccessModal('groups')">
-              <div class="apc-group-icon" :style="{ background: (g.color || '#2563eb') + '22', color: g.color || '#2563eb' }">
+          <div
+            v-else
+            class="apc-groups-list"
+          >
+            <div
+              v-for="g in accessGroups.slice(0, 5)"
+              :key="g.id"
+              class="apc-group-row"
+              @click="openAccessModal('groups')"
+            >
+              <div
+                class="apc-group-icon"
+                :style="{ background: (g.color || '#2563eb') + '22', color: g.color || '#2563eb' }"
+              >
                 {{ g.icon || '📁' }}
               </div>
               <div class="apc-group-info">
-                <p class="apc-group-name">{{ g.name }}</p>
+                <p class="apc-group-name">
+                  {{ g.name }}
+                </p>
                 <p class="apc-group-meta">
                   <span>{{ g.category || 'Sans catégorie' }}</span>
                   <span class="apc-dot">·</span>
@@ -698,24 +1601,50 @@
                   <span>{{ g.userCount }} utilisateur(s)</span>
                 </p>
               </div>
-              <svg class="apc-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              <svg
+                class="apc-chevron"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M9 5l7 7-7 7"
+                />
               </svg>
             </div>
-            <div v-if="accessGroups.length > 5" class="apc-more">
+            <div
+              v-if="accessGroups.length > 5"
+              class="apc-more"
+            >
               + {{ accessGroups.length - 5 }} groupe(s) supplémentaire(s)
             </div>
           </div>
         </div>
 
         <!-- Accès directs expirés (alerte si présents) -->
-        <div v-if="accessStats.expiredGrants > 0" class="access-alert-card">
-          <div class="alert-icon">⚠️</div>
-          <div>
-            <p class="alert-title">{{ accessStats.expiredGrants }} accès expirés détectés</p>
-            <p class="alert-desc">Ces accès ne sont plus fonctionnels mais restent visibles dans le journal. Vous pouvez les révoquer proprement.</p>
+        <div
+          v-if="accessStats.expiredGrants > 0"
+          class="access-alert-card"
+        >
+          <div class="alert-icon">
+            ⚠️
           </div>
-          <button @click="openAccessModal('rights')" class="btn-primary" style="white-space:nowrap">
+          <div>
+            <p class="alert-title">
+              {{ accessStats.expiredGrants }} accès expirés détectés
+            </p>
+            <p class="alert-desc">
+              Ces accès ne sont plus fonctionnels mais restent visibles dans le journal. Vous pouvez les révoquer proprement.
+            </p>
+          </div>
+          <button
+            class="btn-primary"
+            style="white-space:nowrap"
+            @click="openAccessModal('rights')"
+          >
             Voir les accès
           </button>
         </div>
@@ -726,25 +1655,45 @@
             <h2 class="apc-title">
               <span>👤</span> Répartition des rôles
             </h2>
-            <button @click="openAccessModal('roles')" class="apc-see-all">
+            <button
+              class="apc-see-all"
+              @click="openAccessModal('roles')"
+            >
               Gérer les rôles →
             </button>
           </div>
           <div class="apc-roles-grid">
-            <div v-for="role in ['Admin','Manager','User','ReadOnly']" :key="role" class="apc-role-row">
-              <span class="role-tag" :class="roleClass(role)">{{ roleLabel(role) }}</span>
+            <div
+              v-for="role in ['Admin','Manager','User','ReadOnly']"
+              :key="role"
+              class="apc-role-row"
+            >
+              <span
+                class="role-tag"
+                :class="roleClass(role)"
+              >{{ roleLabel(role) }}</span>
               <div class="apc-role-bar-wrap">
                 <div class="apc-role-bar">
-                  <div class="apc-role-fill" :class="'rfill-' + role.toLowerCase()"
-                    :style="`width:${users.length ? Math.round(users.filter(u=>u.role===role).length/users.length*100) : 0}%`">
-                  </div>
+                  <div
+                    class="apc-role-fill"
+                    :class="'rfill-' + role.toLowerCase()"
+                    :style="`width:${users.length ? Math.round(users.filter(u=>u.role===role).length/users.length*100) : 0}%`"
+                  />
                 </div>
                 <span class="apc-role-count">{{ users.filter(u=>u.role===role).length }}</span>
               </div>
             </div>
           </div>
         </div>
+      </section>
 
+      <!-- ── TAXONOMY TAB ──────────────────────────────────────────────────── -->
+      <section
+        v-if="activeTab === 'taxonomy'"
+        class="taxonomy-section"
+      >
+        <AppBreadcrumb :crumbs="taxonomyBreadcrumbs" />
+        <TaxonomyManager />
       </section>
     </main>
 
@@ -752,62 +1701,152 @@
          ADMIN DOCUMENT VIEWER MODAL
          (identical layout to User.vue but with an extra "Modifier" tab in the details pane)
     ══════════════════════════════════════════════════════════════════ -->
-    <div v-if="showDocumentViewer" class="modal-overlay" @click.self="closeDocumentViewer">
+    <div
+      v-if="showDocumentViewer"
+      class="modal-overlay"
+      @click.self="closeDocumentViewer"
+    >
       <div class="viewer-modal">
-
         <!-- Header -->
         <div class="viewer-header">
           <div class="viewer-header-left">
-            <div class="viewer-file-badge">{{ getFileExtension(currentDocument?.fileName) }}</div>
+            <div class="viewer-file-badge">
+              {{ getFileExtension(currentDocument?.fileName) }}
+            </div>
             <div class="viewer-title-block">
-              <h2 class="viewer-title">{{ currentDocument?.title }}</h2>
+              <h2 class="viewer-title">
+                {{ currentDocument?.title }}
+              </h2>
               <p class="viewer-filename">
                 <span>{{ getFileIcon(currentDocument?.contentType) }}</span>
                 {{ currentDocument?.fileName }}
                 <span class="vf-sep">·</span> {{ formatSize(currentDocument?.fileSize) }}
-                <span v-if="currentDocument?.category" class="vf-sep">·</span>
-                <span v-if="currentDocument?.category" class="vf-cat">{{ currentDocument.category }}</span>
+                <span
+                  v-if="currentDocument?.category"
+                  class="vf-sep"
+                >·</span>
+                <span
+                  v-if="currentDocument?.category"
+                  class="vf-cat"
+                >{{ currentDocument.category }}</span>
               </p>
             </div>
           </div>
           <div class="viewer-header-actions">
             <!-- Admin action buttons in header -->
-            <a :href="`/api/documents/${currentDocument?.id}/download`" class="hdr-btn hdr-download" title="Télécharger">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            <a
+              :href="`/api/documents/${currentDocument?.id}/download`"
+              class="hdr-btn hdr-download"
+              title="Télécharger"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                />
               </svg>
             </a>
-            <button @click="openAcl(currentDocument); closeDocumentViewer()" class="hdr-btn hdr-acl" title="Gérer les accès">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            <button
+              class="hdr-btn hdr-acl"
+              title="Gérer les accès"
+              @click="openAcl(currentDocument); closeDocumentViewer()"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                />
               </svg>
             </button>
-            <button @click="deleteDocFromViewer" class="hdr-btn hdr-delete" title="Supprimer">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            <button
+              class="hdr-btn hdr-delete"
+              title="Supprimer"
+              @click="deleteDocFromViewer"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
               </svg>
             </button>
             <div class="tab-switcher">
-              <button :class="['tab-btn', { active: viewerTab === 'preview' }]" @click="viewerTab = 'preview'">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+              <button
+                :class="['tab-btn', { active: viewerTab === 'preview' }]"
+                @click="viewerTab = 'preview'"
+              >
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                  />
                 </svg>
                 Aperçu
               </button>
-              <button :class="['tab-btn', { active: viewerTab === 'details' }]" @click="viewerTab = 'details'">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              <button
+                :class="['tab-btn', { active: viewerTab === 'details' }]"
+                @click="viewerTab = 'details'"
+              >
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
                 </svg>
                 Détails
               </button>
             </div>
-            <button @click="closeDocumentViewer" class="hdr-close">
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            <button
+              class="hdr-close"
+              @click="closeDocumentViewer"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M6 18L18 6M6 6l12 12"
+                />
               </svg>
             </button>
           </div>
@@ -815,31 +1854,73 @@
 
         <!-- Body: two-column split -->
         <div class="viewer-body">
-
           <!-- LEFT: File Preview -->
-          <div class="viewer-preview-pane" :class="{ 'tab-hidden': viewerTab !== 'preview' }">
-            <div v-if="documentLoading" class="preview-loading">
-              <div class="pulse-ring"></div>
-              <svg class="spinner xl" fill="none" viewBox="0 0 24 24">
-                <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          <div
+            class="viewer-preview-pane"
+            :class="{ 'tab-hidden': viewerTab !== 'preview' }"
+          >
+            <div
+              v-if="documentLoading"
+              class="preview-loading"
+            >
+              <div class="pulse-ring" />
+              <svg
+                class="spinner xl"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  class="spinner-bg"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="4"
+                />
+                <path
+                  class="spinner-path"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
               </svg>
               <p>Chargement de l'aperçu…</p>
             </div>
 
-            <div v-else-if="isPDF(currentDocument?.contentType)" class="pdf-viewer">
-              <iframe v-if="documentUrl" :src="documentUrl + '#toolbar=1&navpanes=0&zoom=page-fit'"
-                class="pdf-frame" title="PDF Viewer"/>
+            <div
+              v-else-if="isPDF(currentDocument?.contentType)"
+              class="pdf-viewer"
+            >
+              <iframe
+                v-if="documentUrl"
+                :src="documentUrl + '#toolbar=1&navpanes=0&zoom=page-fit'"
+                class="pdf-frame"
+                title="PDF Viewer"
+              />
             </div>
 
-            <div v-else-if="isImage(currentDocument?.contentType)" class="image-viewer">
-              <a :href="documentUrl" target="_blank">
-                <img :src="documentUrl" :alt="currentDocument?.title" class="document-image"/>
+            <div
+              v-else-if="isImage(currentDocument?.contentType)"
+              class="image-viewer"
+            >
+              <a
+                :href="documentUrl"
+                target="_blank"
+              >
+                <img
+                  :src="documentUrl"
+                  :alt="currentDocument?.title"
+                  class="document-image"
+                >
               </a>
-              <p class="image-hint">Cliquer pour ouvrir en pleine taille</p>
+              <p class="image-hint">
+                Cliquer pour ouvrir en pleine taille
+              </p>
             </div>
 
-            <div v-else-if="isText(currentDocument?.contentType)" class="text-viewer">
+            <div
+              v-else-if="isText(currentDocument?.contentType)"
+              class="text-viewer"
+            >
               <div class="text-toolbar">
                 <span>{{ documentContent?.split('\n').length }} lignes</span>
                 <span>{{ documentContent?.length?.toLocaleString() }} caractères</span>
@@ -847,49 +1928,109 @@
               <pre class="text-content">{{ documentContent }}</pre>
             </div>
 
-            <div v-else-if="isOffice(currentDocument?.contentType)" class="office-viewer">
+            <div
+              v-else-if="isOffice(currentDocument?.contentType)"
+              class="office-viewer"
+            >
               <div class="office-tabs">
-                <button :class="['otab', { active: officeMode === 'text' }]" @click="officeMode = 'text'">📄 Texte extrait</button>
-                <button :class="['otab', { active: officeMode === 'embed' }]" @click="officeMode = 'embed'">🌐 Office Online</button>
+                <button
+                  :class="['otab', { active: officeMode === 'text' }]"
+                  @click="officeMode = 'text'"
+                >
+                  📄 Texte extrait
+                </button>
+                <button
+                  :class="['otab', { active: officeMode === 'embed' }]"
+                  @click="officeMode = 'embed'"
+                >
+                  🌐 Office Online
+                </button>
               </div>
-              <div v-if="officeMode === 'text'" class="office-text-panel">
-                <div v-if="documentContent" class="office-text-wrap">
+              <div
+                v-if="officeMode === 'text'"
+                class="office-text-panel"
+              >
+                <div
+                  v-if="documentContent"
+                  class="office-text-wrap"
+                >
                   <div class="office-text-stats">
                     <span>{{ documentContent.split(/\s+/).filter(Boolean).length.toLocaleString() }} mots</span>
                     <span>{{ documentContent.split('\n').length }} paragraphes</span>
                   </div>
                   <pre class="office-text-content">{{ documentContent }}</pre>
                 </div>
-                <div v-else class="office-no-text">
-                  <div class="ont-icon">{{ getFileIcon(currentDocument?.contentType) }}</div>
-                  <p class="ont-title">Aucun texte extrait disponible</p>
-                  <p class="ont-sub">L'extraction est peut-être en cours.</p>
+                <div
+                  v-else
+                  class="office-no-text"
+                >
+                  <div class="ont-icon">
+                    {{ getFileIcon(currentDocument?.contentType) }}
+                  </div>
+                  <p class="ont-title">
+                    Aucun texte extrait disponible
+                  </p>
+                  <p class="ont-sub">
+                    L'extraction est peut-être en cours.
+                  </p>
                 </div>
               </div>
-              <div v-if="officeMode === 'embed'" class="office-embed-panel">
+              <div
+                v-if="officeMode === 'embed'"
+                class="office-embed-panel"
+              >
                 <div class="office-embed-notice">
                   Office Online nécessite une URL publique.
-                  <a href="#" class="office-embed-link">Ouvrir dans Office Online ↗</a>
+                  <a
+                    href="#"
+                    class="office-embed-link"
+                  >Ouvrir dans Office Online ↗</a>
                 </div>
               </div>
             </div>
 
-            <div v-else-if="isAudio(currentDocument?.contentType)" class="audio-viewer">
+            <div
+              v-else-if="isAudio(currentDocument?.contentType)"
+              class="audio-viewer"
+            >
               <div class="audio-art">
                 <div class="audio-wave">
-                  <span v-for="i in 20" :key="i" class="wave-bar" :style="`animation-delay:${i*0.07}s`"></span>
+                  <span
+                    v-for="i in 20"
+                    :key="i"
+                    class="wave-bar"
+                    :style="`animation-delay:${i*0.07}s`"
+                  />
                 </div>
-                <div style="font-size:3rem">🎵</div>
-                <p style="color:#94a3b8;font-size:.85rem;margin-top:.5rem">{{ currentDocument?.fileName }}</p>
+                <div style="font-size:3rem">
+                  🎵
+                </div>
+                <p style="color:#94a3b8;font-size:.85rem;margin-top:.5rem">
+                  {{ currentDocument?.fileName }}
+                </p>
               </div>
-              <audio :src="documentUrl" controls class="audio-player"/>
+              <audio
+                :src="documentUrl"
+                controls
+                class="audio-player"
+              />
             </div>
 
-            <div v-else-if="isVideo(currentDocument?.contentType)" class="video-viewer">
-              <video :src="documentUrl" controls class="video-player"/>
+            <div
+              v-else-if="isVideo(currentDocument?.contentType)"
+              class="video-viewer"
+            >
+              <video
+                :src="documentUrl"
+                controls
+                class="video-player"
+              />
             </div>
 
-            <div v-else class="unsupported-viewer">
+            <div
+              v-else
+              class="unsupported-viewer"
+            >
               <span style="font-size:5rem">{{ getFileIcon(currentDocument?.contentType) }}</span>
               <h3>Aperçu non disponible</h3>
               <p>Ce type de fichier ne peut pas être affiché dans le navigateur.</p>
@@ -898,12 +2039,17 @@
           </div>
 
           <!-- RIGHT: Details + Admin Edit pane -->
-          <div class="viewer-details-pane" :class="{ 'tab-hidden': viewerTab !== 'details' }">
-
+          <div
+            class="viewer-details-pane"
+            :class="{ 'tab-hidden': viewerTab !== 'details' }"
+          >
             <!-- OCR status bar -->
-            <div v-if="ocrStatus" class="ocr-status-bar"
-              :class="ocrStatus.status===4?'ocr-done':ocrStatus.status===5?'ocr-fail':ocrStatus.status===2?'ocr-partial':'ocr-pending'">
-              <span class="ocr-dot"></span>
+            <div
+              v-if="ocrStatus"
+              class="ocr-status-bar"
+              :class="ocrStatus.status===4?'ocr-done':ocrStatus.status===5?'ocr-fail':ocrStatus.status===2?'ocr-partial':'ocr-pending'"
+            >
+              <span class="ocr-dot" />
               <span v-if="ocrStatus.status===4">OCR terminé · {{ (ocrStatus.rawTextLength||0).toLocaleString() }} caractères</span>
               <span v-else-if="ocrStatus.status===5">OCR échoué : {{ ocrStatus.errorMessage }}</span>
               <span v-else-if="ocrStatus.status===2">Texte prêt · Amélioration IA en cours…</span>
@@ -913,69 +2059,176 @@
             <!-- ── Admin: Edit section (top of right pane) ── -->
             <div class="detail-section admin-edit-section">
               <h3 class="detail-section-title admin-edit-title">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                  />
                 </svg>
                 Modifier le document
               </h3>
 
-              <div v-if="editSuccess" class="edit-banner success">{{ editSuccess }}</div>
-              <div v-if="editError" class="edit-banner error">{{ editError }}</div>
+              <div
+                v-if="editSuccess"
+                class="edit-banner success"
+              >
+                {{ editSuccess }}
+              </div>
+              <div
+                v-if="editError"
+                class="edit-banner error"
+              >
+                {{ editError }}
+              </div>
 
               <div class="edit-form">
                 <div class="edit-field">
                   <label class="edit-label">Titre</label>
-                  <input v-model="editData.title" class="edit-input" placeholder="Titre du document"/>
+                  <input
+                    v-model="editData.title"
+                    class="edit-input"
+                    placeholder="Titre du document"
+                  >
                 </div>
                 <div class="edit-field">
                   <label class="edit-label">Description</label>
-                  <textarea v-model="editData.description" class="edit-input edit-textarea" rows="2" placeholder="Description courte…"></textarea>
+                  <textarea
+                    v-model="editData.description"
+                    class="edit-input edit-textarea"
+                    rows="2"
+                    placeholder="Description courte…"
+                  />
                 </div>
                 <div class="edit-field">
                   <label class="edit-label">Catégorie</label>
-                  <select v-model="editData.category" class="edit-input">
-                    <option value="">— Aucune —</option>
-                    <option value="Invoice">📄 Facture</option>
-                    <option value="Contract">📜 Contrat</option>
-                    <option value="Report">📊 Rapport</option>
-                    <option value="Letter">✉️ Courrier</option>
-                    <option value="Memo">📝 Mémo</option>
-                    <option value="Presentation">📽️ Présentation</option>
-                    <option value="Spreadsheet">📈 Tableur</option>
-                    <option value="Image">🖼️ Image</option>
-                    <option value="Other">📎 Autre</option>
+                  <select
+                    v-model="editData.category"
+                    class="edit-input"
+                  >
+                    <option value="">
+                      — Aucune —
+                    </option>
+                    <option value="Invoice">
+                      📄 Facture
+                    </option>
+                    <option value="Contract">
+                      📜 Contrat
+                    </option>
+                    <option value="Report">
+                      📊 Rapport
+                    </option>
+                    <option value="Letter">
+                      ✉️ Courrier
+                    </option>
+                    <option value="Memo">
+                      📝 Mémo
+                    </option>
+                    <option value="Presentation">
+                      📽️ Présentation
+                    </option>
+                    <option value="Spreadsheet">
+                      📈 Tableur
+                    </option>
+                    <option value="Image">
+                      🖼️ Image
+                    </option>
+                    <option value="Other">
+                      📎 Autre
+                    </option>
                   </select>
                 </div>
                 <div class="edit-field">
                   <label class="edit-label">Date du document</label>
-                  <input v-model="editData.documentDate" type="date" class="edit-input"/>
+                  <input
+                    v-model="editData.documentDate"
+                    type="date"
+                    class="edit-input"
+                  >
                 </div>
                 <div class="edit-field">
                   <label class="edit-label">Étiquettes <span class="edit-hint">(séparées par des virgules)</span></label>
-                  <input v-model="editData.tagsRaw" class="edit-input" placeholder="tag1, tag2, tag3"/>
+                  <input
+                    v-model="editData.tagsRaw"
+                    class="edit-input"
+                    placeholder="tag1, tag2, tag3"
+                  >
                 </div>
                 <div class="edit-field">
                   <label class="edit-label">Service</label>
-                  <select v-model="editData.service" class="edit-input">
-                    <option value="">— Aucun —</option>
-                    <option value="Finance">💼 Finance</option>
-                    <option value="RH">👥 Ressources Humaines</option>
-                    <option value="Juridique">⚖️ Juridique</option>
-                    <option value="Commercial">📈 Commercial</option>
-                    <option value="Informatique">💻 Informatique</option>
-                    <option value="Direction">🏢 Direction</option>
-                    <option value="Autre">📁 Autre</option>
+                  <select
+                    v-model="editData.service"
+                    class="edit-input"
+                  >
+                    <option value="">
+                      — Aucun —
+                    </option>
+                    <option value="Finance">
+                      💼 Finance
+                    </option>
+                    <option value="RH">
+                      👥 Ressources Humaines
+                    </option>
+                    <option value="Juridique">
+                      ⚖️ Juridique
+                    </option>
+                    <option value="Commercial">
+                      📈 Commercial
+                    </option>
+                    <option value="Informatique">
+                      💻 Informatique
+                    </option>
+                    <option value="Direction">
+                      🏢 Direction
+                    </option>
+                    <option value="Autre">
+                      📁 Autre
+                    </option>
                   </select>
                 </div>
-                <button @click="saveDocument" :disabled="savingDoc" class="edit-save-btn">
-                  <svg v-if="!savingDoc" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M5 13l4 4L19 7"/>
+                <button
+                  :disabled="savingDoc"
+                  class="edit-save-btn"
+                  @click="saveDocument"
+                >
+                  <svg
+                    v-if="!savingDoc"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M5 13l4 4L19 7"
+                    />
                   </svg>
-                  <svg v-else class="spinner" style="width:14px;height:14px" fill="none" viewBox="0 0 24 24">
-                    <circle class="spinner-bg" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-                    <path class="spinner-path" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  <svg
+                    v-else
+                    class="spinner"
+                    style="width:14px;height:14px"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      class="spinner-bg"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      stroke-width="4"
+                    />
+                    <path
+                      class="spinner-path"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                    />
                   </svg>
                   {{ savingDoc ? 'Enregistrement…' : 'Enregistrer les modifications' }}
                 </button>
@@ -985,39 +2238,100 @@
             <!-- ── Informations (read-only) ── -->
             <div class="detail-section">
               <h3 class="detail-section-title">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
                 </svg>
                 Informations
               </h3>
               <dl class="detail-list">
-                <div class="dl-row"><dt>Fichier</dt><dd class="dd-mono">{{ currentDocument?.fileName }}</dd></div>
-                <div class="dl-row"><dt>Type</dt><dd>
-                  <span class="mime-badge">{{ getFileExtension(currentDocument?.fileName).toUpperCase() }}</span>
-                  <span class="mime-text">{{ currentDocument?.contentType }}</span>
-                </dd></div>
-                <div class="dl-row"><dt>Taille</dt><dd>{{ formatSize(currentDocument?.fileSize) }}</dd></div>
-                <div class="dl-row"><dt>Statut</dt><dd><span class="status-dot" :class="statusClass(currentDocument?.status)">{{ currentDocument?.status }}</span></dd></div>
-                <div class="dl-row"><dt>Importé</dt><dd>{{ formatDateLong(currentDocument?.createdAt) }}</dd></div>
-                <div class="dl-row" v-if="currentDocument?.createdBy"><dt>Par</dt><dd>{{ currentDocument.createdBy }}</dd></div>
-                <div class="dl-row" v-if="currentDocument?.modifiedAt"><dt>Modifié</dt><dd>{{ formatDateLong(currentDocument.modifiedAt) }}</dd></div>
-                <div class="dl-row" v-if="currentDocument?.id"><dt>ID</dt><dd class="dd-mono" style="font-size:.68rem">{{ currentDocument.id }}</dd></div>
+                <div class="dl-row">
+                  <dt>Fichier</dt><dd class="dd-mono">
+                    {{ currentDocument?.fileName }}
+                  </dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Type</dt><dd>
+                    <span class="mime-badge">{{ getFileExtension(currentDocument?.fileName).toUpperCase() }}</span>
+                    <span class="mime-text">{{ currentDocument?.contentType }}</span>
+                  </dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Taille</dt><dd>{{ formatSize(currentDocument?.fileSize) }}</dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Statut</dt><dd>
+                    <span
+                      class="status-dot"
+                      :class="statusClass(currentDocument?.status)"
+                    >{{ currentDocument?.status }}</span>
+                  </dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Importé</dt><dd>{{ formatDateLong(currentDocument?.createdAt) }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.createdBy"
+                  class="dl-row"
+                >
+                  <dt>Par</dt><dd>{{ currentDocument.createdBy }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.modifiedAt"
+                  class="dl-row"
+                >
+                  <dt>Modifié</dt><dd>{{ formatDateLong(currentDocument.modifiedAt) }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.id"
+                  class="dl-row"
+                >
+                  <dt>ID</dt><dd
+                    class="dd-mono"
+                    style="font-size:.68rem"
+                  >
+                    {{ currentDocument.id }}
+                  </dd>
+                </div>
               </dl>
             </div>
 
             <!-- Tags -->
-            <div v-if="currentDocument?.tags?.length" class="detail-section">
+            <div
+              v-if="currentDocument?.tags?.length"
+              class="detail-section"
+            >
               <h3 class="detail-section-title">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+                  />
                 </svg>
                 Étiquettes
               </h3>
               <div class="tags-cloud">
-                <span v-for="tag in currentDocument.tags" :key="tag" class="tag-cloud-item">#{{ tag }}</span>
+                <span
+                  v-for="tag in currentDocument.tags"
+                  :key="tag"
+                  class="tag-cloud-item"
+                >#{{ tag }}</span>
               </div>
             </div>
-
           </div>
         </div>
       </div>
@@ -1033,43 +2347,111 @@
     />
 
     <!-- ── UPLOAD MODAL (Batch) ───────────────────────────────────────────────── -->
-    <div v-if="showUpload" class="modal-overlay" @click.self="showUpload = false">
+    <div
+      v-if="showUpload"
+      class="modal-overlay"
+      @click.self="showUpload = false"
+    >
       <div class="modal modal-large">
         <div class="modal-header">
           <h2>Importer des documents (Batch)</h2>
-          <button @click="showUpload = false" class="close-btn">✕</button>
+          <button
+            class="close-btn"
+            @click="showUpload = false"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
-          <div v-if="selectedFiles.length === 0" class="drop-zone" @click="$refs.fileInput.click()" @dragover.prevent @drop.prevent="onDropMultiple">
-            <div class="drop-icon">📁</div>
-            <p class="drop-text">Cliquez ou glissez plusieurs fichiers ici</p>
-            <p class="drop-sub">PDF, Word, Excel, Images…</p>
-            <input ref="fileInput" type="file" class="hidden-input" @change="onFileSelectMultiple" multiple />
+          <div
+            v-if="selectedFiles.length === 0"
+            class="drop-zone"
+            @click="$refs.fileInput.click()"
+            @dragover.prevent
+            @drop.prevent="onDropMultiple"
+          >
+            <div class="drop-icon">
+              📁
+            </div>
+            <p class="drop-text">
+              Cliquez ou glissez plusieurs fichiers ici
+            </p>
+            <p class="drop-sub">
+              PDF, Word, Excel, Images…
+            </p>
+            <input
+              ref="fileInput"
+              type="file"
+              class="hidden-input"
+              multiple
+              @change="onFileSelectMultiple"
+            >
           </div>
-          <div v-else class="files-preview-list">
-            <div v-for="(file, index) in selectedFiles" :key="index" class="file-preview-item">
+          <div
+            v-else
+            class="files-preview-list"
+          >
+            <div
+              v-for="(file, index) in selectedFiles"
+              :key="index"
+              class="file-preview-item"
+            >
               <span class="file-emoji">{{ getFileIcon(file.type) }}</span>
               <div>
-                <p class="doc-name">{{ file.name }}</p>
-                <p class="muted">{{ formatSize(file.size) }}</p>
+                <p class="doc-name">
+                  {{ file.name }}
+                </p>
+                <p class="muted">
+                  {{ formatSize(file.size) }}
+                </p>
               </div>
-              <button @click="removeFile(index)" class="btn-icon-sm danger">✕</button>
+              <button
+                class="btn-icon-sm danger"
+                @click="removeFile(index)"
+              >
+                ✕
+              </button>
             </div>
           </div>
 
-          <div v-if="selectedFiles.length > 0" class="batch-category-section">
-            <p class="batch-info">Tous les fichiers utiliseront les mêmes paramètres ci-dessous :</p>
+          <div
+            v-if="selectedFiles.length > 0"
+            class="batch-category-section"
+          >
+            <p class="batch-info">
+              Tous les fichiers utiliseront les mêmes paramètres ci-dessous :
+            </p>
             <div class="form-row">
               <label class="form-label">Catégorie *</label>
-              <select v-model="uploadCategory" class="form-input">
-                <option value="">— Sélectionner —</option>
-                <option v-for="c in categories" :key="c" :value="c">{{ c }}</option>
+              <select
+                v-model="uploadCategory"
+                class="form-input"
+              >
+                <option value="">
+                  — Sélectionner —
+                </option>
+                <option
+                  v-for="c in categories"
+                  :key="c"
+                  :value="c"
+                >
+                  {{ c }}
+                </option>
               </select>
             </div>
           </div>
           <div class="modal-footer">
-            <button @click="showUpload = false" class="btn-ghost">Annuler</button>
-            <button @click="doUploadBatch" :disabled="selectedFiles.length === 0 || !uploadCategory || uploading" class="btn-primary">
+            <button
+              class="btn-ghost"
+              @click="showUpload = false"
+            >
+              Annuler
+            </button>
+            <button
+              :disabled="selectedFiles.length === 0 || !uploadCategory || uploading"
+              class="btn-primary"
+              @click="doUploadBatch"
+            >
               <span v-if="!uploading">Importer {{ selectedFiles.length }} fichier(s)</span>
               <span v-else>Envoi en cours... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
             </button>
@@ -1079,71 +2461,174 @@
     </div>
 
     <!-- ── ACL MODAL ───────────────────────────────────────────────────── -->
-    <div v-if="showAcl && aclDoc" class="modal-overlay" @click.self="showAcl = false">
+    <div
+      v-if="showAcl && aclDoc"
+      class="modal-overlay"
+      @click.self="showAcl = false"
+    >
       <div class="modal modal-wide">
         <div class="modal-header">
           <div>
             <h2>Accès au document</h2>
-            <p class="modal-subtitle">{{ aclDoc.title }}</p>
+            <p class="modal-subtitle">
+              {{ aclDoc.title }}
+            </p>
           </div>
-          <button @click="showAcl = false" class="close-btn">✕</button>
+          <button
+            class="close-btn"
+            @click="showAcl = false"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
-          <div v-if="aclError" class="banner error">{{ aclError }}</div>
-          <div v-if="aclSuccess" class="banner success">{{ aclSuccess }}</div>
+          <div
+            v-if="aclError"
+            class="banner error"
+          >
+            {{ aclError }}
+          </div>
+          <div
+            v-if="aclSuccess"
+            class="banner success"
+          >
+            {{ aclSuccess }}
+          </div>
 
           <div class="acl-form">
-            <h3 class="section-label">Accorder l'accès</h3>
+            <h3 class="section-label">
+              Accorder l'accès
+            </h3>
             <div class="acl-form-row">
-              <select v-model="grantUserId" class="form-input">
-                <option value="">— Choisir un utilisateur —</option>
-                <option v-for="u in nonAdminUsers" :key="u.id" :value="u.id">
+              <select
+                v-model="grantUserId"
+                class="form-input"
+              >
+                <option value="">
+                  — Choisir un utilisateur —
+                </option>
+                <option
+                  v-for="u in nonAdminUsers"
+                  :key="u.id"
+                  :value="u.id"
+                >
                   {{ u.fullName || u.username }} ({{ roleLabel(u.role) }})
                 </option>
               </select>
-              <select v-model="grantPermission" class="form-input short">
-                <option value="Read">Lecture</option>
-                <option value="Write">Écriture</option>
-                <option value="FullControl">Contrôle total</option>
+              <select
+                v-model="grantPermission"
+                class="form-input short"
+              >
+                <option value="Read">
+                  Lecture
+                </option>
+                <option value="Write">
+                  Écriture
+                </option>
+                <option value="FullControl">
+                  Contrôle total
+                </option>
               </select>
             </div>
             <div class="acl-form-row">
               <div class="access-type-toggle">
-                <button @click="grantPermanent = true" class="toggle-btn" :class="{ active: grantPermanent }">🔓 Accès permanent</button>
-                <button @click="grantPermanent = false" class="toggle-btn" :class="{ active: !grantPermanent }">⏱ Accès limité dans le temps</button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: grantPermanent }"
+                  @click="grantPermanent = true"
+                >
+                  🔓 Accès permanent
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: !grantPermanent }"
+                  @click="grantPermanent = false"
+                >
+                  ⏱ Accès limité dans le temps
+                </button>
               </div>
             </div>
-            <div v-if="!grantPermanent" class="acl-form-row">
+            <div
+              v-if="!grantPermanent"
+              class="acl-form-row"
+            >
               <label class="form-label">Date d'expiration</label>
-              <input v-model="grantExpiry" type="datetime-local" class="form-input" :min="minExpiry" />
+              <input
+                v-model="grantExpiry"
+                type="datetime-local"
+                class="form-input"
+                :min="minExpiry"
+              >
             </div>
-            <button @click="grantAccess" :disabled="!grantUserId || savingAcl" class="btn-primary">
+            <button
+              :disabled="!grantUserId || savingAcl"
+              class="btn-primary"
+              @click="grantAccess"
+            >
               {{ savingAcl ? 'Enregistrement…' : 'Accorder l\'accès' }}
             </button>
           </div>
 
           <div class="acl-list">
-            <h3 class="section-label">Accès existants</h3>
-            <div v-if="loadingAcl" class="loading-state"><div class="spinner-ring"></div></div>
-            <div v-else-if="aclEntries.length === 0" class="empty-acl">
+            <h3 class="section-label">
+              Accès existants
+            </h3>
+            <div
+              v-if="loadingAcl"
+              class="loading-state"
+            >
+              <div class="spinner-ring" />
+            </div>
+            <div
+              v-else-if="aclEntries.length === 0"
+              class="empty-acl"
+            >
               Aucun accès spécifique accordé.
             </div>
-            <div v-else class="acl-entries">
-              <div v-for="entry in aclEntries" :key="entry.id" class="acl-entry" :class="{ expired: !entry.isActive }">
+            <div
+              v-else
+              class="acl-entries"
+            >
+              <div
+                v-for="entry in aclEntries"
+                :key="entry.id"
+                class="acl-entry"
+                :class="{ expired: !entry.isActive }"
+              >
                 <div class="acl-user-info">
-                  <div class="user-mini-avatar sm">{{ (entry.fullName || entry.username).charAt(0).toUpperCase() }}</div>
+                  <div class="user-mini-avatar sm">
+                    {{ (entry.fullName || entry.username).charAt(0).toUpperCase() }}
+                  </div>
                   <div>
-                    <p class="doc-name">{{ entry.fullName || entry.username }}</p>
-                    <p class="muted">{{ entry.username }}</p>
+                    <p class="doc-name">
+                      {{ entry.fullName || entry.username }}
+                    </p>
+                    <p class="muted">
+                      {{ entry.username }}
+                    </p>
                   </div>
                 </div>
                 <div class="acl-meta">
                   <span class="perm-badge">{{ permLabel(entry.permission) }}</span>
-                  <span v-if="entry.isPermanent" class="perm-permanent">Permanent</span>
-                  <span v-else-if="entry.isActive" class="perm-expiry">Expire le {{ formatDate(entry.expiresAt) }}</span>
-                  <span v-else class="perm-expired">Expiré</span>
+                  <span
+                    v-if="entry.isPermanent"
+                    class="perm-permanent"
+                  >Permanent</span>
+                  <span
+                    v-else-if="entry.isActive"
+                    class="perm-expiry"
+                  >Expire le {{ formatDate(entry.expiresAt) }}</span>
+                  <span
+                    v-else
+                    class="perm-expired"
+                  >Expiré</span>
                 </div>
-                <button @click="revokeAccess(entry)" class="btn-icon-sm danger">Révoquer</button>
+                <button
+                  class="btn-icon-sm danger"
+                  @click="revokeAccess(entry)"
+                >
+                  Révoquer
+                </button>
               </div>
             </div>
           </div>
@@ -1152,43 +2637,100 @@
     </div>
 
     <!-- ── CREATE USER MODAL ─────────────────────────────────────────── -->
-    <div v-if="showCreateUser" class="modal-overlay" @click.self="showCreateUser = false">
+    <div
+      v-if="showCreateUser"
+      class="modal-overlay"
+      @click.self="showCreateUser = false"
+    >
       <div class="modal">
         <div class="modal-header">
           <h2>Créer un utilisateur</h2>
-          <button @click="showCreateUser = false" class="close-btn">✕</button>
+          <button
+            class="close-btn"
+            @click="showCreateUser = false"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
-          <div v-if="userError" class="banner error">{{ userError }}</div>
-          <div v-if="userSuccess" class="banner success">{{ userSuccess }}</div>
+          <div
+            v-if="userError"
+            class="banner error"
+          >
+            {{ userError }}
+          </div>
+          <div
+            v-if="userSuccess"
+            class="banner success"
+          >
+            {{ userSuccess }}
+          </div>
           <div class="form-row">
             <label class="form-label">Nom d'utilisateur *</label>
-            <input v-model="newUser.username" class="form-input" placeholder="ex: jean.dupont" />
+            <input
+              v-model="newUser.username"
+              class="form-input"
+              placeholder="ex: jean.dupont"
+            >
           </div>
           <div class="form-row">
             <label class="form-label">Mot de passe *</label>
-            <input v-model="newUser.password" type="password" class="form-input" placeholder="Min. 8 caractères" />
+            <input
+              v-model="newUser.password"
+              type="password"
+              class="form-input"
+              placeholder="Min. 8 caractères"
+            >
           </div>
           <div class="form-row">
             <label class="form-label">Nom complet</label>
-            <input v-model="newUser.fullName" class="form-input" placeholder="Jean Dupont" />
+            <input
+              v-model="newUser.fullName"
+              class="form-input"
+              placeholder="Jean Dupont"
+            >
           </div>
           <div class="form-row">
             <label class="form-label">Email</label>
-            <input v-model="newUser.email" type="email" class="form-input" placeholder="jean@example.com" />
+            <input
+              v-model="newUser.email"
+              type="email"
+              class="form-input"
+              placeholder="jean@example.com"
+            >
           </div>
           <div class="form-row">
             <label class="form-label">Rôle</label>
-            <select v-model="newUser.role" class="form-input">
-              <option value="User">Utilisateur</option>
-              <option value="Manager">Responsable</option>
-              <option value="ReadOnly">Lecture seule</option>
-              <option value="Admin">Administrateur</option>
+            <select
+              v-model="newUser.role"
+              class="form-input"
+            >
+              <option value="User">
+                Utilisateur
+              </option>
+              <option value="Manager">
+                Responsable
+              </option>
+              <option value="ReadOnly">
+                Lecture seule
+              </option>
+              <option value="Admin">
+                Administrateur
+              </option>
             </select>
           </div>
           <div class="modal-footer">
-            <button @click="showCreateUser = false" class="btn-ghost">Annuler</button>
-            <button @click="createUser" :disabled="savingUser" class="btn-primary">
+            <button
+              class="btn-ghost"
+              @click="showCreateUser = false"
+            >
+              Annuler
+            </button>
+            <button
+              :disabled="savingUser"
+              class="btn-primary"
+              @click="createUser"
+            >
               {{ savingUser ? 'Création…' : 'Créer' }}
             </button>
           </div>
@@ -1199,9 +2741,38 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AccessManagementModal from '../components/AccessManagementModal.vue'
+import TaxonomyManager from '../components/TaxonomyManager.vue'
+import ChartWidget from '../shared/ui/ChartWidget.vue'
+import RecentDocumentsWidget from '../shared/components/RecentDocumentsWidget.vue'
+import AppBreadcrumb from '../shared/components/AppBreadcrumb.vue'
+
+const statsBreadcrumbs = computed(() => [
+  { label: 'GED Admin' },
+  { label: 'Statistiques' }
+])
+
+const documentsBreadcrumbs = computed(() => [
+  { label: 'GED Admin' },
+  { label: 'Documents' }
+])
+
+const usersBreadcrumbs = computed(() => [
+  { label: 'GED Admin' },
+  { label: 'Utilisateurs' }
+])
+
+const accessBreadcrumbs = computed(() => [
+  { label: 'GED Admin' },
+  { label: 'Accès' }
+])
+
+const taxonomyBreadcrumbs = computed(() => [
+  { label: 'GED Admin' },
+  { label: 'Taxonomie' }
+])
 
 const router = useRouter()
 
@@ -1221,6 +2792,7 @@ const tabs = [
   { id: 'users',     label: 'Utilisateurs', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>' },
   { id: 'access',    label: 'Accès',        icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>' },
   { id: 'stats',     label: 'Statistiques', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
+  { id: 'taxonomy',  label: 'Taxonomie',    icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>' },
 ]
 
 // ── Documents / Search ─────────────────────────────────────────────────────────
@@ -1395,11 +2967,11 @@ const filteredPickerDocs = computed(() =>
 const fetchPickerDocs = async () => {
   pickerLoading.value = true
   try {
-    // Empty query returns all indexed documents via MatchAll query
+    // Use wildcard search to get all documents
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: authHeader(),
-      body: JSON.stringify({ query: '', searchType: 0, page: 1, pageSize: 500 })
+      body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 500 })
     })
     if (res.ok) {
       const data = await res.json()
@@ -1480,7 +3052,9 @@ const paginationPages = computed(() => {
 const fetchDocuments = async (query = '') => {
   loadingDocs.value = true
   try {
-    const body = { query: query || '', searchType: 0, page: 1, pageSize: 50 }
+    // Use wildcard search to get all documents when query is empty
+    const searchType = query.trim() ? 0 : 3  // Natural for user queries, wildcard for empty
+    const body = { query: query.trim() || '*', searchType, page: 1, pageSize: 50 }
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: authHeader(),
@@ -1960,7 +3534,7 @@ const loadRights = async () => {
       accessSummaryData.value = summary  // Store raw data for modal
       let active = 0, expired = 0
       for (const u of summary) {
-        for (const g of (u.groups || [])) active++
+        for (const _ of (u.groups || [])) active++
         for (const d of (u.directGrants || [])) {
           d.isActive ? active++ : expired++
         }
@@ -2134,33 +3708,88 @@ const statsLoading    = ref(false)
 const reindexing      = ref(false)
 const reindexMsg      = ref('')
 const ocrQueue        = ref([])
-const ocrQueueLoading = ref(false)
+const recentDocs      = ref([])
+const recentDocsLoading = ref(false)
+
+// Chart data for document types
+const documentTypeChartData = computed(() => {
+  if (!stats.value?.documents) return []
+  const types = {}
+  stats.value.documents.forEach(doc => {
+    const ct = doc.contentType || 'other'
+    let label = 'Autre'
+    if (ct.includes('pdf')) label = 'PDF'
+    else if (ct.includes('word') || ct.includes('document')) label = 'Word'
+    else if (ct.includes('excel') || ct.includes('sheet')) label = 'Excel'
+    else if (ct.includes('image')) label = 'Images'
+    types[label] = (types[label] || 0) + 1
+  })
+  return Object.entries(types).map(([label, value]) => ({
+    label,
+    value,
+    color: label === 'PDF' ? '#ef4444' : label === 'Word' ? '#3b82f6' : label === 'Excel' ? '#16a34a' : label === 'Images' ? '#8b5cf6' : '#6b7280'
+  }))
+})
+
+// Chart data for categories
+const categoryChartData = computed(() => {
+  if (!stats.value?.documents) return []
+  const cats = {}
+  stats.value.documents.forEach(doc => {
+    const cat = doc.category || 'Autre'
+    cats[cat] = (cats[cat] || 0) + 1
+  })
+  return Object.entries(cats)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([label, value]) => ({
+      label,
+      value,
+      color: 'primary'
+    }))
+})
 
 const fetchStats = async () => {
   statsLoading.value = true
   try {
-    // Try a wildcard search to get total count + status breakdown
+    // Use wildcard search (searchType: 3) to get all documents
     const res = await fetch('/api/search/query', {
       method: 'POST', headers: authHeader(),
-      body: JSON.stringify({ query: '*', searchType: 0, page: 1, pageSize: 1 })
+      body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 100 })
     })
     if (res.ok) {
       const data = await res.json()
       stats.value = {
         totalDocuments: data.totalResults || 0,
         searchTimeMs:   data.searchTimeMs || 0,
+        documents:      data.documents || [],
       }
+    } else {
+      console.warn('[Admin] fetchStats failed:', res.status)
+      stats.value = { totalDocuments: 0, searchTimeMs: 0, documents: [] }
     }
-    // Get OCR queue (documents with pending/processing status)
-    const ocrRes = await fetch('/api/search/query', {
-      method: 'POST', headers: authHeader(),
-      body: JSON.stringify({ query: '*', searchType: 0, page: 1, pageSize: 10, ocrStatus: 1 })
-    })
-    if (ocrRes.ok) {
-      const ocrData = await ocrRes.json()
-      ocrQueue.value = ocrData.documents || []
-    }
+  } catch (e) {
+    console.error('[Admin] fetchStats error:', e)
+    stats.value = { totalDocuments: 0, searchTimeMs: 0, documents: [] }
   } finally { statsLoading.value = false }
+}
+
+const fetchRecentDocs = async () => {
+  recentDocsLoading.value = true
+  try {
+    // Use wildcard search (searchType: 3) with sort
+    const res = await fetch('/api/search/query', {
+      method: 'POST', headers: authHeader(),
+      body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 10, sortBy: 'CreatedDate', sortDescending: true })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      recentDocs.value = data.documents || []
+    }
+  } catch (e) {
+    console.warn('[Admin] fetchRecentDocs error:', e)
+    recentDocs.value = []
+  } finally { recentDocsLoading.value = false }
 }
 
 const triggerReindex = async () => {
@@ -2177,6 +3806,7 @@ onMounted(async () => {
   await fetchDocuments()
   await fetchUsers()
   await fetchStats()
+  await fetchRecentDocs()
   await loadGroups()
   await loadRights()
   window.addEventListener('keydown', handleKeydown)
@@ -2696,6 +4326,13 @@ onMounted(async () => {
 .rfill-user    { background:linear-gradient(90deg,#10b981,#059669); }
 .rfill-readonly { background:#94a3b8; }
 .role-count { font-size:.8rem; font-weight:700; color:#374151; min-width:24px; text-align:right; }
+
+/* ── Stats charts row ── */
+.stats-charts-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem; }
+.stats-chart-card { min-height: 320px; display: flex; flex-direction: column; }
+.stats-recent-card { min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
+.stats-recent-card :deep(.recent-docs-widget) { flex: 1; display: flex; flex-direction: column; }
+.stats-recent-card :deep(.widget-list) { flex: 1; overflow-y: auto; max-height: 320px; }
 
 /* ── RAG toggle button ── */
 .rag-trigger-badge { font-size:.65rem; padding:.15rem .4rem; background:rgba(255,255,255,0.2); border-radius:4px; font-weight:500; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

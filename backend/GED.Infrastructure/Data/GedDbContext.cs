@@ -18,7 +18,7 @@ public class GedDbContext : DbContext
     public DbSet<AppUser> Users { get; set; }
     public DbSet<UserGroupAssignment>    UserGroupAssignments  { get; set; }
     public DbSet<DocumentVersion>        DocumentVersions      { get; set; }
-    public DbSet<WebhookDelivery>        WebhookDeliveries     { get; set; }
+    public DbSet<WebhookDelivery>       WebhookDeliveries     { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -239,7 +239,7 @@ public class GedDbContext : DbContext
               .HasDatabaseName("ix_versions_doc_version");
         });
 
-        // ── WebhookDeliveries table ─────────────────────────────────────────────
+        // ── WebhookDeliveries table ──────────────────────────────────────────────
         modelBuilder.Entity<WebhookDelivery>(e =>
         {
             e.ToTable("webhook_deliveries");
@@ -255,7 +255,6 @@ public class GedDbContext : DbContext
             e.Property(d => d.ErrorMessage).HasColumnName("error_message").HasMaxLength(2000);
             e.Property(d => d.DurationMs).HasColumnName("duration_ms");
             e.Property(d => d.CreatedAt).HasColumnName("created_at");
-            e.HasIndex(d => d.WebhookConfigId).HasDatabaseName("ix_webhook_deliveries_config_id");
             e.HasIndex(d => d.CreatedAt).HasDatabaseName("ix_webhook_deliveries_created_at");
             e.HasIndex(d => new { d.Event, d.Succeeded }).HasDatabaseName("ix_webhook_deliveries_event_status");
         });
@@ -306,15 +305,15 @@ public class DocumentMetadataEntity
 
 public class WebhookDelivery
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid Id { get; set; }
     public Guid? WebhookConfigId { get; set; }
     public string Event { get; set; } = string.Empty;
     public string? Payload { get; set; }
     public int? ResponseStatusCode { get; set; }
     public string? ResponseBody { get; set; }
-    public int AttemptNumber { get; set; } = 1;
+    public int AttemptNumber { get; set; }
     public bool Succeeded { get; set; }
     public string? ErrorMessage { get; set; }
     public long DurationMs { get; set; }
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime CreatedAt { get; set; }
 }

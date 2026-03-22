@@ -2,10 +2,17 @@
   <div class="taxonomy-page">
     <div class="page-header">
       <div>
-        <h1 class="page-title">Taxonomie des documents</h1>
-        <p class="page-subtitle">Gérez les catégories, étiquettes et la structure de classification</p>
+        <h1 class="page-title">
+          Taxonomie des documents
+        </h1>
+        <p class="page-subtitle">
+          Gérez les catégories, étiquettes et la structure de classification
+        </p>
       </div>
-      <button @click="showCreateCategory = true" class="btn-primary">
+      <button
+        class="btn-primary"
+        @click="showCreateCategory = true"
+      >
         + Nouvelle catégorie
       </button>
     </div>
@@ -13,106 +20,215 @@
     <!-- Tabs -->
     <div class="taxonomy-tabs">
       <button
-        v-for="tab in tabs" :key="tab.id"
-        @click="activeTab = tab.id"
+        v-for="tab in tabs"
+        :key="tab.id"
         class="tab-btn"
-        :class="{ active: activeTab === tab.id }">
+        :class="{ active: activeTab === tab.id }"
+        @click="activeTab = tab.id"
+      >
         <span>{{ tab.icon }}</span> {{ tab.label }}
       </button>
     </div>
 
     <!-- ── CATEGORIES TAB ── -->
-    <div v-if="activeTab === 'categories'" class="tab-content">
+    <div
+      v-if="activeTab === 'categories'"
+      class="tab-content"
+    >
       <div class="category-grid">
         <div
           v-for="cat in categories"
           :key="cat.id"
           class="category-card"
-          :class="{ inactive: !cat.isActive }">
+          :class="{ inactive: !cat.isActive }"
+        >
           <div class="cat-header">
-            <div class="cat-icon" :style="{ background: cat.color + '22', color: cat.color }">
+            <div
+              class="cat-icon"
+              :style="{ background: cat.color + '22', color: cat.color }"
+            >
               {{ cat.icon }}
             </div>
             <div class="cat-info">
-              <h3 class="cat-name">{{ cat.name }}</h3>
-              <p class="cat-desc">{{ cat.description || 'Aucune description' }}</p>
+              <h3 class="cat-name">
+                {{ cat.name }}
+              </h3>
+              <p class="cat-desc">
+                {{ cat.description || 'Aucune description' }}
+              </p>
             </div>
           </div>
           <div class="cat-footer">
             <span class="cat-meta">
               {{ cat.isSystem ? '🔒 Système' : 'Personnalisé' }}
-              <span v-if="!cat.isActive" class="inactive-badge">Désactivé</span>
+              <span
+                v-if="!cat.isActive"
+                class="inactive-badge"
+              >Désactivé</span>
             </span>
             <div class="cat-actions">
-              <button @click="editCategory(cat)" class="btn-icon-sm" title="Modifier">✏️</button>
+              <button
+                class="btn-icon-sm"
+                title="Modifier"
+                @click="editCategory(cat)"
+              >
+                ✏️
+              </button>
               <button
                 v-if="!cat.isSystem"
-                @click="deleteCategory(cat)"
                 class="btn-icon-sm danger"
-                title="Supprimer">🗑️</button>
+                title="Supprimer"
+                @click="deleteCategory(cat)"
+              >
+                🗑️
+              </button>
             </div>
           </div>
         </div>
 
-        <button @click="showCreateCategory = true" class="category-card add-card">
-          <div class="add-icon">+</div>
+        <button
+          class="category-card add-card"
+          @click="showCreateCategory = true"
+        >
+          <div class="add-icon">
+            +
+          </div>
           <p>Ajouter une catégorie</p>
         </button>
       </div>
     </div>
 
     <!-- ── TAGS TAB ── -->
-    <div v-if="activeTab === 'tags'" class="tab-content">
+    <div
+      v-if="activeTab === 'tags'"
+      class="tab-content"
+    >
       <div class="tags-toolbar">
         <div class="search-input-wrap">
-          <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          <svg
+            class="search-icon"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+            />
           </svg>
-          <input v-model="tagSearch" @input="debouncedSearchTags" type="text"
+          <input
+            v-model="tagSearch"
+            type="text"
             placeholder="Rechercher une étiquette…"
-            class="search-input-inline"/>
+            class="search-input-inline"
+            @input="debouncedSearchTags"
+          >
         </div>
-        <select v-model="tagCategoryFilter" @change="fetchTags" class="filter-select-sm">
-          <option value="">Toutes catégories</option>
-          <option v-for="cat in categories" :key="cat.id" :value="cat.name">{{ cat.icon }} {{ cat.name }}</option>
+        <select
+          v-model="tagCategoryFilter"
+          class="filter-select-sm"
+          @change="fetchTags"
+        >
+          <option value="">
+            Toutes catégories
+          </option>
+          <option
+            v-for="cat in categories"
+            :key="cat.id"
+            :value="cat.name"
+          >
+            {{ cat.icon }} {{ cat.name }}
+          </option>
         </select>
-        <button @click="showCreateTag = true" class="btn-primary btn-sm">+ Nouvelle étiquette</button>
-        <button @click="showBulkCreateTag = true" class="btn-secondary btn-sm">+ Import massif</button>
+        <button
+          class="btn-primary btn-sm"
+          @click="showCreateTag = true"
+        >
+          + Nouvelle étiquette
+        </button>
+        <button
+          class="btn-secondary btn-sm"
+          @click="showBulkCreateTag = true"
+        >
+          + Import massif
+        </button>
       </div>
 
       <div class="tags-cloud-list">
-        <div v-if="tagsLoading" class="loading-state">
-          <div class="spinner-ring"></div> Chargement…
+        <div
+          v-if="tagsLoading"
+          class="loading-state"
+        >
+          <div class="spinner-ring" /> Chargement…
         </div>
-        <div v-else-if="!tags.length" class="empty-state">
+        <div
+          v-else-if="!tags.length"
+          class="empty-state"
+        >
           <p>Aucune étiquette trouvée</p>
-          <button @click="showCreateTag = true" class="btn-primary btn-sm">Créer la première</button>
+          <button
+            class="btn-primary btn-sm"
+            @click="showCreateTag = true"
+          >
+            Créer la première
+          </button>
         </div>
-        <div v-else class="tags-grid">
-          <div v-for="tag in tags" :key="tag.id" class="tag-card">
+        <div
+          v-else
+          class="tags-grid"
+        >
+          <div
+            v-for="tag in tags"
+            :key="tag.id"
+            class="tag-card"
+          >
             <div class="tag-header">
-              <span class="tag-badge" :style="{ background: tag.color + '22', color: tag.color }">
+              <span
+                class="tag-badge"
+                :style="{ background: tag.color + '22', color: tag.color }"
+              >
                 #{{ tag.name }}
               </span>
               <span class="tag-count">{{ tag.usageCount }} utilisation(s)</span>
             </div>
-            <p v-if="tag.description" class="tag-desc">{{ tag.description }}</p>
-            <p v-if="tag.category" class="tag-category">
+            <p
+              v-if="tag.description"
+              class="tag-desc"
+            >
+              {{ tag.description }}
+            </p>
+            <p
+              v-if="tag.category"
+              class="tag-category"
+            >
               📁 {{ tag.category }}
             </p>
             <div class="tag-footer">
               <span class="tag-meta">
                 {{ tag.isSystem ? '🔒 Système' : 'Personnalisé' }}
-                <span v-if="!tag.isActive" class="inactive-badge">Désactivée</span>
+                <span
+                  v-if="!tag.isActive"
+                  class="inactive-badge"
+                >Désactivée</span>
               </span>
               <div class="tag-actions">
-                <button @click="editTag(tag)" class="btn-icon-xs" title="Modifier">✏️</button>
+                <button
+                  class="btn-icon-xs"
+                  title="Modifier"
+                  @click="editTag(tag)"
+                >
+                  ✏️
+                </button>
                 <button
                   v-if="!tag.isSystem"
-                  @click="deleteTag(tag)"
                   class="btn-icon-xs danger"
-                  title="Supprimer">🗑️</button>
+                  title="Supprimer"
+                  @click="deleteTag(tag)"
+                >
+                  🗑️
+                </button>
               </div>
             </div>
           </div>
@@ -120,53 +236,97 @@
       </div>
 
       <!-- Pagination -->
-      <div v-if="tagsTotalPages > 1" class="pagination">
+      <div
+        v-if="tagsTotalPages > 1"
+        class="pagination"
+      >
         <button
           v-for="page in tagsTotalPages"
           :key="page"
-          @click="tagsPage = page; fetchTags()"
           class="page-btn"
-          :class="{ active: page === tagsPage }">
+          :class="{ active: page === tagsPage }"
+          @click="tagsPage = page; fetchTags()"
+        >
           {{ page }}
         </button>
       </div>
     </div>
 
     <!-- ── CREATE / EDIT CATEGORY MODAL ── -->
-    <div v-if="showCreateCategory" class="modal-overlay" @click.self="closeCategoryModal">
+    <div
+      v-if="showCreateCategory"
+      class="modal-overlay"
+      @click.self="closeCategoryModal"
+    >
       <div class="modal-content modal-sm">
         <div class="modal-header">
           <h2>{{ editingCategory ? 'Modifier la catégorie' : 'Nouvelle catégorie' }}</h2>
-          <button @click="closeCategoryModal" class="modal-close">✕</button>
+          <button
+            class="modal-close"
+            @click="closeCategoryModal"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
           <div class="form-group">
             <label class="form-label">Nom <span style="color:#ef4444">*</span></label>
-            <input v-model="categoryForm.name" class="form-input" placeholder="ex: Facture Fournisseur"/>
+            <input
+              v-model="categoryForm.name"
+              class="form-input"
+              placeholder="ex: Facture Fournisseur"
+            >
           </div>
           <div class="form-group">
             <label class="form-label">Description</label>
-            <input v-model="categoryForm.description" class="form-input" placeholder="Description courte"/>
+            <input
+              v-model="categoryForm.description"
+              class="form-input"
+              placeholder="Description courte"
+            >
           </div>
           <div class="form-row">
             <div class="form-group">
               <label class="form-label">Icône (emoji)</label>
-              <input v-model="categoryForm.icon" class="form-input" placeholder="📄" maxlength="2"/>
+              <input
+                v-model="categoryForm.icon"
+                class="form-input"
+                placeholder="📄"
+                maxlength="2"
+              >
             </div>
             <div class="form-group">
               <label class="form-label">Couleur</label>
-              <input v-model="categoryForm.color" type="color" class="form-input color-input"/>
+              <input
+                v-model="categoryForm.color"
+                type="color"
+                class="form-input color-input"
+              >
             </div>
           </div>
-          <div v-if="editingCategory" class="form-group">
+          <div
+            v-if="editingCategory"
+            class="form-group"
+          >
             <label class="form-label">
-              <input type="checkbox" v-model="categoryForm.isActive"/> Active
+              <input
+                v-model="categoryForm.isActive"
+                type="checkbox"
+              > Active
             </label>
           </div>
         </div>
         <div class="modal-actions">
-          <button @click="closeCategoryModal" class="cancel-btn">Annuler</button>
-          <button @click="saveCategory" class="btn-primary">
+          <button
+            class="cancel-btn"
+            @click="closeCategoryModal"
+          >
+            Annuler
+          </button>
+          <button
+            class="btn-primary"
+            @click="saveCategory"
+          >
             {{ editingCategory ? 'Enregistrer' : 'Créer' }}
           </button>
         </div>
@@ -174,44 +334,88 @@
     </div>
 
     <!-- ── CREATE / EDIT TAG MODAL ── -->
-    <div v-if="showCreateTag" class="modal-overlay" @click.self="closeTagModal">
+    <div
+      v-if="showCreateTag"
+      class="modal-overlay"
+      @click.self="closeTagModal"
+    >
       <div class="modal-content modal-sm">
         <div class="modal-header">
           <h2>{{ editingTag ? 'Modifier l\'étiquette' : 'Nouvelle étiquette' }}</h2>
-          <button @click="closeTagModal" class="modal-close">✕</button>
+          <button
+            class="modal-close"
+            @click="closeTagModal"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
           <div class="form-group">
             <label class="form-label">Nom <span style="color:#ef4444">*</span></label>
-            <input v-model="tagForm.name" class="form-input" placeholder="ex: urgent, contrat-cadre"/>
+            <input
+              v-model="tagForm.name"
+              class="form-input"
+              placeholder="ex: urgent, contrat-cadre"
+            >
             <small class="form-hint">Minuscules, traits d'union autorisés</small>
           </div>
           <div class="form-group">
             <label class="form-label">Description</label>
-            <input v-model="tagForm.description" class="form-input" placeholder="Description courte"/>
+            <input
+              v-model="tagForm.description"
+              class="form-input"
+              placeholder="Description courte"
+            >
           </div>
           <div class="form-group">
             <label class="form-label">Catégorie</label>
-            <select v-model="tagForm.category" class="form-select">
-              <option value="">— Aucune —</option>
-              <option v-for="cat in categories" :key="cat.id" :value="cat.name">
+            <select
+              v-model="tagForm.category"
+              class="form-select"
+            >
+              <option value="">
+                — Aucune —
+              </option>
+              <option
+                v-for="cat in categories"
+                :key="cat.id"
+                :value="cat.name"
+              >
                 {{ cat.icon }} {{ cat.name }}
               </option>
             </select>
           </div>
           <div class="form-group">
             <label class="form-label">Couleur</label>
-            <input v-model="tagForm.color" type="color" class="form-input color-input"/>
+            <input
+              v-model="tagForm.color"
+              type="color"
+              class="form-input color-input"
+            >
           </div>
-          <div v-if="editingTag" class="form-group">
+          <div
+            v-if="editingTag"
+            class="form-group"
+          >
             <label class="form-label">
-              <input type="checkbox" v-model="tagForm.isActive"/> Active
+              <input
+                v-model="tagForm.isActive"
+                type="checkbox"
+              > Active
             </label>
           </div>
         </div>
         <div class="modal-actions">
-          <button @click="closeTagModal" class="cancel-btn">Annuler</button>
-          <button @click="saveTag" class="btn-primary">
+          <button
+            class="cancel-btn"
+            @click="closeTagModal"
+          >
+            Annuler
+          </button>
+          <button
+            class="btn-primary"
+            @click="saveTag"
+          >
             {{ editingTag ? 'Enregistrer' : 'Créer' }}
           </button>
         </div>
@@ -219,33 +423,62 @@
     </div>
 
     <!-- ── BULK CREATE TAGS MODAL ── -->
-    <div v-if="showBulkCreateTag" class="modal-overlay" @click.self="showBulkCreateTag = false">
+    <div
+      v-if="showBulkCreateTag"
+      class="modal-overlay"
+      @click.self="showBulkCreateTag = false"
+    >
       <div class="modal-content modal-sm">
         <div class="modal-header">
           <h2>Import massif d'étiquettes</h2>
-          <button @click="showBulkCreateTag = false" class="modal-close">✕</button>
+          <button
+            class="modal-close"
+            @click="showBulkCreateTag = false"
+          >
+            ✕
+          </button>
         </div>
         <div class="modal-body">
           <div class="form-group">
             <label class="form-label">Étiquettes (une par ligne)</label>
-            <textarea v-model="bulkTagNames" class="form-textarea"
+            <textarea
+              v-model="bulkTagNames"
+              class="form-textarea"
               placeholder="urgent&#10;confidentiel&#10;contrat-fournisseur&#10;…"
-              rows="10"></textarea>
+              rows="10"
+            />
             <small class="form-hint">{{ bulkTagNames.split('\n').filter(Boolean).length }} étiquettes</small>
           </div>
           <div class="form-group">
             <label class="form-label">Catégorie</label>
-            <select v-model="bulkTagCategory" class="form-select">
-              <option value="">— Aucune —</option>
-              <option v-for="cat in categories" :key="cat.id" :value="cat.name">
+            <select
+              v-model="bulkTagCategory"
+              class="form-select"
+            >
+              <option value="">
+                — Aucune —
+              </option>
+              <option
+                v-for="cat in categories"
+                :key="cat.id"
+                :value="cat.name"
+              >
                 {{ cat.icon }} {{ cat.name }}
               </option>
             </select>
           </div>
         </div>
         <div class="modal-actions">
-          <button @click="showBulkCreateTag = false" class="cancel-btn">Annuler</button>
-          <button @click="saveBulkTags" class="btn-primary">
+          <button
+            class="cancel-btn"
+            @click="showBulkCreateTag = false"
+          >
+            Annuler
+          </button>
+          <button
+            class="btn-primary"
+            @click="saveBulkTags"
+          >
             Créer {{ bulkTagNames.split('\n').filter(Boolean).length }} étiquettes
           </button>
         </div>

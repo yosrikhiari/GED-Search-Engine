@@ -21,22 +21,19 @@ public class SearchController : ControllerBase
 {
     private readonly ISearchService             _searchService;
     private readonly INlpService                _nlpService;
-    private readonly AuthService               _authService;
+    private readonly AuthService                _authService;
     private readonly ILogger<SearchController>  _logger;
-    private readonly AutoReindexService        _reindexService;
 
     public SearchController(
         ISearchService            searchService,
         INlpService               nlpService,
         AuthService               authService,
-        ILogger<SearchController> logger,
-        AutoReindexService       reindexService)
+        ILogger<SearchController> logger)
     {
         _searchService = searchService;
         _nlpService    = nlpService;
         _authService   = authService;
         _logger        = logger;
-        _reindexService = reindexService;
     }
 
     // ── POST /api/search/query ────────────────────────────────────────────────
@@ -122,19 +119,5 @@ public class SearchController : ControllerBase
             _logger.LogError(ex, "Error getting suggestions for document {Id}", documentId);
             return StatusCode(500, new { error = "Failed to get suggestions", message = ex.Message });
         }
-    }
-
-    /// <summary>
-    /// Triggers a full reindex of all documents from the database into OpenSearch.
-    /// </summary>
-    [HttpPost("reindex")]
-    [Authorize(Roles = "Admin")]
-    public async Task<ActionResult<ReindexResult>> TriggerReindex()
-    {
-        _logger.LogInformation("Admin {User} triggered full reindex",
-            User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown");
-
-        var result = await _reindexService.TriggerFullReindexAsync();
-        return Ok(result);
     }
 }

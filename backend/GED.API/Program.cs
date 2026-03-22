@@ -274,14 +274,14 @@ builder.Services.AddHostedService(sp => new OcrWorkerService(
     sp.GetRequiredService<ILogger<OcrWorkerService>>(),
     rabbitMqHost, rabbitMqUser, rabbitMqPass
 ));
-builder.Services.AddSingleton<AutoReindexService>();
+builder.Services.AddHostedService<AutoReindexService>();
 builder.Services.AddHostedService<OutboxRelayService>();
 builder.Services.AddHostedService<DocumentExpirationService>();
 builder.Services.AddHttpClient("webhook", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
 });
-builder.Services.AddScoped<IWebhookService, WebhookService>();
+builder.Services.AddSingleton<IWebhookService, WebhookService>();
 builder.Services.AddSingleton<IOfficeOnlineService, OfficeOnlineService>();
 builder.Services.AddScoped<IVersionHistoryService, VersionHistoryService>();
 builder.Services.AddScoped<DocumentIngestionPipeline>();
@@ -560,3 +560,5 @@ Log.Information("RabbitMQ:   {Host}", rabbitMqHost);
 Log.Information("SQL Server: {ConnStr}", connectionString);
 
 app.Run();
+
+public partial class Program { }

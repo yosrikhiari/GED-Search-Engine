@@ -26,22 +26,19 @@ public class DocumentAclController : ControllerBase
     private readonly ISearchService                     _searchService;
     private readonly IDocumentService                   _documentService;
     private readonly ILogger<DocumentAclController>     _logger;
-    private readonly IWebhookService                    _webhookService;
 
     public DocumentAclController(
         GedDbContext                   db,
         AuthService                    authService,
         ISearchService                 searchService,
         IDocumentService               documentService,
-        ILogger<DocumentAclController>  logger,
-        IWebhookService                webhookService)
+        ILogger<DocumentAclController>  logger)
     {
         _db              = db;
         _authService     = authService;
         _searchService   = searchService;
         _documentService = documentService;
         _logger          = logger;
-        _webhookService  = webhookService;
     }
 
     // ── Admin: list ACL entries for a document ────────────────────────────────
@@ -132,7 +129,7 @@ public class DocumentAclController : ControllerBase
             adminId, request.Permission, documentId, request.UserId,
             request.ExpiresAt?.ToString("yyyy-MM-dd") ?? "never");
 
-        var result = new DocumentAclDto
+        return Ok(new DocumentAclDto
         {
             Id         = existing?.Id ?? Guid.NewGuid(),
             DocumentId = documentId,
@@ -143,21 +140,7 @@ public class DocumentAclController : ControllerBase
             GrantedAt  = DateTime.UtcNow,
             ExpiresAt  = request.ExpiresAt,
             IsActive   = true
-        };
-
-        FireWebhook("document.access_granted", new WebhookPayload
-        {
-            Event = "document.access_granted",
-            Access = new WebhookAclData
-            {
-                DocumentId = documentId,
-                UserId = request.UserId,
-                Permission = request.Permission.ToString(),
-                GrantedBy = adminId.ToString()
-            }
         });
-
-        return Ok(result);
     }
 
     // ── Admin: revoke access ──────────────────────────────────────────────────
@@ -185,18 +168,6 @@ public class DocumentAclController : ControllerBase
         }
 
         _logger.LogInformation("ACL entry {AclId} revoked for document {DocId}", aclId, documentId);
-
-        FireWebhook("document.access_revoked", new WebhookPayload
-        {
-            Event = "document.access_revoked",
-            Access = new WebhookAclData
-            {
-                DocumentId = documentId,
-                UserId = acl.UserId,
-                Permission = acl.Permission.ToString()
-            }
-        });
-
         return Ok(new { message = "Access revoked." });
     }
 
@@ -310,7 +281,6 @@ public class DocumentAclController : ControllerBase
 
         var results = new BatchAclResult { TotalRequested = request.AclIds.Count, Succeeded = 0, Failed = 0 };
         var revokedDocIds = new HashSet<Guid>();
-        var revokedEntries = new List<(Guid DocId, Guid UserId, string Permission)>();
 
         foreach (var aclId in request.AclIds)
         {
@@ -324,7 +294,6 @@ public class DocumentAclController : ControllerBase
                     continue;
                 }
 
-                revokedEntries.Add((acl.DocumentId, acl.UserId, acl.Permission.ToString()));
                 _db.DocumentAcls.Remove(acl);
                 revokedDocIds.Add(acl.DocumentId);
                 results.Succeeded++;
@@ -343,20 +312,6 @@ public class DocumentAclController : ControllerBase
         {
             var doc = await _documentService.GetDocumentByIdAsync(docId);
             if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
-        }
-
-        foreach (var (docId, userId, permission) in revokedEntries)
-        {
-            FireWebhook("document.access_revoked", new WebhookPayload
-            {
-                Event = "document.access_revoked",
-                Access = new WebhookAclData
-                {
-                    DocumentId = docId,
-                    UserId = userId,
-                    Permission = permission
-                }
-            });
         }
 
         _logger.LogInformation(
@@ -435,20 +390,6 @@ public class DocumentAclController : ControllerBase
             if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
         }
 
-        foreach (var removed in toRemove)
-        {
-            FireWebhook("document.access_revoked", new WebhookPayload
-            {
-                Event = "document.access_revoked",
-                Access = new WebhookAclData
-                {
-                    DocumentId = removed.DocumentId,
-                    UserId = removed.UserId,
-                    Permission = removed.Permission.ToString()
-                }
-            });
-        }
-
         return Ok(new BatchAclResult
         {
             TotalRequested = toRemove.Count,
@@ -500,18 +441,6 @@ public class DocumentAclController : ControllerBase
             var doc = await _documentService.GetDocumentByIdAsync(docId);
             if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
 
-            FireWebhook("document.access_granted", new WebhookPayload
-            {
-                Event = "document.access_granted",
-                Access = new WebhookAclData
-                {
-                    DocumentId = docId,
-                    UserId = userId,
-                    Permission = aclPermission.ToString(),
-                    GrantedBy = adminId.ToString()
-                }
-            });
-
             results.Succeeded++;
         }
         catch (Exception ex)
@@ -527,21 +456,6 @@ public class DocumentAclController : ControllerBase
     {
         var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         return Guid.TryParse(claim, out var id) ? id : null;
-    }
-
-    private void FireWebhook(string eventName, WebhookPayload payload)
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await _webhookService.TriggerEventAsync(eventName, payload);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Webhook delivery failed for event {Event}", eventName);
-            }
-        });
     }
 }
 

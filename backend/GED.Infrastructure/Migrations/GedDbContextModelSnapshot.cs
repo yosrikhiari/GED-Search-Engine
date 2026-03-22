@@ -398,69 +398,6 @@ namespace GED.Infrastructure.Migrations
                     b.ToTable("outbox_messages", (string)null);
                 });
 
-            modelBuilder.Entity("GED.Infrastructure.Data.WebhookDelivery", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier")
-                        .HasColumnName("id");
-
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("int")
-                        .HasColumnName("attempt_number");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2")
-                        .HasColumnName("created_at");
-
-                    b.Property<long>("DurationMs")
-                        .HasColumnType("bigint")
-                        .HasColumnName("duration_ms");
-
-                    b.Property<string>("ErrorMessage")
-                        .HasColumnType("nvarchar(max)")
-                        .HasColumnName("error_message");
-
-                    b.Property<string>("Event")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)")
-                        .HasColumnName("event_type");
-
-                    b.Property<string>("Payload")
-                        .HasColumnType("nvarchar(max)")
-                        .HasColumnName("payload");
-
-                    b.Property<int?>("ResponseStatusCode")
-                        .HasColumnType("int")
-                        .HasColumnName("response_status_code");
-
-                    b.Property<string>("ResponseBody")
-                        .HasColumnType("nvarchar(max)")
-                        .HasColumnName("response_body");
-
-                    b.Property<bool>("Succeeded")
-                        .HasColumnType("bit")
-                        .HasColumnName("succeeded");
-
-                    b.Property<Guid?>("WebhookConfigId")
-                        .HasColumnType("uniqueidentifier")
-                        .HasColumnName("webhook_config_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CreatedAt")
-                        .HasDatabaseName("ix_webhook_deliveries_created_at");
-
-                    b.HasIndex("Event")
-                        .HasDatabaseName("ix_webhook_deliveries_event");
-
-                    b.HasIndex("WebhookConfigId")
-                        .HasDatabaseName("ix_webhook_deliveries_webhook_config_id");
-
-                    b.ToTable("webhook_deliveries", (string)null);
-                });
-
             modelBuilder.Entity("GED.Infrastructure.Data.DocumentMetadataEntity", b =>
                 {
                     b.HasOne("GED.Infrastructure.Data.DocumentEntity", "Document")

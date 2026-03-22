@@ -4,7 +4,6 @@ using System.Text;
 using System.Text.Json;
 using GED.Core.Interfaces;
 using GED.Core.Models;
-using GED.Infrastructure.Data;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
 
@@ -25,7 +24,6 @@ public class WebhookService : IWebhookService
     private readonly ILogger<WebhookService> _logger;
     private readonly IDistributedCache _cache;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly GedDbContext _db;
     private readonly string _webhooksFilePath;
 
     private readonly List<WebhookConfig> _webhooks = new();
@@ -39,13 +37,11 @@ public class WebhookService : IWebhookService
         ILogger<WebhookService> logger,
         IDistributedCache cache,
         IHttpClientFactory httpClientFactory,
-        GedDbContext db,
         Microsoft.Extensions.Configuration.IConfiguration configuration)
     {
         _logger = logger;
         _cache = cache;
         _httpClientFactory = httpClientFactory;
-        _db = db;
         _webhooksFilePath = configuration["Webhooks:ConfigPath"] ?? "/var/lib/ged/webhooks.json";
         LoadWebhooks();
     }
@@ -156,17 +152,6 @@ public class WebhookService : IWebhookService
 
         for (int attempt = 1; attempt <= webhook.MaxRetries; attempt++)
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            var delivery = new WebhookDelivery
-            {
-                Id = Guid.NewGuid(),
-                WebhookConfigId = webhook.Id,
-                Event = payload.Event,
-                Payload = JsonSerializer.Serialize(payload, _jsonOptions),
-                AttemptNumber = attempt,
-                CreatedAt = DateTime.UtcNow
-            };
-
             try
             {
                 var json = JsonSerializer.Serialize(payload, _jsonOptions);
@@ -186,21 +171,15 @@ public class WebhookService : IWebhookService
                 request.Headers.TryAddWithoutValidation("X-Webhook-Correlation-Id", payload.CorrelationId ?? "");
 
                 var response = await client.SendAsync(request);
-                sw.Stop();
-                delivery.DurationMs = sw.ElapsedMilliseconds;
-                delivery.ResponseStatusCode = (int)response.StatusCode;
-                delivery.ResponseBody = await response.Content.ReadAsStringAsync();
 
                 if (response.IsSuccessStatusCode)
                 {
-                    delivery.Succeeded = true;
                     lock (_lock)
                     {
                         webhook.SuccessCount++;
                         webhook.LastTriggeredAt = DateTime.UtcNow;
                     }
                     SaveWebhooks();
-                    await SaveDeliveryRecordAsync(delivery);
 
                     _logger.LogInformation(
                         "✅ Webhook delivered: {Name} -> {Url} (event={Event}, attempt={Attempt})",
@@ -208,34 +187,18 @@ public class WebhookService : IWebhookService
                     return;
                 }
 
-                delivery.Succeeded = false;
-                delivery.ErrorMessage = $"HTTP {(int)response.StatusCode}";
-                await SaveDeliveryRecordAsync(delivery);
-
                 _logger.LogWarning(
                     "⚠️  Webhook delivery failed: {Name} -> {Url} (status={Status}, attempt={Attempt}/{Max})",
                     webhook.Name, webhook.Url, (int)response.StatusCode, attempt, webhook.MaxRetries);
             }
             catch (TaskCanceledException)
             {
-                sw.Stop();
-                delivery.DurationMs = sw.ElapsedMilliseconds;
-                delivery.Succeeded = false;
-                delivery.ErrorMessage = "Request timed out";
-                await SaveDeliveryRecordAsync(delivery);
-
                 _logger.LogWarning(
                     "⏱️  Webhook timeout: {Name} -> {Url} (attempt {Attempt}/{Max})",
                     webhook.Name, webhook.Url, attempt, webhook.MaxRetries);
             }
             catch (Exception ex)
             {
-                sw.Stop();
-                delivery.DurationMs = sw.ElapsedMilliseconds;
-                delivery.Succeeded = false;
-                delivery.ErrorMessage = ex.Message;
-                await SaveDeliveryRecordAsync(delivery);
-
                 _logger.LogWarning(ex,
                     "❌ Webhook delivery error: {Name} -> {Url} (attempt {Attempt}/{Max})",
                     webhook.Name, webhook.Url, attempt, webhook.MaxRetries);
@@ -253,19 +216,6 @@ public class WebhookService : IWebhookService
             webhook.FailureCount++;
         }
         SaveWebhooks();
-    }
-
-    private async Task SaveDeliveryRecordAsync(WebhookDelivery delivery)
-    {
-        try
-        {
-            _db.WebhookDeliveries.Add(delivery);
-            await _db.SaveChangesAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to save webhook delivery record for event {Event}", delivery.Event);
-        }
     }
 
     private static string ComputeHmacSha256(string data, string secret)
