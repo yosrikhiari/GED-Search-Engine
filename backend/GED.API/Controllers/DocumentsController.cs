@@ -25,6 +25,7 @@ public class DocumentsController : ControllerBase
     private readonly IDistributedCache _cache;
     private readonly IConfiguration _configuration;
     private readonly AuthService _authService;
+    private readonly IAuditService _auditService;
 
     private static readonly string[] AllowedCategories =
     {
@@ -41,7 +42,8 @@ public class DocumentsController : ControllerBase
         ILogger<DocumentsController> logger,
         IConfiguration configuration,
         IDistributedCache cache,
-        AuthService authService)
+        AuthService authService,
+        IAuditService auditService)
     {
         _documentService = documentService;
         _searchService   = searchService;
@@ -52,6 +54,7 @@ public class DocumentsController : ControllerBase
         _configuration   = configuration;
         _cache           = cache;
         _authService     = authService;
+        _auditService    = auditService;
     }
 
     private static readonly string[] AdminOnlyCategories = { };
@@ -429,10 +432,18 @@ public async Task<ActionResult<Document>> UploadDocument(
     {
         try
         {
-            var deleted = await _documentService.DeleteDocumentAsync(id);
-            if (!deleted) return NotFound();
+            var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+            
+            var marked = await _documentService.MarkDocumentAsDeletedAsync(id);
+            if (!marked) return NotFound();
 
             await _searchService.DeleteDocumentIndexAsync(id);
+            
+            var deleted = await _documentService.DeleteDocumentAsync(id);
+            
+            // Audit logging
+            _auditService.LogDocumentDelete(id, username, "User deleted document");
+            
             return NoContent();
         }
         catch (Exception ex)
@@ -440,6 +451,112 @@ public async Task<ActionResult<Document>> UploadDocument(
             _logger.LogError(ex, "Error deleting document {DocumentId}", id);
             return StatusCode(500, new { error = "Delete failed", message = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Bulk delete documents
+    /// </summary>
+    [HttpPost("bulk-delete")]
+    public async Task<IActionResult> BulkDeleteDocuments([FromBody] List<Guid> documentIds)
+    {
+        if (documentIds == null || !documentIds.Any())
+            return BadRequest(new { error = "No document IDs provided" });
+
+        var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+        var results = new List<dynamic>();
+        var deletedCount = 0;
+
+        foreach (var id in documentIds)
+        {
+            try
+            {
+                var marked = await _documentService.MarkDocumentAsDeletedAsync(id);
+                if (!marked)
+                {
+                    results.Add(new { id, success = false, error = "Document not found" });
+                    continue;
+                }
+
+                await _searchService.DeleteDocumentIndexAsync(id);
+                await _documentService.DeleteDocumentAsync(id);
+                
+                _auditService.LogDocumentDelete(id, username, "Bulk delete");
+                deletedCount++;
+                results.Add(new { id, success = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error bulk deleting document {DocumentId}", id);
+                results.Add(new { id, success = false, error = ex.Message });
+            }
+        }
+
+        return Ok(new
+        {
+            total = documentIds.Count,
+            deleted = deletedCount,
+            failed = documentIds.Count - deletedCount,
+            results
+        });
+    }
+
+    /// <summary>
+    /// Bulk update document category
+    /// </summary>
+    [HttpPost("bulk-update-category")]
+    public async Task<IActionResult> BulkUpdateCategory([FromBody] BulkCategoryUpdateRequest request)
+    {
+        if (request.DocumentIds == null || !request.DocumentIds.Any())
+            return BadRequest(new { error = "No document IDs provided" });
+
+        if (string.IsNullOrWhiteSpace(request.Category))
+            return BadRequest(new { error = "Category is required" });
+
+        var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+        var results = new List<dynamic>();
+        var updatedCount = 0;
+
+        foreach (var id in request.DocumentIds)
+        {
+            try
+            {
+                var doc = await _documentService.GetDocumentByIdAsync(id);
+                if (doc == null)
+                {
+                    results.Add(new { id, success = false, error = "Document not found" });
+                    continue;
+                }
+
+                doc.Category = request.Category;
+                var updated = await _documentService.UpdateDocumentAsync(id, doc);
+                await _searchService.UpdateDocumentIndexAsync(updated);
+                
+                _auditService.LogAudit(new AuditEvent
+                {
+                    EventType = "BULK_UPDATE",
+                    PerformedBy = username,
+                    TargetType = "Document",
+                    TargetId = id.ToString(),
+                    Action = $"Updated category to {request.Category}"
+                });
+                
+                updatedCount++;
+                results.Add(new { id, success = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error bulk updating document {DocumentId}", id);
+                results.Add(new { id, success = false, error = ex.Message });
+            }
+        }
+
+        return Ok(new
+        {
+            total = request.DocumentIds.Count,
+            updated = updatedCount,
+            failed = request.DocumentIds.Count - updatedCount,
+            results
+        });
     }
 
     [HttpPut("{id}")]
@@ -608,4 +725,75 @@ public async Task<ActionResult<Document>> UploadDocument(
 
         return string.IsNullOrWhiteSpace(sanitized) ? "unnamed" : sanitized;
     }
+
+    /// <summary>
+    /// Export documents to CSV format
+    /// </summary>
+    [HttpPost("export")]
+    public async Task<IActionResult> ExportDocuments([FromBody] List<Guid>? documentIds = null)
+    {
+        try
+        {
+            List<Document> documents;
+
+            if (documentIds != null && documentIds.Any())
+            {
+                documents = await _documentService.GetDocumentsByIdsAsync(documentIds);
+            }
+            else
+            {
+                // Export all accessible documents
+                documents = await _db.Documents
+                    .Where(d => d.Status != DocumentStatus.Deleted)
+                    .Take(1000)
+                    .ToListAsync()
+                    .ContinueWith(t => t.Result.Select(MapToDocumentDto).ToList());
+            }
+
+            // Generate CSV
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine("Id,Title,Description,FileName,ContentType,FileSize,Category,Tags,CreatedAt,DocumentDate,Status");
+
+            foreach (var doc in documents)
+            {
+                var tags = doc.Tags != null ? string.Join(";", doc.Tags) : "";
+                csv.AppendLine($"\"{doc.Id}\",\"{EscapeCsv(doc.Title)}\",\"{EscapeCsv(doc.Description ?? "")}\",\"{EscapeCsv(doc.FileName)}\",\"{doc.ContentType}\",{doc.FileSize},\"{doc.Category}\",\"{EscapeCsv(tags)}\",\"{doc.CreatedAt:yyyy-MM-dd HH:mm:ss}\",\"{doc.DocumentDate:yyyy-MM-dd}\",\"{doc.Status}\"");
+            }
+
+            var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
+            return File(bytes, "text/csv", $"ged-export-{DateTime.UtcNow:yyyyMMdd}.csv");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error exporting documents");
+            return StatusCode(500, new { error = "Export failed", message = ex.Message });
+        }
+    }
+
+    private static string EscapeCsv(string value)
+    {
+        return value?.Replace("\"", "\"\"") ?? "";
+    }
+
+    private static Document MapToDocumentDto(DocumentEntity e) => new()
+    {
+        Id               = e.Id,
+        Title            = e.Title,
+        Description      = e.Description,
+        FileName         = e.FileName,
+        ContentType      = e.ContentType,
+        FileSize         = e.FileSize,
+        FileHash         = e.FileHash,
+        CreatedAt        = e.CreatedAt,
+        DocumentDate     = e.DocumentDate,
+        ModifiedAt       = e.ModifiedAt,
+        CreatedBy        = e.CreatedBy,
+        Status           = e.Status,
+        IsOcrProcessed   = e.IsOcrProcessed,
+        OcrText          = e.OcrText,
+        ExtractedText    = e.ExtractedText,
+        Tags             = e.Tags,
+        Category         = e.Category,
+        Version          = e.Version
+    };
 }

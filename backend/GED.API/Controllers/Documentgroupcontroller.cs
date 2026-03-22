@@ -125,7 +125,7 @@ public class DocumentGroupController : ControllerBase
                     GroupId    = group.Id,
                     DocumentId = docId,
                     AddedAt    = DateTime.UtcNow,
-                    AddedBy    = adminId.Value
+                    AddedBy    = adminId ?? Guid.Empty
                 });
         }
 

@@ -18,6 +18,7 @@ public interface IDocumentService
 {
     Task<Document?> GetDocumentByIdAsync(Guid id, CancellationToken cancellationToken = default);
     Task<Document> UploadDocumentAsync(Stream fileStream, string fileName, string contentType, string? title = null, Dictionary<string, object>? metadata = null, CancellationToken cancellationToken = default);
+    Task<bool> MarkDocumentAsDeletedAsync(Guid id, CancellationToken cancellationToken = default);
     Task<bool> DeleteDocumentAsync(Guid id, CancellationToken cancellationToken = default);
     Task<Document> UpdateDocumentAsync(Guid id, Document document, CancellationToken cancellationToken = default);
     Task<Stream> GetDocumentContentAsync(Guid id, CancellationToken cancellationToken = default);

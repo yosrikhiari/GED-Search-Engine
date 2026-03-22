@@ -172,11 +172,9 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter } from 'vue-router'
 import { auth } from '../api.js'
 import UserManagementModal from './UserManagementModal.vue'
 
-const router = useRouter()
 const dropdownOpen       = ref(false)
 const showUserManagement = ref(false)
 const dropdownRef        = ref(null)

@@ -316,6 +316,28 @@ public class DocumentService : IDocumentService
     }
 
     /// <inheritdoc />
+    public async Task<bool> MarkDocumentAsDeletedAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var entity = await _db.Documents.FindAsync(new object[] { id }, cancellationToken);
+            if (entity == null) return false;
+
+            entity.Status = DocumentStatus.Deleted;
+            entity.ModifiedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation("Document {DocumentId} marked as deleted", id);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error marking document {DocumentId} as deleted", id);
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<bool> DeleteDocumentAsync(Guid id, CancellationToken cancellationToken = default)
     {
         try

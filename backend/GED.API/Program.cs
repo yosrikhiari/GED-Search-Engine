@@ -1,4 +1,5 @@
 using AspNetCoreRateLimit;
+using GED.API.Middleware;
 using GED.Infrastructure.Resilience;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using HealthChecks.UI.Client;
@@ -106,6 +107,13 @@ builder.WebHost.ConfigureKestrel(options =>
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Server=localhost;Database=ged_db;User Id=ged_user;Password=ged_pass;TrustServerCertificate=True;";
 
+// Add connection pooling parameters to connection string
+if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
+{
+    var separator = connectionString.Contains(';') ? ";" : "";
+    connectionString += $"{separator}Pooling=true;Min Pool Size=5;Max Pool Size=100;Connection Timeout=30;";
+}
+
 builder.Services.AddDbContext<GedDbContext>(options =>
     options.UseSqlServer(connectionString, sqlServer =>
     {
@@ -140,11 +148,25 @@ builder.Services.AddAuthorization();
 
 // ── OpenSearch ────────────────────────────────────────────────────────────────
 var opensearchUrl      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
+var opensearchUsername = builder.Configuration["OpenSearch:Username"] ?? "";
+var opensearchPassword = builder.Configuration["OpenSearch:Password"] ?? "";
+var opensearchSecurityEnabled = builder.Configuration.GetValue<bool>("OpenSearch:SecurityEnabled", false);
 var isDevelopment = builder.Environment.IsDevelopment();
 
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
     .PrettyJson();
+
+// Configure authentication if security is enabled
+if (opensearchSecurityEnabled && !string.IsNullOrEmpty(opensearchUsername))
+{
+    connectionSettings.BasicAuthentication(opensearchUsername, opensearchPassword);
+    Log.Information("OpenSearch security enabled with user: {Username}", opensearchUsername);
+}
+else
+{
+    Log.Information("OpenSearch security disabled (development mode)");
+}
 
 // Only enable debug mode in development (memory-intensive)
 if (isDevelopment)
@@ -227,6 +249,9 @@ builder.Services.AddScoped<DocumentChunkingService>();
 // ── Auth Service ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<AuthService>();
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
+
+// ── Audit Service ─────────────────────────────────────────────────────────────
+builder.Services.AddScoped<IAuditService, AuditService>();
 
 // ── Search pipeline ───────────────────────────────────────────────────────────
 // OpenSearchService is Scoped so it can receive GedDbContext (also Scoped).
@@ -517,6 +542,7 @@ app.Use(async (context, next) =>
 
 app.UseIpRateLimiting();
 app.UseCors();
+app.UseGlobalExceptionHandler();
 
 app.Use(async (context, next) =>
 {
@@ -557,8 +583,37 @@ app.MapControllers();
 Log.Information("GED Search Engine API starting...");
 Log.Information("OpenSearch:  {Url}", opensearchUrl);
 Log.Information("RabbitMQ:   {Host}", rabbitMqHost);
-Log.Information("SQL Server: {ConnStr}", connectionString);
+Log.Information("SQL Server: {ConnStr}", MaskConnectionString(connectionString));
 
 app.Run();
 
-public partial class Program { }
+public partial class Program
+{
+    private static string MaskConnectionString(string connectionString)
+    {
+        if (string.IsNullOrEmpty(connectionString))
+            return "(empty)";
+
+        try
+        {
+            var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            var maskedParts = parts.Select(part =>
+            {
+                var key = part.Split('=', 2)[0].Trim();
+                if (key.Equals("password", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("pwd", StringComparison.OrdinalIgnoreCase))
+                    return "Password=****";
+                if (key.Equals("user id", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("user", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("uid", StringComparison.OrdinalIgnoreCase))
+                    return "User Id=****";
+                return part;
+            });
+            return string.Join(";", maskedParts);
+        }
+        catch
+        {
+            return "**** (masking failed)";
+        }
+    }
+}

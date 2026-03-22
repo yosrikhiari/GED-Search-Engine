@@ -23,6 +23,20 @@ package-lock.json
 # Environment
 .env
 .env.local
+.env.production
+.env.*.local
+*.env
+
+# Secrets
+**/secrets.json
+**/credentials.json
+**/*.key
+
+# Test reports
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
 
 # OS
 .DS_Store
@@ -65,5 +79,10 @@ nul
 cookies.txt
 GED-SEARCH-ENGINE-FUNCTIONALITY-REVIEW.md
 GED-SEARCH-ENGINE-TEST-REPORT.md
+CODE-REVIEW.md
 frontend/.gitignore
 cookies.txt
+docker-compose.tests.yml
+TESTING.md
+README.md
+backend/Dockerfile.tests

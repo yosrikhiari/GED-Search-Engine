@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Services;
+using GED.Infrastructure.Data;
 using System.Security.Claims;
 
 namespace GED.API.Controllers;
@@ -119,5 +121,138 @@ public class SearchController : ControllerBase
             _logger.LogError(ex, "Error getting suggestions for document {Id}", documentId);
             return StatusCode(500, new { error = "Failed to get suggestions", message = ex.Message });
         }
+    }
+
+    // ── POST /api/search/reindex ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Manually triggers a full re-indexing of all documents.
+    /// Admin only. This is an async operation.
+    /// </summary>
+    [HttpPost("reindex")]
+    [Authorize(Roles = "Admin")]
+    public async Task<ActionResult<object>> TriggerReindex()
+    {
+        try
+        {
+            _logger.LogInformation("Manual reindex triggered by admin");
+
+            using var scope = HttpContext.RequestServices.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<GED.Infrastructure.Data.GedDbContext>();
+            var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+
+            // Use raw SQL to bypass EF Core's JSON conversion issues
+            var rawDocs = await db.Database
+                .SqlQueryRaw<DocumentRow>(@"
+                    SELECT id, title, description, file_name AS FileName, file_path AS FilePath, 
+                           content_type AS ContentType, file_size AS FileSize, created_at AS CreatedAt, 
+                           document_date AS DocumentDate, modified_at AS ModifiedAt, 
+                           status AS Status, is_ocr_processed AS IsOcrProcessed, 
+                           ocr_text AS OcrText, extracted_text AS ExtractedText, category AS Category 
+                    FROM documents WHERE status = 'Indexed'")
+                .ToListAsync();
+
+            if (!rawDocs.Any())
+            {
+                return Ok(new { message = "No documents to re-index", count = 0 });
+            }
+
+            var domainDocs = new List<Document>();
+
+            foreach (var e in rawDocs)
+            {
+                var tags = await GetTagsSafelyAsync(db, e.Id);
+                var metadata = await GetMetadataSafelyAsync(db, e.Id);
+
+                var doc = new Document
+                {
+                    Id            = e.Id,
+                    Title         = e.Title,
+                    Description   = e.Description,
+                    FileName      = e.FileName,
+                    FilePath      = e.FilePath,
+                    ContentType   = e.ContentType,
+                    FileSize      = e.FileSize,
+                    CreatedAt     = e.CreatedAt,
+                    DocumentDate  = e.DocumentDate,
+                    ModifiedAt    = e.ModifiedAt,
+                    Status        = Enum.TryParse<DocumentStatus>(e.Status, out var s) ? s : DocumentStatus.Indexed,
+                    OcrText       = e.OcrText,
+                    ExtractedText = e.ExtractedText,
+                    Tags          = tags,
+                    Category      = e.Category,
+                    Metadata      = metadata,
+                    IsOcrProcessed = e.IsOcrProcessed
+                };
+                domainDocs.Add(doc);
+            }
+
+            if (!domainDocs.Any())
+            {
+                return Ok(new { message = "No documents could be mapped for re-indexing", count = 0 });
+            }
+
+            await searchService.BulkIndexDocumentsAsync(domainDocs);
+
+            _logger.LogInformation("Reindex completed: {Count} documents indexed", domainDocs.Count);
+
+            return Ok(new { message = "Re-indexing completed", count = domainDocs.Count });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during manual reindex");
+            return StatusCode(500, new { error = "Reindex failed", message = ex.Message });
+        }
+    }
+
+    private async Task<List<string>> GetTagsSafelyAsync(GED.Infrastructure.Data.GedDbContext db, Guid docId)
+    {
+        try
+        {
+            var tagsStr = await db.Database
+                .SqlQueryRaw<string>("SELECT tags FROM documents WHERE id = {0}", docId)
+                .FirstOrDefaultAsync();
+            if (string.IsNullOrEmpty(tagsStr)) return new List<string>();
+            return System.Text.Json.JsonSerializer.Deserialize<List<string>>(tagsStr) ?? new List<string>();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
+    private async Task<Dictionary<string, object>> GetMetadataSafelyAsync(GED.Infrastructure.Data.GedDbContext db, Guid docId)
+    {
+        try
+        {
+            var metaStr = await db.Database
+                .SqlQueryRaw<string>("SELECT metadata FROM documents WHERE id = {0}", docId)
+                .FirstOrDefaultAsync();
+            if (string.IsNullOrEmpty(metaStr)) return new Dictionary<string, object>();
+            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(metaStr) ?? new Dictionary<string, object>();
+        }
+        catch
+        {
+            return new Dictionary<string, object>();
+        }
+    }
+
+    private class DocumentRow
+    {
+        public Guid Id { get; set; }
+        public string Title { get; set; } = "";
+        public string? Description { get; set; }
+        public string FileName { get; set; } = "";
+        public string FilePath { get; set; } = "";
+        public string ContentType { get; set; } = "";
+        public long FileSize { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? DocumentDate { get; set; }
+        public DateTime? ModifiedAt { get; set; }
+        public string Status { get; set; } = "";
+        public bool IsOcrProcessed { get; set; }
+        public string? OcrText { get; set; }
+        public string? ExtractedText { get; set; }
+        public string? Category { get; set; }
     }
 }

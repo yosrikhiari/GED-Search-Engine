@@ -8,9 +8,13 @@ services:
     container_name: ged-opensearch
     environment:
       - discovery.type=single-node
-      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
-      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
       - bootstrap.memory_lock=true
+      # Security: required by OpenSearch 2.12+ but we'll disable SSL and use no auth for local dev
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=GedOpensearch2024!
+      - plugins.security.disabled=true
+      - plugins.security.ssl.http.enabled=false
+      - plugins.security.allow_default_init_securityindex=true
     ulimits:
       memlock:
         soft: -1
@@ -30,20 +34,22 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.5
 
   # ── RabbitMQ ──────────────────────────────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3.12-management
     container_name: ged-rabbitmq
     environment:
-      - RABBITMQ_DEFAULT_USER=admin
-      - RABBITMQ_DEFAULT_PASS=admin123
-      - RABBITMQ_DEFAULT_VHOST=/
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-admin}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-admin123}
+      - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_VHOST:-/}
     ports:
-      - "5673:5672"
-      - "15673:15672"
+      - "${RABBITMQ_PORT:-5673}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15673}:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     networks:
@@ -55,6 +61,8 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
 
   # ── SQL Server ────────────────────────────────────────────────────────────────
   sqlserver:
@@ -62,23 +70,26 @@ services:
     container_name: ged-sqlserver
     environment:
       - ACCEPT_EULA=Y
-      - SA_PASSWORD=GedPass_2024!
+      - SA_PASSWORD=${DB_PASSWORD:-GedPass_2024!}
       - MSSQL_PID=Express
+      - MSSQL_IP_ADDRESS=0.0.0.0
     ports:
-      - "1433:1433"
+      - "${DB_PORT:-1433}:1433"
     volumes:
       - sqlserver-data:/var/opt/mssql
     networks:
       - ged-network
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'GedPass_2024!' -Q 'SELECT 1' -No -C || exit 1"]
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -Q 'SELECT 1' -No -C || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 1.0
 
-  # ── SQL Server init ───────────────────────────────────────────────────────────
+  # ── SQL Server init ─────────────────────────────────────────────────────────--
   sqlserver-init:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: ged-sqlserver-init
@@ -90,8 +101,8 @@ services:
     volumes:
       - ./backend/init_schema.sql:/tmp/init_schema.sql:ro
     environment:
-      - SA_PASSWORD=GedPass_2024!
-    command: ["/bin/bash", "-c", "/opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'GedPass_2024!' -No -C -Q \"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'ged_db') CREATE DATABASE ged_db\" && /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P 'GedPass_2024!' -No -C -d ged_db -i /tmp/init_schema.sql && echo 'Schema ready.'"]
+      - SA_PASSWORD=${DB_PASSWORD:-GedPass_2024!}
+    command: ["/bin/bash", "-c", "/opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -No -C -Q \"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'ged_db') CREATE DATABASE ged_db\" && /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -No -C -d ged_db -i /tmp/init_schema.sql && echo 'Schema ready.'"]
     restart: "no"
 
   # ── Redis ─────────────────────────────────────────────────────────────────────
@@ -163,44 +174,60 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      network: host
     container_name: ged-backend
     ports:
-      - "5001:8080"
+      - "${BACKEND_PORT:-5001}:8080"
     environment:
-      - ASPNETCORE_ENVIRONMENT=Development
+      # Application
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ASPNETCORE_URLS=http://+:8080
-      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=ged_db;User Id=sa;Password=GedPass_2024!;TrustServerCertificate=True;
-      - OpenSearch__Url=http://opensearch:9200
-      - RabbitMQ__Host=rabbitmq
-      - RabbitMQ__Port=5672
-      - RabbitMQ__Username=admin
-      - RabbitMQ__Password=admin123
-      - Redis__Enabled=true
-      - Redis__ConnectionString=redis:6379
-      - Redis__SearchCacheTtlSeconds=120
-      - NLP__Enabled=true
-      - NLP__LlmApiEndpoint=http://ollama:11434/api/generate
-      - NLP__EmbedApiEndpoint=http://ollama:11434/api/embed
-      - NLP__Model=llama3.2:1b
-      - NLP__EmbedModel=nomic-embed-text
+      # Database
+      - ConnectionStrings__DefaultConnection=Server=${DB_SERVER:-sqlserver};Database=${DB_NAME:-ged_db};User Id=${DB_USER:-sa};Password=${DB_PASSWORD:-GedPass_2024!};TrustServerCertificate=${DB_TRUST_CERTIFICATE:-True}
+      # OpenSearch
+      - OpenSearch__Url=http://${OPENSEARCH_HOST:-opensearch}:${OPENSEARCH_PORT:-9200}
+      - OpenSearch__Username=${OPENSEARCH_USER:-admin}
+      - OpenSearch__Password=${OPENSEARCH_PASSWORD:-GedOpensearch2024!}
+      - OpenSearch__SecurityEnabled=${OPENSEARCH_SECURITY_ENABLED:-false}
+      # RabbitMQ
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Port=${RABBITMQ_PORT:-5672}
+      - RabbitMQ__Username=${RABBITMQ_USER:-admin}
+      - RabbitMQ__Password=${RABBITMQ_PASSWORD:-admin123}
+      # Redis
+      - Redis__Enabled=${REDIS_ENABLED:-true}
+      - Redis__ConnectionString=${REDIS_HOST:-redis}:${REDIS_PORT:-6379}${REDIS_PASSWORD:+,password=${REDIS_PASSWORD}}
+      - Redis__SearchCacheTtlSeconds=${CACHE_SEARCH_TTL_SECONDS:-120}
+      # NLP / LLM
+      - NLP__Enabled=${NLP_ENABLED:-true}
+      - NLP__LlmApiEndpoint=${NLP_LLM_API_ENDPOINT:-http://ollama:11434/api/generate}
+      - NLP__EmbedApiEndpoint=${NLP_EMBED_API_ENDPOINT:-http://ollama:11434/api/embed}
+      - NLP__Model=${NLP_MODEL:-llama3.2:1b}
+      - NLP__EmbedModel=${NLP_EMBED_MODEL:-nomic-embed-text}
+      # Embeddings
       - Embeddings__Enabled=true
-      - Embeddings__Model=nomic-embed-text
+      - Embeddings__Model=${NLP_EMBED_MODEL:-nomic-embed-text}
       - Embeddings__Dimensions=768
-      - Tika__Enabled=true
-      - Tika__Url=http://tika:9998
-      - OCR__TessDataPath=/usr/share/tesseract-ocr/5/tessdata
-      - OCR__OcrmypdfPath=ocrmypdf
-      - OCR__TesseractPath=tesseract
-      - Reindex__Enabled=true
-      - Reindex__BatchSize=50
-      - Reindex__StaleCheckIntervalMinutes=5
-      - Reindex__MissingCheckIntervalMinutes=15
-      - Reindex__FailedRetryIntervalMinutes=30
-      - RAG__TopK=5
-      - RAG__MaxContextChars=2000
-      - Auth__UsersFilePath=/var/lib/ged/users.json
-      - Document__MaxUploadSizeMB=100
+      # Tika
+      - Tika__Enabled=${TIKA_ENABLED:-true}
+      - Tika__Url=${TIKA_URL:-http://tika:9998}
+      # OCR
+      - OCR__TessDataPath=${OCR_TESSDATA_PATH:-/usr/share/tesseract-ocr/5/tessdata}
+      - OCR__OcrmypdfPath=${OCR_OCRMYPDF_PATH:-ocrmypdf}
+      - OCR__TesseractPath=${OCR_TESSERACT_PATH:-tesseract}
+      # Reindex
+      - Reindex__Enabled=${REINDEX_ENABLED:-true}
+      - Reindex__BatchSize=${REINDEX_BATCH_SIZE:-50}
+      - Reindex__StaleCheckIntervalMinutes=${REINDEX_STALE_CHECK_INTERVAL_MINUTES:-5}
+      - Reindex__MissingCheckIntervalMinutes=${REINDEX_MISSING_CHECK_INTERVAL_MINUTES:-15}
+      - Reindex__FailedRetryIntervalMinutes=${REINDEX_FAILED_RETRY_INTERVAL_MINUTES:-30}
+      # RAG
+      - RAG__TopK=${RAG_TOP_K:-5}
+      - RAG__MaxContextChars=${RAG_MAX_CONTEXT_CHARS:-6000}
+      # Auth
+      - Auth__UsersFilePath=${AUTH_USERS_FILE_PATH:-/var/lib/ged/users.json}
+      - Auth__SessionDurationHours=${AUTH_SESSION_DURATION_HOURS:-8}
+      # Document
+      - Document__MaxUploadSizeMB=${DOCUMENT_MAX_UPLOAD_SIZE_MB:-100}
     depends_on:
       opensearch:
         condition: service_healthy
@@ -219,8 +246,16 @@ services:
     volumes:
       - ged-documents:/var/lib/ged/documents
       - ged-users:/var/lib/ged
-      - ./backend/logs:/app/logs
+      - backend-logs:/app/logs
     restart: unless-stopped
+    mem_limit: 1.5g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ── Frontend (Vue + nginx) ────────────────────────────────────────────────────
   frontend:
@@ -257,6 +292,8 @@ volumes:
   ged-users:
     driver: local
   ollama-data:
+    driver: local
+  backend-logs:
     driver: local
 
 # ── Networks ──────────────────────────────────────────────────────────────────

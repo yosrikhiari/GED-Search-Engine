@@ -773,26 +773,27 @@ public class OpenSearchService : ISearchService
         {
             _logger.LogInformation(
                 "⏭️  Skipping year date filter — other keywords present ({KW})",
-                string.Join(", ", nlQuery.Keywords));
+                string.Join(", ", nlQuery.Keywords ?? new List<string>()));
         }
 
-        _logger.LogInformation("🔍 NLP ExtractedFilters: {Filters}", string.Join(", ", nlQuery.ExtractedFilters?.Select(kv => $"{kv.Key}={kv.Value}") ?? Array.Empty<string>()));
-        
         // File type filter
-        if (nlQuery.ExtractedFilters.TryGetValue("filetype", out var fileType))
+        var extractedFilters = nlQuery.ExtractedFilters ?? new Dictionary<string, string>();
+        _logger.LogInformation("🔍 NLP ExtractedFilters: {Filters}", string.Join(", ", extractedFilters.Select(kv => $"{kv.Key}={kv.Value}")));
+        if (extractedFilters.TryGetValue("filetype", out var fileType))
         {
-            bool hasNonFiletypeKeywords = nlQuery.Keywords
+            var keywords = nlQuery.Keywords ?? new List<string>();
+            bool hasNonFiletypeKeywords = keywords
                 .Any(k => !new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
                     .Contains(k.ToLower()));
 
-            bool hasFiletypeKeyword = nlQuery.Keywords
+            bool hasFiletypeKeyword = keywords
                 .Any(k => new[] { "pdf","doc","docx","xls","xlsx","jpg","jpeg","png","txt" }
                     .Contains(k.ToLower()));
 
-            if (!hasNonFiletypeKeywords && hasFiletypeKeyword && nlQuery.Keywords.Count == 1)
+            if (!hasNonFiletypeKeywords && hasFiletypeKeyword && keywords.Count == 1)
             {
                 // Only keyword is file type — don't filter, search instead
-                _logger.LogInformation("⏭️  Skipping filetype filter — only keyword is filetype '{KW}', will search instead", string.Join(", ", nlQuery.Keywords));
+                _logger.LogInformation("⏭️  Skipping filetype filter — only keyword is filetype '{KW}', will search instead", string.Join(", ", keywords));
             }
             else if (!hasNonFiletypeKeywords)
             {
@@ -1303,6 +1304,16 @@ public class OpenSearchService : ISearchService
     {
         try
         {
+            var updateResponse = await _client.UpdateAsync<DocumentIndexModel, object>(
+                documentId.ToString(),
+                u => u.Index(_documentIndex).Doc(new { Status = "Deleted" }),
+                cancellationToken);
+
+            if (!updateResponse.IsValid)
+            {
+                _logger.LogWarning("Failed to update document {DocId} status to Deleted in OpenSearch, proceeding with delete", documentId);
+            }
+
             // Delete document from main index
             var response = await _client.DeleteAsync<DocumentIndexModel>(
                 documentId.ToString(), d => d.Index(_documentIndex), cancellationToken);
@@ -1310,7 +1321,10 @@ public class OpenSearchService : ISearchService
             // Also delete all chunks for this document
             await DeleteChunksForDocumentAsync(documentId, cancellationToken);
 
-            return response.IsValid;
+            // Refresh the index to ensure immediate visibility of the deletion in search
+            await _client.Indices.RefreshAsync(_documentIndex, r => r, cancellationToken);
+
+            return response.IsValid || updateResponse.IsValid;
         }
         catch (Exception ex)
         {

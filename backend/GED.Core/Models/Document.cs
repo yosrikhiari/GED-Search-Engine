@@ -97,3 +97,21 @@ public enum MetadataType
     Boolean,
     Json
 }
+
+/// <summary>
+/// Request model for bulk category update operations.
+/// </summary>
+public class BulkCategoryUpdateRequest
+{
+    public List<Guid> DocumentIds { get; set; } = new();
+    public string Category { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Request model for bulk export operations.
+/// </summary>
+public class BulkExportRequest
+{
+    public List<Guid> DocumentIds { get; set; } = new();
+    public string Format { get; set; } = "csv"; // csv, excel
+}

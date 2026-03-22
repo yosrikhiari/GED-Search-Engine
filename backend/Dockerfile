@@ -17,8 +17,8 @@ RUN dotnet publish "GED.API/GED.API.csproj" \
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
-WORKDIR /app
 
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ocrmypdf \
     tesseract-ocr \
@@ -26,15 +26,36 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-fra \
     tesseract-ocr-ara \
     poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Create document storage directory
+# Create non-root user for security
+RUN groupadd --gid 1000 gedgroup && \
+    useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home geduser
+
+# Create application directories with proper permissions
 RUN mkdir -p /var/lib/ged/documents \
- && mkdir -p /var/lib/ged
+             /var/lib/ged \
+             /app/logs \
+             && chown -R geduser:gedgroup /var/lib/ged \
+             && chown -R geduser:gedgroup /app/logs
 
-COPY --from=build /app/publish .
+USER geduser
+
+WORKDIR /app
+
+COPY --from=build --chown=geduser:gedgroup /app/publish .
+
+# Set environment variables
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 
 # Expose API port
 EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health/live || exit 1
 
 ENTRYPOINT ["dotnet", "GED.API.dll"]

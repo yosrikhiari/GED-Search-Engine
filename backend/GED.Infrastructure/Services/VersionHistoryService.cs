@@ -138,11 +138,11 @@ public class VersionHistoryService : IVersionHistoryService
         }
 
         // Restore from version
-        current.Title = version.Title;
-        current.Description = version.Description;
-        current.Category = version.Category;
-        current.FileName = version.FileName;
-        current.ContentType = version.ContentType;
+        current.Title = version.Title ?? current.Title;
+        current.Description = version.Description ?? current.Description;
+        current.Category = version.Category ?? current.Category;
+        current.FileName = version.FileName ?? current.FileName;
+        current.ContentType = version.ContentType ?? current.ContentType;
         current.ModifiedBy = restoredBy;
         current.ModifiedAt = DateTime.UtcNow;
         current.Version = version.VersionNumber;
