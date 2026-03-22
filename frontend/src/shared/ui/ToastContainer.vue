@@ -1,5 +1,4 @@
 <script setup>
-
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-vue-next'
 import { useUiStore } from '@/stores/ui.js'
 
@@ -25,6 +24,13 @@ const iconClasses = {
   warning: 'text-amber-500',
   info: 'text-blue-500'
 }
+
+function getToastMessage(toast) {
+  if (toast.title && toast.message) {
+    return { title: toast.title, message: toast.message }
+  }
+  return { title: null, message: toast.message || toast }
+}
 </script>
 
 <template>
@@ -40,18 +46,26 @@ const iconClasses = {
           v-for="toast in uiStore.toasts"
           :key="toast.id"
           :class="[
-            'flex items-start gap-3 p-4 rounded-lg border shadow-lg pointer-events-auto max-w-sm',
-            colorClasses[toast.type]
+            'flex items-start gap-3 p-4 rounded-lg border shadow-lg pointer-events-auto max-w-md',
+            colorClasses[toast.type] || colorClasses.info
           ]"
         >
           <component
-            :is="icons[toast.type]"
-            :class="['w-5 h-5 flex-shrink-0 mt-0.5', iconClasses[toast.type]]"
+            :is="icons[toast.type] || icons.info"
+            :class="['w-5 h-5 flex-shrink-0 mt-0.5', iconClasses[toast.type] || iconClasses.info]"
           />
           
           <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium">
-              {{ toast.message }}
+            <p v-if="getToastMessage(toast).title" class="text-sm font-semibold">
+              {{ getToastMessage(toast).title }}
+            </p>
+            <p 
+              :class="[
+                'text-sm',
+                getToastMessage(toast).title ? 'mt-0.5 opacity-90' : ''
+              ]"
+            >
+              {{ getToastMessage(toast).message }}
             </p>
             <button
               v-if="toast.action"

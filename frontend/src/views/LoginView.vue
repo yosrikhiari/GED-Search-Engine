@@ -318,9 +318,8 @@ const handleLogin = async () => {
   loading.value = true
   error.value = ''
   try {
-    const response = await auth.login(username.value, password.value)
-    if (response.ok) {
-      const data = await response.json()
+    const data = await auth.login(username.value, password.value)
+    if (data && data.username) {
       localStorage.setItem('ged_user', JSON.stringify({
         username: data.username,
         fullName: data.fullName,
@@ -328,11 +327,16 @@ const handleLogin = async () => {
       }))
       router.push('/')
     } else {
-      const err = await response.json().catch(() => ({}))
-      error.value = err.error || 'Identifiants incorrects'
+      error.value = 'Réponse invalide du serveur'
     }
   } catch (e) {
-    error.value = 'Impossible de contacter le serveur'
+    if (e.userMessage) {
+      error.value = e.userMessage
+    } else if (e.message && e.message !== 'Failed to fetch') {
+      error.value = e.message
+    } else {
+      error.value = 'Impossible de contacter le serveur'
+    }
   } finally {
     loading.value = false
   }

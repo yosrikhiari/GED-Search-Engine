@@ -435,11 +435,15 @@ public async Task<ActionResult<Document>> UploadDocument(
             var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
             
             var marked = await _documentService.MarkDocumentAsDeletedAsync(id);
-            if (!marked) return NotFound();
-
-            await _searchService.DeleteDocumentIndexAsync(id);
+            
+            var searchDeleted = await _searchService.DeleteDocumentIndexAsync(id);
             
             var deleted = await _documentService.DeleteDocumentAsync(id);
+            
+            if (!marked && !searchDeleted)
+            {
+                return NotFound(new { error = "Document not found", message = "Document does not exist in database or search index" });
+            }
             
             // Audit logging
             _auditService.LogDocumentDelete(id, username, "User deleted document");

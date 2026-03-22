@@ -86,3 +86,5 @@ docker-compose.tests.yml
 TESTING.md
 README.md
 backend/Dockerfile.tests
+Docs/DEPLOYMENT.md
+Docs/REVIEWS.md

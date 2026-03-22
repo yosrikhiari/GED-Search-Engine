@@ -762,23 +762,16 @@
                         class="tag-more"
                       >+{{ doc.tags.length - 5 }}</span>
                     </div>
-                    <!-- Auto-summary -->
+                    <!-- Progress bar for processing documents -->
                     <div
-                      v-if="doc.summary || doc.description"
-                      class="doc-summary-row"
+                      v-if="docOcrStatuses[doc.id] && doc.status !== 'Indexed' && doc.status !== 'Failed'"
+                      class="ocr-progress-bar"
                     >
-                      <button
-                        class="summary-toggle-btn"
-                        @click.stop="toggleSummary(doc.id)"
-                      >
-                        {{ expandedSummaries.has(doc.id) ? '▲ Masquer' : '▼ Résumé automatique' }}
-                      </button>
                       <div
-                        v-if="expandedSummaries.has(doc.id)"
-                        class="doc-summary-text"
-                      >
-                        {{ doc.summary || doc.description }}
-                      </div>
+                        class="ocr-progress-fill"
+                        :style="`width: ${getOcrProgress(docOcrStatuses[doc.id]?.status)}%`"
+                      ></div>
+                      <span class="ocr-progress-label">{{ docOcrStatuses[doc.id]?.stageLabel || getOcrStatusLabel(docOcrStatuses[doc.id]?.status) || doc.status }}</span>
                     </div>
                   </div>
                 </div>
@@ -2741,7 +2734,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AccessManagementModal from '../components/AccessManagementModal.vue'
 import TaxonomyManager from '../components/TaxonomyManager.vue'
@@ -2804,6 +2797,8 @@ const searchLoading  = ref(false)
 const searched       = ref(false)
 const searchResults  = ref(null)
 const totalResults   = ref(null)
+const docOcrStatuses = ref({})  // Track OCR status for each document in list
+const docListPollInterval = ref(null)
 const filters        = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '', ocrStatus: '', service: '' })
 const quickSearches  = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents', 'rapports']
 const ragMode       = ref(false)   // toggle: false = normal search, true = RAG
@@ -3172,6 +3167,13 @@ const searchDocuments = async () => {
     searchResults.value = data
     totalResults.value  = data.totalResults
 
+    // ── Fetch OCR status for each document ─────────────────────────────────────
+    if (data.documents?.length) {
+      for (const doc of data.documents) {
+        fetchDocOcrStatus(doc.id)
+      }
+    }
+
     // ── NLP banner ────────────────────────────────────────────────────────
     if (data.nlpSummary) {
       nlpInterpretation.value = data.nlpSummary
@@ -3345,6 +3347,71 @@ const startOcrPolling = (docId) => {
       if (d.status === OcrStatus.Failed || n >= 50) stopOcrPolling()
     } catch { if (n >= 50) stopOcrPolling() }
   }, 4000)
+}
+
+const getOcrStatusLabel = (status) => {
+  const labels = { 
+    0: 'En attente', 1: 'Traitement OCR', 2: 'Texte extrait', 3: 'Analyse IA', 4: 'Terminé', 5: 'Échec',
+    'Pending': 'En attente', 'Processing': 'Traitement OCR', 'TextExtracted': 'Texte extrait', 
+    'LlmCleaning': 'Analyse IA', 'Completed': 'Terminé', 'Failed': 'Échec'
+  }
+  return labels[status] || 'Inconnu'
+}
+
+const getOcrProgress = (status) => {
+  if (!status) return 0
+  const progress = { 
+    0: 0, 1: 20, 2: 40, 3: 60, 4: 100, 5: 100,
+    'Pending': 10, 'Processing': 25, 'TextExtracted': 50, 'LlmCleaning': 75, 'Completed': 100, 'Failed': 100
+  }
+  return progress[status] ?? 0
+}
+
+const fetchDocOcrStatus = async (docId) => {
+  try {
+    const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeader() })
+    if (res.ok) {
+      const data = await res.json()
+      docOcrStatuses.value[docId] = data
+      return data
+    }
+  } catch {}
+  return null
+}
+
+const startDocListPolling = () => {
+  if (docListPollInterval.value) return
+  docListPollInterval.value = setInterval(async () => {
+    if (!searchResults.value?.documents?.length) return
+    let hasUpdates = false
+    for (const doc of searchResults.value.documents) {
+      // Check main document status - refresh when Processing/Pending becomes Indexed
+      if (doc.status === 'Processing' || doc.status === 'Pending') {
+        // Also check OCR status for additional info
+        if (!docOcrStatuses.value[doc.id] || docOcrStatuses.value[doc.id].status !== 'Completed') {
+          await fetchDocOcrStatus(doc.id)
+        }
+        // Fetch fresh doc to check if status changed
+        try {
+          const res = await fetch(`/api/documents/${doc.id}`, { headers: authHeader() })
+          if (res.ok) {
+            const freshDoc = await res.json()
+            if (freshDoc.status === 'Indexed' || freshDoc.status === 'Failed') {
+              hasUpdates = true
+            }
+          }
+        } catch {}
+      }
+    }
+    if (hasUpdates && searched.value) {
+      docOcrStatuses.value = {}  // Clear cached OCR statuses
+      searchDocuments()
+    }
+  }, 5000)
+}
+
+const stopDocListPolling = () => {
+  if (docListPollInterval.value) { clearInterval(docListPollInterval.value); docListPollInterval.value = null }
 }
 
 const populateEditData = (doc) => {
@@ -3810,6 +3877,12 @@ onMounted(async () => {
   await loadGroups()
   await loadRights()
   window.addEventListener('keydown', handleKeydown)
+  startDocListPolling()
+})
+
+onUnmounted(() => {
+  stopDocListPolling()
+  stopOcrPolling()
 })
 </script>
 
@@ -4203,6 +4276,11 @@ onMounted(async () => {
 .summary-toggle-btn { background:none; border:none; color:#2563eb; font-size:.74rem; font-weight:600; cursor:pointer; padding:0; }
 .summary-toggle-btn:hover { text-decoration:underline; }
 .doc-summary-text { margin-top:.4rem; font-size:.78rem; color:#374151; line-height:1.6; background:#f8fafc; border-left:3px solid #3b82f6; padding:.45rem .65rem; border-radius:0 6px 6px 0; }
+.ocr-progress-bar { height:24px; background:linear-gradient(135deg,#f3f4f6,#e5e7eb); border-radius:12px; position:relative; overflow:hidden; margin:8px 0; box-shadow:inset 0 2px 4px rgba(0,0,0,0.06); border:1px solid #e5e7eb; }
+.ocr-progress-fill { height:100%; background:linear-gradient(90deg,#2563eb,#3b82f6,#60a5fa); border-radius:12px; transition:width .5s cubic-bezier(0.4,0,0.2,1); position:relative; }
+.ocr-progress-fill::after { content:''; position:absolute; top:0; left:0; right:0; bottom:0; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent); animation:shimmer 2s infinite; }
+@keyframes shimmer { 0% { transform:translateX(-100%); } 100% { transform:translateX(100%); } }
+.ocr-progress-label { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:.7rem; font-weight:600; color:#1e40af; letter-spacing:0.3px; text-shadow:0 1px 2px rgba(255,255,255,0.9); }
 
 /* ── Filters reset ── */
 .filters-reset-row { margin-top:.75rem; display:flex; justify-content:flex-end; }

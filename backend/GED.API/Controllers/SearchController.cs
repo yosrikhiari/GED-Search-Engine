@@ -21,7 +21,7 @@ namespace GED.API.Controllers;
 [Authorize]
 public class SearchController : ControllerBase
 {
-    private readonly ISearchService             _searchService;
+    private readonly ISearchService              _searchService;
     private readonly INlpService                _nlpService;
     private readonly AuthService                _authService;
     private readonly ILogger<SearchController>  _logger;
@@ -33,9 +33,9 @@ public class SearchController : ControllerBase
         ILogger<SearchController> logger)
     {
         _searchService = searchService;
-        _nlpService    = nlpService;
-        _authService   = authService;
-        _logger        = logger;
+        _nlpService   = nlpService;
+        _authService  = authService;
+        _logger       = logger;
     }
 
     // ── POST /api/search/query ────────────────────────────────────────────────
@@ -51,10 +51,6 @@ public class SearchController : ControllerBase
         if (request == null)
             return BadRequest(new { error = "Request body is required." });
 
-        // Populate user context from cookie claims
-        // Admin → no ACL filter injected (sees everything).
-        // Others → OpenSearchService will add a filter based on UserId /
-        //          AllowedCategories so only permitted documents are returned.
         var username = User.FindFirst(ClaimTypes.Name)?.Value;
         var role     = User.FindFirst(ClaimTypes.Role)?.Value;
 
@@ -127,7 +123,7 @@ public class SearchController : ControllerBase
 
     /// <summary>
     /// Manually triggers a full re-indexing of all documents.
-    /// Admin only. This is an async operation.
+    /// Admin only. Uses DocumentMapper for clean entity-to-domain mapping.
     /// </summary>
     [HttpPost("reindex")]
     [Authorize(Roles = "Admin")]
@@ -138,10 +134,10 @@ public class SearchController : ControllerBase
             _logger.LogInformation("Manual reindex triggered by admin");
 
             using var scope = HttpContext.RequestServices.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<GED.Infrastructure.Data.GedDbContext>();
+            var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+            var mapper = scope.ServiceProvider.GetRequiredService<IDocumentMapper>();
 
-            // Use raw SQL to bypass EF Core's JSON conversion issues
             var rawDocs = await db.Database
                 .SqlQueryRaw<DocumentRow>(@"
                     SELECT id, title, description, file_name AS FileName, file_path AS FilePath, 
@@ -159,31 +155,12 @@ public class SearchController : ControllerBase
 
             var domainDocs = new List<Document>();
 
-            foreach (var e in rawDocs)
+            foreach (var row in rawDocs)
             {
-                var tags = await GetTagsSafelyAsync(db, e.Id);
-                var metadata = await GetMetadataSafelyAsync(db, e.Id);
-
-                var doc = new Document
-                {
-                    Id            = e.Id,
-                    Title         = e.Title,
-                    Description   = e.Description,
-                    FileName      = e.FileName,
-                    FilePath      = e.FilePath,
-                    ContentType   = e.ContentType,
-                    FileSize      = e.FileSize,
-                    CreatedAt     = e.CreatedAt,
-                    DocumentDate  = e.DocumentDate,
-                    ModifiedAt    = e.ModifiedAt,
-                    Status        = Enum.TryParse<DocumentStatus>(e.Status, out var s) ? s : DocumentStatus.Indexed,
-                    OcrText       = e.OcrText,
-                    ExtractedText = e.ExtractedText,
-                    Tags          = tags,
-                    Category      = e.Category,
-                    Metadata      = metadata,
-                    IsOcrProcessed = e.IsOcrProcessed
-                };
+                var tags = DocumentMapperExtensions.DeserializeTagsOrDefault(null);
+                var metadata = DocumentMapperExtensions.DeserializeMetadataOrDefault(null);
+                
+                var doc = mapper.ToDomainFromRow(row, tags, metadata);
                 domainDocs.Add(doc);
             }
 
@@ -203,56 +180,5 @@ public class SearchController : ControllerBase
             _logger.LogError(ex, "Error during manual reindex");
             return StatusCode(500, new { error = "Reindex failed", message = ex.Message });
         }
-    }
-
-    private async Task<List<string>> GetTagsSafelyAsync(GED.Infrastructure.Data.GedDbContext db, Guid docId)
-    {
-        try
-        {
-            var tagsStr = await db.Database
-                .SqlQueryRaw<string>("SELECT tags FROM documents WHERE id = {0}", docId)
-                .FirstOrDefaultAsync();
-            if (string.IsNullOrEmpty(tagsStr)) return new List<string>();
-            return System.Text.Json.JsonSerializer.Deserialize<List<string>>(tagsStr) ?? new List<string>();
-        }
-        catch
-        {
-            return new List<string>();
-        }
-    }
-
-    private async Task<Dictionary<string, object>> GetMetadataSafelyAsync(GED.Infrastructure.Data.GedDbContext db, Guid docId)
-    {
-        try
-        {
-            var metaStr = await db.Database
-                .SqlQueryRaw<string>("SELECT metadata FROM documents WHERE id = {0}", docId)
-                .FirstOrDefaultAsync();
-            if (string.IsNullOrEmpty(metaStr)) return new Dictionary<string, object>();
-            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(metaStr) ?? new Dictionary<string, object>();
-        }
-        catch
-        {
-            return new Dictionary<string, object>();
-        }
-    }
-
-    private class DocumentRow
-    {
-        public Guid Id { get; set; }
-        public string Title { get; set; } = "";
-        public string? Description { get; set; }
-        public string FileName { get; set; } = "";
-        public string FilePath { get; set; } = "";
-        public string ContentType { get; set; } = "";
-        public long FileSize { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public DateTime? DocumentDate { get; set; }
-        public DateTime? ModifiedAt { get; set; }
-        public string Status { get; set; } = "";
-        public bool IsOcrProcessed { get; set; }
-        public string? OcrText { get; set; }
-        public string? ExtractedText { get; set; }
-        public string? Category { get; set; }
     }
 }
