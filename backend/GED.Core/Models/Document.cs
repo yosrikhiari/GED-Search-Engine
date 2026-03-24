@@ -42,6 +42,11 @@ public class Document
     
     public bool IsOcrProcessed { get; set; }
     
+    /// <summary>
+    /// True when OCR pipeline is fully complete (Tesseract + LLM cleaning + tags generated)
+    /// </summary>
+    public bool IsFullyProcessed { get; set; }
+    
     public string? OcrText { get; set; }
     
     public string? ExtractedText { get; set; }

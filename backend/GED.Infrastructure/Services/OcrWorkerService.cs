@@ -650,11 +650,21 @@ public class OcrWorkerService : BackgroundService
 
                 if (enrichResult != null)
                 {
-                    // Merge tags (keep existing + add new)
-                    var mergedTags = new HashSet<string>(
-                        document.Tags ?? new List<string>(),
-                        StringComparer.OrdinalIgnoreCase);
+                    // Merge tags: default tags (category, extension) + enriched tags
+                    var mergedTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+                    // Add default tags: category
+                    if (!string.IsNullOrWhiteSpace(document.Category))
+                        mergedTags.Add(document.Category.ToLower());
+
+                    // Add default tags: file extension
+                    if (!string.IsNullOrWhiteSpace(document.FileName))
+                    {
+                        var ext = Path.GetExtension(document.FileName).TrimStart('.').ToLower();
+                        if (!string.IsNullOrWhiteSpace(ext)) mergedTags.Add(ext);
+                    }
+
+                    // Add enriched tags from LLM
                     foreach (var tag in enrichResult.Tags)
                         mergedTags.Add(tag);
 
@@ -770,13 +780,24 @@ public class OcrWorkerService : BackgroundService
 
     /// <summary>
     /// Applies keyword-based tag fallback when LLM enrichment is unavailable.
+    /// Also adds default tags (category, file extension) if not already present.
     /// </summary>
     private static void ApplyKeywordTagFallback(DocumentEntity document, string text)
     {
-        var tags = new HashSet<string>(
-            document.Tags ?? new List<string>(),
-            StringComparer.OrdinalIgnoreCase);
+        var tags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Add default tags: category
+        if (!string.IsNullOrWhiteSpace(document.Category))
+            tags.Add(document.Category.ToLower());
+
+        // Add default tags: file extension
+        if (!string.IsNullOrWhiteSpace(document.FileName))
+        {
+            var ext = Path.GetExtension(document.FileName).TrimStart('.').ToLower();
+            if (!string.IsNullOrWhiteSpace(ext)) tags.Add(ext);
+        }
+
+        // Add keywords from text
         var keywords = new[]
         {
             "invoice", "contract", "agreement", "report", "proposal",
@@ -841,6 +862,10 @@ public class OcrWorkerService : BackgroundService
     {
         try
         {
+            // Calculate IsFullyProcessed: true only when OCR is done AND stage is "completed"
+            var ocrStage = document.Metadata?.GetValueOrDefault("ocr_stage")?.ToString();
+            var isFullyProcessed = document.IsOcrProcessed && ocrStage == "completed";
+            
             var domainDoc = new GED.Core.Models.Document
             {
                 Id             = document.Id,
@@ -859,7 +884,8 @@ public class OcrWorkerService : BackgroundService
                 Tags           = document.Tags,
                 Category       = document.Category,
                 Metadata       = document.Metadata,
-                IsOcrProcessed = document.IsOcrProcessed
+                IsOcrProcessed = document.IsOcrProcessed,
+                IsFullyProcessed = isFullyProcessed
             };
 
             await search.UpdateDocumentIndexAsync(domainDoc, ct);

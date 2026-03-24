@@ -736,27 +736,28 @@
                         class="status-dot"
                         :class="statusClass(doc.status)"
                       >{{ doc.status }}</span>
-                      <!-- OCR badge - show only when we have OCR status info -->
-                      <!-- Show completed only after tags are updated (full OCR pipeline done) -->
-                      <template v-if="docOcrStatuses[doc.id]">
+                      <!-- OCR Badge - shows if OCR text has been extracted -->
+                      <template v-if="docPipelineStatuses[doc.id] && docPipelineStatuses[doc.id].status">
+                        <!-- Check for both number 4 and string 'Completed' -->
                         <span
-                          v-if="docTagsUpdated[doc.id] || docOcrStatuses[doc.id].status === 4 || docOcrStatuses[doc.id].status === 'Completed'"
+                          v-if="(docPipelineStatuses[doc.id].status === 4 || docPipelineStatuses[doc.id].status === 'Completed' || docPipelineStatuses[doc.id].status === 'Complete') && docPipelineStatuses[doc.id].extractedText"
                           class="ocr-badge ocr-badge-done"
-                          title="OCR complet (Tesseract + IA)"
+                          title="OCR texte extrait"
                         >🔬 OCR</span>
                         <span
-                          v-else-if="docOcrStatuses[doc.id].status === 5 || docOcrStatuses[doc.id].status === 'Failed'"
+                          v-else-if="docPipelineStatuses[doc.id].status === 5 || docPipelineStatuses[doc.id].status === 'Failed'"
                           class="ocr-badge ocr-badge-fail"
                           title="OCR échoué"
                         >⚠️ OCR</span>
                         <span
                           v-else
                           class="ocr-badge ocr-badge-pending"
-                          :title="docOcrStatuses[doc.id].stageLabel || 'OCR en cours'"
+                          :title="`OCR: ${docPipelineStatuses[doc.id].stageLabel || 'En cours'}`"
                         >⏳ OCR</span>
                       </template>
+                      <!-- Fallback: check both isFullyProcessed and docTagsUpdated -->
                       <span
-                        v-else-if="doc.isFullyProcessed"
+                        v-else-if="docTagsUpdated[doc.id] && doc.isFullyProcessed"
                         class="ocr-badge ocr-badge-done"
                         title="OCR complet"
                       >🔬 OCR</span>
@@ -792,14 +793,14 @@
                         class="tag-more"
                       >+{{ doc.tags.length - 5 }}</span>
                     </div>
-                    <!-- OCR status indicator (replaces progress bar) -->
+                    <!-- Pipeline status indicator (OCR + Tagging + Indexing) -->
                     <div
-                      v-if="docOcrStatuses[doc.id]"
-                      class="ocr-status-indicator"
-                      :class="getOcrStatusClass(docOcrStatuses[doc.id]?.status)"
+                      v-if="docPipelineStatuses[doc.id]"
+                      class="pipeline-status-indicator"
+                      :class="getPipelineDisplay(doc.id).class"
                     >
-                      <span class="ocr-status-dot"></span>
-                      <span class="ocr-status-text">{{ docOcrStatuses[doc.id]?.stageLabel || getOcrStatusLabel(docOcrStatuses[doc.id]?.status) || 'En attente' }}</span>
+                      <span class="pipeline-status-dot"></span>
+                      <span class="pipeline-status-text">{{ getPipelineDisplay(doc.id).text }}</span>
                     </div>
                   </div>
                 </div>
@@ -2825,8 +2826,8 @@ const searchLoading  = ref(false)
 const searched       = ref(false)
 const searchResults  = ref(null)
 const totalResults   = ref(null)
-const docOcrStatuses = ref({})  // Track OCR status for each document in list
-const docTagsUpdated = ref({})  // Track which documents have had tags updated (OCR fully complete)
+const docPipelineStatuses = ref({})  // Track pipeline status (OCR + Tagging + Indexing) for each document
+const docTagsUpdated = ref({})  // Track which documents have completed full pipeline (tags updated = done)
 const docListPollInterval = ref(null)
 const filters        = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '', ocrStatus: '', service: '' })
 const quickSearches  = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents', 'rapports']
@@ -3198,19 +3199,24 @@ const searchDocuments = async () => {
 
     // ── Fetch OCR status for each document ─────────────────────────────────────
     if (data.documents?.length) {
-      console.log('[Search] Fetching OCR status for', data.documents.length, 'documents')
+      console.log('[Search] Fetching pipeline status for', data.documents.length, 'documents')
       for (const doc of data.documents) {
         fetchDocOcrStatus(doc.id).then(status => {
-          console.log('[Search] OCR status for', doc.id, ':', status?.status, status?.stageLabel)
+          // Store pipeline status for this document
+          docPipelineStatuses.value[doc.id] = status
+          console.log('[Search] Pipeline status for', doc.id, ':', status?.status, status?.stageLabel, '| tags:', status?.tags?.length || 0, '| textLen:', status?.extractedText?.length || 0)
+          
           // Update isFullyProcessed based on OCR status (status 4 = Completed)
           if (status) {
             doc.isFullyProcessed = status.status === 4
-            // If status is completed and tags exist, mark tags as updated
-            if (status.status === 4 && status.tags && status.tags.length > 0) {
+            // Only mark as complete if tags have been added (full pipeline done)
+            // Tags are added by OcrWorkerService after OCR + enrichment
+            if (status.tags && status.tags.length > 0) {
+              console.log('[Search] Full pipeline COMPLETE - tags added for', doc.id, 'count:', status.tags.length)
               docTagsUpdated.value[doc.id] = true
             }
           }
-          docOcrStatuses.value = { ...docOcrStatuses.value }
+          docPipelineStatuses.value = { ...docPipelineStatuses.value }
         })
       }
     }
@@ -3258,7 +3264,7 @@ const deleteDoc = async (doc) => {
     searchResults.value.totalResults = (searchResults.value.totalResults || 1) - 1
   }
   
-  delete docOcrStatuses.value[docId]
+  delete docPipelineStatuses.value[docId]
   
   const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE', headers: authHeader() })
   if (!res.ok) {
@@ -3353,8 +3359,8 @@ const documentContent    = ref(null)
 const documentLoading    = ref(false)
 const viewerTab          = ref('preview')
 const officeMode         = ref('text')
-const ocrStatus          = ref(null)
-const ocrPollInterval    = ref(null)
+const ocrStatus          = ref(null)  // OCR status for CURRENTLY VIEWED document (in modal)
+const ocrPollInterval    = ref(null)  // Polling for the viewed document's OCR status
 
 // Edit state (admin-only, in viewer)
 const editData    = reactive({ title: '', description: '', category: '', documentDate: '', tagsRaw: '', service: '' })
@@ -3377,7 +3383,29 @@ const onSearchBlur = () => {
   window.setTimeout(() => { showAutocomplete.value = false }, 180)
 }
 
-const OcrStatus     = { Pending:0, Processing:1, TextExtracted:2, LlmCleaning:3, Completed:4, Failed:5 }
+const OcrStatus = { Pending: 0, Processing: 1, TextExtracted: 2, LlmCleaning: 3, Completed: 4, Failed: 5 }
+
+// Pipeline Indicator: shows full pipeline status (En attente → En cours → Terminé)
+const getPipelineDisplay = (docId) => {
+  const status = docPipelineStatuses.value[docId]
+  const fullPipelineDone = docTagsUpdated.value[docId]
+  
+  if (!status) return { text: 'En attente', class: 'status-pending' }
+  if (fullPipelineDone) return { text: 'Terminé', class: 'status-completed' }
+  if (status.status === 5 || status.status === 'Failed') return { text: 'Échec', class: 'status-failed' }
+  
+  // Map OCR stageLabel to French
+  let stageText = status.stageLabel || 'En cours'
+  
+  // Convert English stages to French
+  if (stageText === 'Queued') stageText = 'En attente'
+  else if (stageText === 'Processing') stageText = 'En cours'
+  else if (stageText === 'TextExtracted') stageText = 'Texte extrait'
+  else if (stageText === 'LlmCleaning') stageText = 'Analyse IA'
+  else if (stageText === 'Complete' || stageText === 'Completed') stageText = 'En cours'
+  
+  return { text: stageText, class: 'status-processing' }
+}
 const stopOcrPolling  = () => { if (ocrPollInterval.value) { clearInterval(ocrPollInterval.value); ocrPollInterval.value = null } }
 const startOcrPolling = (docId) => {
   stopOcrPolling(); let n = 0
@@ -3422,18 +3450,18 @@ const getOcrStatusClass = (status) => {
 
 const fetchDocOcrStatus = async (docId) => {
   try {
-    console.log('[OCR Status] Fetching for:', docId)
+    console.log('[Pipeline Status] Fetching for:', docId)
     const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeader() })
     if (res.ok) {
       const data = await res.json()
-      console.log('[OCR Status] Got data for:', docId, data.status, data.stageLabel)
-      docOcrStatuses.value[docId] = data
+      console.log('[Pipeline Status] Got data for:', docId, data.status, data.stageLabel)
+      docPipelineStatuses.value[docId] = data
       return data
     } else {
-      console.log('[OCR Status] Failed response for:', docId, res.status)
+      console.log('[Pipeline Status] Failed response for:', docId, res.status)
     }
   } catch (e) {
-    console.log('[OCR Status] Error for:', docId, e)
+    console.log('[Pipeline Status] Error for:', docId, e)
   }
   return null
 }
@@ -3480,7 +3508,7 @@ const startDocListPolling = () => {
               searchResults.value.totalResults = Math.max(0, (searchResults.value.totalResults || 1) - 1)
             }
           }
-          delete docOcrStatuses.value[doc.id]
+          delete docPipelineStatuses.value[doc.id]
           continue
         }
         
@@ -3493,29 +3521,41 @@ const startDocListPolling = () => {
           doc.isFullyProcessed = wasFullyProcessed
           
           if (oldStatus !== freshDoc.status) {
-            console.log('[Polling] Status changed:', doc.id, oldStatus, '->', freshDoc.status)
+            console.log(`[Doc Status] ${doc.id}: ${oldStatus} -> ${freshDoc.status}`)
             hasUpdates = true
           }
         }
         
         if (ocrRes.ok) {
           const ocrData = await ocrRes.json()
-          const oldTags = docOcrStatuses.value[doc.id]?.tags ? [...docOcrStatuses.value[doc.id].tags] : []
-          docOcrStatuses.value[doc.id] = ocrData
+          const oldTags = docPipelineStatuses.value[doc.id]?.tags ? [...docPipelineStatuses.value[doc.id].tags] : []
+          const oldStatus = docPipelineStatuses.value[doc.id]?.status
+          const oldStageLabel = docPipelineStatuses.value[doc.id]?.stageLabel
+          const wasTagsUpdated = docTagsUpdated.value[doc.id]
+          docPipelineStatuses.value[doc.id] = ocrData
+          
+          // Log pipeline status changes
+          if (oldStatus !== undefined && oldStatus !== ocrData.status) {
+            console.log(`[Pipeline] ${doc.id}: ${oldStageLabel || oldStatus} -> ${ocrData.stageLabel || ocrData.status} (tags: ${ocrData.tags?.length || 0}, textLen: ${ocrData.extractedText?.length || 0})`)
+          }
           
           // Update isFullyProcessed based on OCR status
-          // Status 4 = Completed (full pipeline done)
+          // Status 4 = Completed (OCR done, but full pipeline needs extracted text)
           const isFullyProcessed = ocrData.status === 4
           if (doc.isFullyProcessed !== isFullyProcessed) {
             doc.isFullyProcessed = isFullyProcessed
             hasUpdates = true
           }
           
-          if (JSON.stringify(oldTags) !== JSON.stringify(ocrData.tags || [])) {
-            console.log('[Polling] Tags updated for', doc.id)
+          // Check if tags were added - this is the real pipeline completion marker
+          // Tags are added by OcrWorkerService after OCR + enrichment completes
+          // Compare old tags count vs new tags count
+          const oldTagsCount = oldTags.length
+          const newTagsCount = ocrData.tags?.length || 0
+          if (newTagsCount > 0 && newTagsCount !== oldTagsCount && !docTagsUpdated.value[doc.id]) {
             Object.assign(doc, { tags: ocrData.tags })
-            // Mark tags as updated - OCR is fully complete
             docTagsUpdated.value[doc.id] = true
+            console.log(`[Pipeline] FULLY COMPLETE - ${doc.id}: tags added (was: ${oldTagsCount}, now: ${newTagsCount})`)
             hasUpdates = true
           }
         }
@@ -3525,7 +3565,8 @@ const startDocListPolling = () => {
     }
     
     if (hasUpdates) {
-      docOcrStatuses.value = { ...docOcrStatuses.value }
+      docPipelineStatuses.value = { ...docPipelineStatuses.value }
+      docTagsUpdated.value = { ...docTagsUpdated.value }
     }
   }, 5000)
 }
@@ -4404,17 +4445,15 @@ onUnmounted(() => {
 .ocr-progress-label { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:.65rem; font-weight:600; color:#0c4a6e; letter-spacing:0.2px; }
 
 /* OCR Status Indicator (replaces progress bar) */
-.ocr-status-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin: 4px 0; }
-.ocr-status-dot { width: 6px; height: 6px; border-radius: 50%; }
-.ocr-status-text { text-transform: uppercase; letter-spacing: 0.3px; }
-.ocr-status-indicator.status-pending { background: #f1f5f9; color: #64748b; }
-.ocr-status-indicator.status-pending .ocr-status-dot { background: #94a3b8; }
-.ocr-status-indicator.status-processing { background: #fef3c7; color: #b45309; }
-.ocr-status-indicator.status-processing .ocr-status-dot { background: #f59e0b; animation: pulse 1.5s infinite; }
-.ocr-status-indicator.status-completed { background: #dcfce7; color: #15803d; }
-.ocr-status-indicator.status-completed .ocr-status-dot { background: #22c55e; }
-.ocr-status-indicator.status-failed { background: #fee2e2; color: #dc2626; }
-.ocr-status-indicator.status-failed .ocr-status-dot { background: #ef4444; }
+.pipeline-status-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin: 4px 0; }
+.pipeline-status-indicator.status-pending { background: #f1f5f9; color: #64748b; }
+.pipeline-status-indicator.status-pending .pipeline-status-dot { background: #94a3b8; }
+.pipeline-status-indicator.status-processing { background: #fef3c7; color: #b45309; }
+.pipeline-status-indicator.status-processing .pipeline-status-dot { background: #f59e0b; animation: pulse 1.5s infinite; }
+.pipeline-status-indicator.status-completed { background: #dcfce7; color: #15803d; }
+.pipeline-status-indicator.status-completed .pipeline-status-dot { background: #22c55e; }
+.pipeline-status-indicator.status-failed { background: #fee2e2; color: #dc2626; }
+.pipeline-status-indicator.status-failed .pipeline-status-dot { background: #ef4444; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* ── Filters reset ── */

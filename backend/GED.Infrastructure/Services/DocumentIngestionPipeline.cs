@@ -87,13 +87,13 @@ public class DocumentIngestionPipeline
     /// <param name="DocumentDate">
     ///   Always null here — set later by <see cref="OcrWorkerService"/> asynchronously.
     /// </param>
-    /// <param name="Tags">Generated tags from filename, category, and content.</param>
+    /// <param name="Tags">Always null here — tags generated later by OcrWorkerService after OCR completes.</param>
     /// <param name="Metadata">Additional metadata extracted during processing.</param>
     public record IngestionResult(
         string?                    ExtractedText,
         string?                    Description,
         DateTime?                  DocumentDate,
-        List<string>               Tags,
+        List<string>?              Tags,
         Dictionary<string, object> Metadata
     );
 
@@ -113,6 +113,9 @@ public class DocumentIngestionPipeline
     /// <c>DocumentDate</c> is always null here — it is extracted asynchronously
     /// by <c>OcrWorkerService</c> after OCR/LLM enrichment, so the upload
     /// response is fast.
+    /// 
+    /// Tags are NOT generated here — they are generated later by OcrWorkerService
+    /// after OCR completes, either via LLM enrichment or keyword fallback.
     /// </remarks>
     public async Task<IngestionResult> RunAsync(
         byte[]            fileBytes,
@@ -129,20 +132,19 @@ public class DocumentIngestionPipeline
         // Step 2: Generate description (synchronous, no LLM)
         var description = GenerateDescription(extractedText, fileName);
 
-        // Step 3: Generate tags (synchronous, no LLM)
-        var tags = GenerateTags(fileName, category, extractedText);
+        // Step 3: Tags are NOT generated here anymore
+        // Tags are generated later by OcrWorkerService after OCR completes
 
         // Step 4 (REMOVED): LLM date extraction was here.
         // It blocked the upload for 5–15s. Moved to OcrWorkerService.EnrichAndSaveAsync.
         DateTime? documentDate = null;
 
         _logger.LogInformation(
-            "✅ Ingestion complete for '{FileName}' — text={TextLen}chars, tags={TagCount} (date deferred to OCR worker)",
+            "✅ Ingestion complete for '{FileName}' — text={TextLen}chars (tags deferred to OCR worker)",
             fileName,
-            extractedText?.Length ?? 0,
-            tags.Count);
+            extractedText?.Length ?? 0);
 
-        return new IngestionResult(extractedText, description, documentDate, tags, metadata);
+        return new IngestionResult(extractedText, description, documentDate, null, metadata);
     }
 
     /// <summary>

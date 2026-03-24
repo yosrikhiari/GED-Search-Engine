@@ -1295,7 +1295,7 @@ public class OpenSearchService : ISearchService
             ModifiedAt    = document.ModifiedAt,
             Status         = document.Status.ToString(),
             IsOcrProcessed = document.IsOcrProcessed,
-            IsFullyProcessed = false, // Will be enriched from DB with real-time status
+            IsFullyProcessed = document.IsFullyProcessed, // Use value from domain model if provided
             ExtractedText = document.ExtractedText,
             OcrText       = document.OcrText,
             Tags          = document.Tags,

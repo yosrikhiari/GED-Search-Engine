@@ -300,6 +300,10 @@ public class IndexingWorkerService : BackgroundService
             .Select(a => a.UserId.ToString())
             .ToListAsync(ct);
 
+        // Calculate IsFullyProcessed: true only when OCR is done AND stage is "completed"
+        var ocrStage = entity.Metadata?.GetValueOrDefault("ocr_stage")?.ToString();
+        var isFullyProcessed = entity.IsOcrProcessed && ocrStage == "completed";
+        
         // Map to domain model
         var document = new Document
         {
@@ -320,6 +324,7 @@ public class IndexingWorkerService : BackgroundService
             Category = entity.Category,
             Metadata = entity.Metadata ?? new Dictionary<string, object>(),
             IsOcrProcessed = entity.IsOcrProcessed,
+            IsFullyProcessed = isFullyProcessed,
             CreatedBy = entity.CreatedBy
         };
 

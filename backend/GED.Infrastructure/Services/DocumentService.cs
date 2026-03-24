@@ -237,7 +237,7 @@ public class DocumentService : IDocumentService
                 IsOcrProcessed = !string.IsNullOrWhiteSpace(ingestion.ExtractedText),
                 ExtractedText = ingestion.ExtractedText,
                 Metadata      = mergedMetadata,
-                Tags          = ingestion.Tags ?? GenerateTags(fileName, category, ingestion.ExtractedText),
+                Tags          = null, // Tags added later by OcrWorkerService after OCR completes
                 Category      = category,
                 Version       = 1,
                 DocumentMetadata = BuildMetadataEntities(documentId, mergedMetadata, uploadTime)
