@@ -1,7 +1,2 @@
-export { default as AppSidebar } from './AppSidebar.vue'
 export { default as AppBreadcrumb } from './AppBreadcrumb.vue'
-export { default as CommandPalette } from './CommandPalette.vue'
-export { default as EmptyState } from './EmptyState.vue'
-export { default as DocumentCard } from './DocumentCard.vue'
 export { default as RecentDocumentsWidget } from './RecentDocumentsWidget.vue'
-export { default as TopNav } from './TopNav.vue'

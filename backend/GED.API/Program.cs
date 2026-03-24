@@ -8,7 +8,6 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
-using GED.Infrastructure.Plugins.Samples;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
@@ -308,14 +307,7 @@ builder.Services.AddHttpClient("webhook", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 builder.Services.AddSingleton<IWebhookService, WebhookService>();
-builder.Services.AddSingleton<IOfficeOnlineService, OfficeOnlineService>();
-builder.Services.AddScoped<IVersionHistoryService, VersionHistoryService>();
 builder.Services.AddScoped<DocumentIngestionPipeline>();
-
-// ── Plugin System ──────────────────────────────────────────────────────────────
-builder.Services.AddSingleton<PluginRegistry>();
-builder.Services.AddSingleton<MultilingualOcrCleanerPlugin>();
-builder.Services.AddSingleton<DocumentSummarizerPlugin>();
 
 // ── Health Checks ─────────────────────────────────────────────────────────────
 var sqlConnectionStr = connectionString;
@@ -357,27 +349,6 @@ try
 catch (Exception ex)
 {
     Log.Error(ex, "❌ EF Core migration failed.");
-}
-
-// ── Initialize Plugins ─────────────────────────────────────────────────────────
-try
-{
-    var pluginRegistry = app.Services.GetRequiredService<PluginRegistry>();
-
-    var ocrCleaner = app.Services.GetRequiredService<MultilingualOcrCleanerPlugin>();
-    var summarizer = app.Services.GetRequiredService<DocumentSummarizerPlugin>();
-
-    pluginRegistry.Register(ocrCleaner);
-    pluginRegistry.Register(summarizer);
-
-    await pluginRegistry.InitializeAllAsync();
-
-    Log.Information("📦 Plugin system initialized: {Count} plugins loaded",
-        pluginRegistry.Plugins.Count);
-}
-catch (Exception ex)
-{
-    Log.Error(ex, "❌ Plugin system initialization failed");
 }
 
 // ── OpenSearch index init ─────────────────────────────────────────────────────
