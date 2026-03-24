@@ -292,6 +292,7 @@ builder.Services.AddScoped<TesseractDirectOcrService>(sp =>
     ));
 
 builder.Services.AddScoped<IDocumentService, DocumentService>();
+builder.Services.AddScoped<IDocumentMapper, DocumentMapper>();
 
 // ── Background workers ────────────────────────────────────────────────────────
 builder.Services.AddHostedService(sp => new OcrWorkerService(
@@ -415,6 +416,7 @@ try
                     .Text(t => t.Name(n => n.FileName).Analyzer("simple")
                         .Fields(f => f.Keyword(k => k.Name("keyword"))))
                     .Keyword(k => k.Name(n => n.Status))
+                    .Boolean(b => b.Name(nn => nn.IsOcrProcessed))
                     .Number(n => n.Name(nn => nn.FileSize).Type(NumberType.Long))
                     .Date(d => d.Name(n => n.CreatedAt))
                     .Date(d => d.Name(n => n.DocumentDate))
@@ -456,6 +458,7 @@ try
                 .Keyword(k => k.Name("accessLevel"))
                 .Keyword(k => k.Name("allowedUserIds"))
                 .Keyword(k => k.Name("createdByUserId"))
+                .Boolean(b => b.Name(nn => nn.IsOcrProcessed))
             )
         );
 

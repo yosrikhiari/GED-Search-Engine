@@ -102,6 +102,9 @@ public class DocumentSearchHit
     public Dictionary<string, object>? Metadata { get; set; }
     public string? OcrText { get; set; }
     public string? ExtractedText { get; set; }
+    public string Status { get; set; } = "Indexed";
+    public bool IsOcrProcessed { get; set; }
+    public bool IsFullyProcessed { get; set; }
 }
 
 public class FacetValue

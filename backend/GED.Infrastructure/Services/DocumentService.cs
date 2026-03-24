@@ -479,10 +479,11 @@ public class DocumentService : IDocumentService
         // Add category as tag
         if (!string.IsNullOrWhiteSpace(category)) tags.Add(category.ToLower());
 
-        // Add filename parts as tags
+        // Add filename parts as tags (only alphabetic parts, no numbers)
         foreach (var part in Regex.Split(
                      Path.GetFileNameWithoutExtension(fileName), @"[\s_\-]+")
-                 .Where(p => p.Length > 3).Select(p => p.ToLower()))
+                 .Where(p => p.Length > 3 && !p.Any(char.IsDigit) && !Regex.IsMatch(p, @"^\d+$"))
+                 .Select(p => p.ToLower()))
             tags.Add(part);
 
         // Add file extension as tag

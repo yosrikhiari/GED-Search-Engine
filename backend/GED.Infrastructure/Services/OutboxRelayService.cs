@@ -134,6 +134,7 @@ public class OutboxRelayService : BackgroundService
         {
             try
             {
+                _logger.LogWarning("📤 About to publish outbox message {Id}, type={Type}, payload={Payload}", msg.Id, msg.Type, msg.Payload);
                 await PublishMessageAsync(rabbitMq, msg, ct);
                 msg.ProcessedAt = DateTime.UtcNow;
                 _logger.LogInformation("✅ Outbox message {Id} ({Type}) published", msg.Id, msg.Type);
@@ -170,7 +171,7 @@ public class OutboxRelayService : BackgroundService
     /// <param name="rabbitMq">RabbitMQ service for publishing.</param>
     /// <param name="msg">Outbox message to publish.</param>
     /// <param name="ct">Cancellation token.</param>
-    private static async Task PublishMessageAsync(
+    private async Task PublishMessageAsync(
         RabbitMqService rabbitMq, OutboxMessage msg, CancellationToken ct)
     {
         // Route to appropriate queue based on message type

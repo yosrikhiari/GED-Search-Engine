@@ -716,14 +716,24 @@
                       >{{ doc.category }}</span>
                       <!-- OCR badge -->
                       <span
-                        v-if="doc.isOcrProcessed"
+                        v-if="doc.isFullyProcessed"
                         class="ocr-badge ocr-badge-done"
-                        title="Contenu indexé via OCR"
+                        title="OCR complet (Tesseract + IA)"
                       >🔬 OCR</span>
+                      <span
+                        v-else-if="doc.isOcrProcessed"
+                        class="ocr-badge ocr-badge-pending"
+                        title="OCR en cours (traitement IA en attente)"
+                      >⏳ OCR</span>
                       <span
                         v-else-if="doc.ocrStatus !== undefined && doc.ocrStatus < 4"
                         class="ocr-badge ocr-badge-pending"
                         title="Traitement OCR en cours"
+                      >⏳ OCR</span>
+                      <span
+                        v-else
+                        class="ocr-badge ocr-badge-pending"
+                        title="En attente de traitement"
                       >⏳ OCR</span>
                       <!-- OCR quality indicator -->
                       <span
@@ -1928,7 +1938,7 @@ const startOcrPolling = (docId) => {
       if (d.status === OcrStatus.Completed) {
         stopOcrPolling()
         if (d.extractedText) documentContent.value = d.extractedText
-        currentDocument.value = { ...currentDocument.value, tags: d.tags ?? currentDocument.value.tags, description: d.description ?? currentDocument.value.description, documentDate: d.documentDate ?? currentDocument.value.documentDate }
+        currentDocument.value = { ...currentDocument.value, tags: d.tags ?? currentDocument.value.tags, description: d.description ?? currentDocument.value.description, documentDate: d.documentDate ?? currentDocument.value.documentDate, isFullyProcessed: true }
         suggestionsCache.delete(docId); fetchSuggestions(docId)
         return
       }

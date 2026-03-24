@@ -1,18 +1,6 @@
 -- ============================================================================
--- GED Elise — SQL Server schema
+-- GED Elise — SQL Server schema (Idempotent - safe to run multiple times)
 -- ============================================================================
-
--- Drop existing tables
-IF OBJECT_ID('dbo.document_acls', 'U') IS NOT NULL
-    DROP TABLE dbo.document_acls;
-
-IF OBJECT_ID('dbo.user_group_assignments', 'U') IS NOT NULL
-    DROP TABLE dbo.user_group_assignments;
-
-IF OBJECT_ID('dbo.document_group_members', 'U') IS NOT NULL
-    DROP TABLE dbo.document_group_members;
-
-GO
 
 -- ─── documents ───────────────────────────────────────────────────────────────
 IF OBJECT_ID('dbo.documents', 'U') IS NULL
@@ -246,16 +234,5 @@ END
 
 
 -- ─── EF Migrations history ────────────────────────────────────────────────────
--- EF Core automatically creates this table on first migration run.
--- Pre-creating it here prevents migration history insert failures on fresh databases.
-IF OBJECT_ID('dbo.__EFMigrationsHistory', 'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.__EFMigrationsHistory (
-        MigrationId    NVARCHAR(150)  NOT NULL PRIMARY KEY,
-        ProductVersion NVARCHAR(32)   NOT NULL
-    );
-END
-
-IF NOT EXISTS (SELECT 1 FROM dbo.__EFMigrationsHistory WHERE MigrationId = '20260313114636_InitialCreate')
-    INSERT INTO dbo.__EFMigrationsHistory (MigrationId, ProductVersion)
-    VALUES ('20260313114636_InitialCreate', '8.0.25');
+-- EF Core automatically creates this table and handles migration tracking.
+-- DO NOT manually insert migration records here - let EF manage migrations.

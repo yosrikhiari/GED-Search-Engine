@@ -774,6 +774,92 @@ public async Task<ActionResult<Document>> UploadDocument(
         }
     }
 
+    /// <summary>
+    /// Retry OCR processing for stuck documents
+    /// </summary>
+    [HttpPost("retry-ocr")]
+    public async Task<IActionResult> RetryOcr([FromBody] List<Guid>? documentIds = null)
+    {
+        try
+        {
+            var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+            
+            List<DocumentEntity> documents;
+            
+            if (documentIds != null && documentIds.Any())
+            {
+                documents = await _db.Documents
+                    .Where(d => documentIds.Contains(d.Id))
+                    .ToListAsync();
+            }
+            else
+            {
+                var needsEnrichment = await _db.Documents
+                    .Where(d => d.IsOcrProcessed && 
+                                d.ExtractedText != null && 
+                                d.ExtractedText.Length >= 100 &&
+                                (d.Metadata == null || !d.Metadata.ContainsKey("extracted_date")))
+                    .Take(20)
+                    .ToListAsync();
+
+                var allDocs = await _db.Documents
+                    .Where(d => !d.IsOcrProcessed || d.ExtractedText == null || d.ExtractedText.Length < 100)
+                    .Take(50)
+                    .ToListAsync();
+                
+                var withErrors = allDocs.Where(d => d.Metadata != null && d.Metadata.ContainsKey("ocr_error")).ToList();
+                var pendingOnly = allDocs.Where(d => d.Metadata == null || !d.Metadata.ContainsKey("ocr_error")).ToList();
+                
+                documents = needsEnrichment.Concat(withErrors).Concat(pendingOnly).Take(20).ToList();
+            }
+            
+            var retriedCount = 0;
+            var results = new List<dynamic>();
+            
+            foreach (var doc in documents)
+            {
+                var outboxMessage = new OutboxMessage
+                {
+                    Id = Guid.NewGuid(),
+                    Type = "OcrJob",
+                    Payload = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        JobId = Guid.NewGuid(),
+                        DocumentId = doc.Id,
+                        Language = "eng+fra+ara"
+                    }),
+                    CreatedAt = DateTime.UtcNow,
+                    RetryCount = 0
+                };
+                _db.OutboxMessages.Add(outboxMessage);
+                
+                doc.Metadata ??= new Dictionary<string, object>();
+                doc.Metadata["ocr_retry_requested"] = DateTime.UtcNow.ToString("o");
+                doc.Metadata["ocr_retry_requested_by"] = username;
+                
+                results.Add(new { id = doc.Id, success = true });
+                retriedCount++;
+            }
+            
+            await _db.SaveChangesAsync();
+            
+            _logger.LogInformation("OCR retry queued for {Count} documents by {User}", retriedCount, username);
+            
+            return Ok(new { 
+                retriedCount, 
+                message = retriedCount > 0 
+                    ? $"Queued {retriedCount} OCR jobs for retry" 
+                    : "No stuck documents found to retry",
+                results 
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrying OCR");
+            return StatusCode(500, new { error = "Retry failed", message = ex.Message });
+        }
+    }
+
     private static string EscapeCsv(string value)
     {
         return value?.Replace("\"", "\"\"") ?? "";

@@ -204,10 +204,10 @@ public class DocumentIngestionPipeline
         if (!string.IsNullOrWhiteSpace(category))
             tags.Add(category.ToLower());
 
-        // Tags: filename parts (split on spaces, dashes, underscores)
+        // Tags: filename parts (only alphabetic, no numbers or pure numeric strings)
         var nameParts = Regex.Split(
             Path.GetFileNameWithoutExtension(fileName), @"[\s_\-\.]+");
-        foreach (var part in nameParts.Where(p => p.Length > 3))
+        foreach (var part in nameParts.Where(p => p.Length > 3 && !p.Any(char.IsDigit) && !Regex.IsMatch(p, @"^\d+$")))
             tags.Add(part.ToLower());
 
         // Tag: file extension

@@ -175,8 +175,9 @@ public class OpenSearchService : ISearchService
                 if (genericPhrases.Any(p => lowerRaw.Contains(p)) ||
                     (!nlQuery.Keywords.Any() && lowerRaw.Split(' ').All(w => w.Length <= 3)))
                 {
-                    processedQuery = string.Empty;
                     _logger.LogInformation("Generic 'show all' query detected — returning all documents");
+
+                    return await GetAllDocumentsAsync(request, cancellationToken);
                 }
             }
 
@@ -209,6 +210,12 @@ public class OpenSearchService : ISearchService
             // Merge results using Reciprocal Rank Fusion
             var documents = await MergeHybridResultsAsync(bm25Response, semanticHits, cancellationToken);
 
+            // Fetch real-time status from database to ensure accuracy
+            if (documents.Any())
+            {
+                await EnrichWithRealTimeStatusAsync(documents, cancellationToken);
+            }
+
             // Normalize scores to 0-1 range
             var totalBm25    = (int)(bm25Response?.Total ?? 0);
             var isUnderstood = nlQuery?.IsUnderstood != false &&
@@ -217,10 +224,37 @@ public class OpenSearchService : ISearchService
 
             if (documents.Any())
             {
-                var maxScore = documents.Max(d => d.Score);
-                if (maxScore > 0)
-                    foreach (var d in documents)
-                        d.Score = d.Score / maxScore;
+                var bm25Count = bm25Response?.Hits?.Count() ?? 0;
+                _logger.LogInformation(
+                    "[SCORE_DEBUG] Search query '{Query}': BM25 hits={Bm25Count}, Total docs={TotalDocs}, MaxScore={MaxScore}",
+                    request.Query, bm25Count, documents.Count, documents.Max(d => d.Score));
+
+                // When BM25 finds NO matches, ignore kNN results
+                // Semantic search should not be used as a fallback when keyword search finds nothing
+                // This prevents showing unrelated documents with fake high scores
+                if (bm25Count == 0)
+                {
+                    _logger.LogWarning(
+                        "Search query '{Query}' found no BM25 matches. " +
+                        "Ignoring {KnnCount} kNN results to prevent irrelevant matches. " +
+                        "Returning empty results.",
+                        request.Query, documents.Count);
+
+                    documents.Clear();
+                }
+
+                // Normalize scores for remaining documents
+                if (documents.Any())
+                {
+                    var maxScore = documents.Max(d => d.Score);
+                    if (maxScore > 0)
+                    {
+                        foreach (var d in documents)
+                        {
+                            d.Score = d.Score / maxScore;
+                        }
+                    }
+                }
             }
 
             var result = new SearchResult
@@ -254,6 +288,120 @@ public class OpenSearchService : ISearchService
         {
             _logger.LogError(ex, "Error performing search for '{Query}'", request.Query);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns all documents for "show all" queries with proper sorting and pagination.
+    /// </summary>
+    private async Task<SearchResult> GetAllDocumentsAsync(
+        CoreSearchRequest request,
+        CancellationToken cancellationToken)
+    {
+        var startTime = DateTime.UtcNow;
+
+        try
+        {
+            var response = await _client.SearchAsync<DocumentIndexModel>(s => s
+                .Index(_documentIndex)
+                .From((request.Page - 1) * request.PageSize)
+                .Size(request.PageSize)
+                .Query(q => q.MatchAll(m => m))
+                .Sort(ss => BuildSort(ss, request.SortBy, request.SortDescending))
+                .Aggregations(a => BuildAggregations(a)),
+                cancellationToken);
+
+            if (!response.IsValid)
+            {
+                _logger.LogWarning("Show all query failed: {Error}", response.DebugInformation);
+                return new SearchResult
+                {
+                    TotalResults = 0,
+                    Page = request.Page,
+                    PageSize = request.PageSize,
+                    TotalPages = 0,
+                    Documents = new(),
+                    SearchTimeMs = (long)(DateTime.UtcNow - startTime).TotalMilliseconds
+                };
+            }
+
+            var documents = response.Hits
+                .Select(h => MapToSearchHit(h))
+                .ToList();
+
+            // Fetch real-time status from database
+            if (documents.Any())
+            {
+                await EnrichWithRealTimeStatusAsync(documents, cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Show all query: returned {Count}/{Total} documents, {Ms}ms",
+                documents.Count, response.Total, (long)(DateTime.UtcNow - startTime).TotalMilliseconds);
+
+            return new SearchResult
+            {
+                TotalResults     = (int)(response.Total),
+                Page             = request.Page,
+                PageSize         = request.PageSize,
+                TotalPages       = (int)Math.Ceiling((double)response.Total / request.PageSize),
+                Documents        = documents,
+                Facets           = ExtractFacets(response.Aggregations),
+                SearchTimeMs     = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
+                ProcessedQuery   = request.Query,
+                IsUnderstood     = true,
+                SearchMode       = SearchMode.BM25
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting all documents");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Enriches search results with real-time status from database.
+    /// This ensures the status reflects any changes that happened after indexing.
+    /// </summary>
+    private async Task EnrichWithRealTimeStatusAsync(
+        List<DocumentSearchHit> documents,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var docIds = documents.Select(d => d.Id).ToList();
+            
+            var dbStatuses = await _db.Documents
+                .Where(d => docIds.Contains(d.Id))
+                .Select(d => new { d.Id, d.Status, d.IsOcrProcessed, d.Metadata })
+                .ToListAsync(cancellationToken);
+
+            var statusMap = dbStatuses.ToDictionary(d => d.Id);
+
+            foreach (var doc in documents)
+            {
+                if (statusMap.TryGetValue(doc.Id, out var dbDoc))
+                {
+                    doc.Status = dbDoc.Status.ToString();
+                    
+                    // IsFullyProcessed: true only when OCR is done AND stage is "completed"
+                    // This means the entire pipeline (Tesseract + LLM) is complete
+                    // Handle both string and JsonElement types from EF Core
+                    var stageValue = dbDoc.Metadata?.GetValueOrDefault("ocr_stage");
+                    string? stage = null;
+                    if (stageValue is JsonElement je)
+                        stage = je.GetString();
+                    else if (stageValue is string s)
+                        stage = s;
+                    
+                    doc.IsFullyProcessed = dbDoc.IsOcrProcessed && stage == "completed";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to enrich search results with real-time status");
         }
     }
 
@@ -1022,7 +1170,7 @@ public class OpenSearchService : ISearchService
                 }
                 else if (!exactMatches.Any())
                 {
-                    bq = bq.Should(m => m.MatchAll());
+                    bq = bq.Must(m => m.MatchNone());
                 }
 
                 return bq;
@@ -1033,7 +1181,7 @@ public class OpenSearchService : ISearchService
         {
             var bq = b;
             if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
-            bq = bq.Must(m => m.MatchAll());
+            bq = bq.Must(m => m.MatchNone());
             return bq;
         });
     }
@@ -1124,6 +1272,9 @@ public class OpenSearchService : ISearchService
             Metadata      = doc.Metadata,
             OcrText       = doc.OcrText,
             ExtractedText = doc.ExtractedText,
+            Status         = doc.Status,
+            IsOcrProcessed = doc.IsOcrProcessed,
+            IsFullyProcessed = doc.IsFullyProcessed,
         };
     }
 
@@ -1142,7 +1293,9 @@ public class OpenSearchService : ISearchService
             CreatedAt     = document.CreatedAt,
             DocumentDate  = document.DocumentDate,
             ModifiedAt    = document.ModifiedAt,
-            Status        = document.Status.ToString(),
+            Status         = document.Status.ToString(),
+            IsOcrProcessed = document.IsOcrProcessed,
+            IsFullyProcessed = false, // Will be enriched from DB with real-time status
             ExtractedText = document.ExtractedText,
             OcrText       = document.OcrText,
             Tags          = document.Tags,
@@ -1526,6 +1679,16 @@ public class DocumentIndexModel
     /// Indexing status.
     /// </summary>
     public string Status { get; set; } = "Indexed";
+
+    /// <summary>
+    /// Whether OCR has been processed for this document.
+    /// </summary>
+    public bool IsOcrProcessed { get; set; }
+
+    /// <summary>
+    /// Whether the entire OCR pipeline (Tesseract + LLM) is complete.
+    /// </summary>
+    public bool IsFullyProcessed { get; set; }
 
     /// <summary>
     /// Extracted text content.

@@ -672,14 +672,25 @@
             Page {{ searchResults.page }} / {{ searchResults.totalPages }}
           </div>
         </div>
+        
+        <!-- List summary (when browsing all documents) -->
+        <div
+          v-else-if="!searched && documents.length > 0"
+          class="results-summary"
+        >
+          <div class="summary-card">
+            <span class="summary-count">{{ documents.length }}</span>
+            <span class="summary-text"> document(s) dans le système</span>
+          </div>
+        </div>
 
         <!-- Documents grid -->
         <div
-          v-if="searchResults && searchResults.documents?.length > 0"
+          v-if="(searchResults && searchResults.documents?.length > 0) || (!searched && documents.length > 0)"
           class="documents-grid"
         >
           <article
-            v-for="doc in searchResults.documents"
+            v-for="doc in (searchResults?.documents || documents)"
             :key="doc.id"
             class="document-card"
           >
@@ -725,13 +736,32 @@
                         class="status-dot"
                         :class="statusClass(doc.status)"
                       >{{ doc.status }}</span>
+                      <!-- OCR badge - show only when we have OCR status info -->
+                      <!-- Show completed only after tags are updated (full OCR pipeline done) -->
+                      <template v-if="docOcrStatuses[doc.id]">
+                        <span
+                          v-if="docTagsUpdated[doc.id] || docOcrStatuses[doc.id].status === 4 || docOcrStatuses[doc.id].status === 'Completed'"
+                          class="ocr-badge ocr-badge-done"
+                          title="OCR complet (Tesseract + IA)"
+                        >🔬 OCR</span>
+                        <span
+                          v-else-if="docOcrStatuses[doc.id].status === 5 || docOcrStatuses[doc.id].status === 'Failed'"
+                          class="ocr-badge ocr-badge-fail"
+                          title="OCR échoué"
+                        >⚠️ OCR</span>
+                        <span
+                          v-else
+                          class="ocr-badge ocr-badge-pending"
+                          :title="docOcrStatuses[doc.id].stageLabel || 'OCR en cours'"
+                        >⏳ OCR</span>
+                      </template>
                       <span
-                        v-if="doc.isOcrProcessed"
+                        v-else-if="doc.isFullyProcessed"
                         class="ocr-badge ocr-badge-done"
-                        title="Contenu indexé via OCR"
+                        title="OCR complet"
                       >🔬 OCR</span>
                       <span
-                        v-else-if="doc.ocrStatus !== undefined && doc.ocrStatus < 4"
+                        v-else-if="doc.isOcrProcessed"
                         class="ocr-badge ocr-badge-pending"
                         title="OCR en cours"
                       >⏳ OCR</span>
@@ -762,16 +792,14 @@
                         class="tag-more"
                       >+{{ doc.tags.length - 5 }}</span>
                     </div>
-                    <!-- Progress bar for processing documents -->
+                    <!-- OCR status indicator (replaces progress bar) -->
                     <div
-                      v-if="docOcrStatuses[doc.id] && doc.status !== 'Indexed' && doc.status !== 'Failed'"
-                      class="ocr-progress-bar"
+                      v-if="docOcrStatuses[doc.id]"
+                      class="ocr-status-indicator"
+                      :class="getOcrStatusClass(docOcrStatuses[doc.id]?.status)"
                     >
-                      <div
-                        class="ocr-progress-fill"
-                        :style="`width: ${getOcrProgress(docOcrStatuses[doc.id]?.status)}%`"
-                      ></div>
-                      <span class="ocr-progress-label">{{ docOcrStatuses[doc.id]?.stageLabel || getOcrStatusLabel(docOcrStatuses[doc.id]?.status) || doc.status }}</span>
+                      <span class="ocr-status-dot"></span>
+                      <span class="ocr-status-text">{{ docOcrStatuses[doc.id]?.stageLabel || getOcrStatusLabel(docOcrStatuses[doc.id]?.status) || 'En attente' }}</span>
                     </div>
                   </div>
                 </div>
@@ -891,7 +919,7 @@
 
         <!-- Empty / initial states -->
         <div
-          v-else-if="!searchLoading && searched && (!searchResults || searchResults.documents.length === 0)"
+          v-else-if="!searchLoading && searched && (!searchResults || searchResults.documents?.length === 0)"
           class="state-box empty-state"
         >
           <div class="state-icon">
@@ -2734,7 +2762,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import AccessManagementModal from '../components/AccessManagementModal.vue'
 import TaxonomyManager from '../components/TaxonomyManager.vue'
@@ -2798,6 +2826,7 @@ const searched       = ref(false)
 const searchResults  = ref(null)
 const totalResults   = ref(null)
 const docOcrStatuses = ref({})  // Track OCR status for each document in list
+const docTagsUpdated = ref({})  // Track which documents have had tags updated (OCR fully complete)
 const docListPollInterval = ref(null)
 const filters        = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '', ocrStatus: '', service: '' })
 const quickSearches  = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents', 'rapports']
@@ -3169,8 +3198,20 @@ const searchDocuments = async () => {
 
     // ── Fetch OCR status for each document ─────────────────────────────────────
     if (data.documents?.length) {
+      console.log('[Search] Fetching OCR status for', data.documents.length, 'documents')
       for (const doc of data.documents) {
-        fetchDocOcrStatus(doc.id)
+        fetchDocOcrStatus(doc.id).then(status => {
+          console.log('[Search] OCR status for', doc.id, ':', status?.status, status?.stageLabel)
+          // Update isFullyProcessed based on OCR status (status 4 = Completed)
+          if (status) {
+            doc.isFullyProcessed = status.status === 4
+            // If status is completed and tags exist, mark tags as updated
+            if (status.status === 4 && status.tags && status.tags.length > 0) {
+              docTagsUpdated.value[doc.id] = true
+            }
+          }
+          docOcrStatuses.value = { ...docOcrStatuses.value }
+        })
       }
     }
 
@@ -3206,11 +3247,22 @@ const goToPage = async (page) => {
 
 const deleteDoc = async (doc) => {
   if (!confirm(`Supprimer "${doc.title}" ? Cette action est irréversible.`)) return
-  const res = await fetch(`/api/documents/${doc.id}`, { method: 'DELETE', headers: authHeader() })
-  if (res.ok) {
-    if (searched.value) searchDocuments()
-    else fetchDocuments()
-  } else {
+  
+  const docId = doc.id
+  const idx = documents.value.findIndex(d => d.id === docId)
+  if (idx !== -1) documents.value.splice(idx, 1)
+  
+  if (searchResults.value?.documents) {
+    const searchIdx = searchResults.value.documents.findIndex(d => d.id === docId)
+    if (searchIdx !== -1) searchResults.value.documents.splice(searchIdx, 1)
+    searchResults.value.totalResults = (searchResults.value.totalResults || 1) - 1
+  }
+  
+  delete docOcrStatuses.value[docId]
+  
+  const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE', headers: authHeader() })
+  if (!res.ok) {
+    await fetchDocuments()
     alert('Erreur lors de la suppression.')
   }
 }
@@ -3273,6 +3325,7 @@ const doUploadBatch = async () => {
         errorCount++
       }
       uploadProgress.value = i + 1
+      await nextTick()
     }
     
     if (successCount > 0) {
@@ -3358,54 +3411,121 @@ const getOcrStatusLabel = (status) => {
   return labels[status] || 'Inconnu'
 }
 
-const getOcrProgress = (status) => {
-  if (!status) return 0
-  const progress = { 
-    0: 0, 1: 20, 2: 40, 3: 60, 4: 100, 5: 100,
-    'Pending': 10, 'Processing': 25, 'TextExtracted': 50, 'LlmCleaning': 75, 'Completed': 100, 'Failed': 100
+const getOcrStatusClass = (status) => {
+  const classes = {
+    0: 'status-pending', 1: 'status-processing', 2: 'status-processing', 3: 'status-processing', 4: 'status-completed', 5: 'status-failed',
+    'Pending': 'status-pending', 'Processing': 'status-processing', 'TextExtracted': 'status-processing', 
+    'LlmCleaning': 'status-processing', 'Completed': 'status-completed', 'Failed': 'status-failed'
   }
-  return progress[status] ?? 0
+  return classes[status] || 'status-pending'
 }
 
 const fetchDocOcrStatus = async (docId) => {
   try {
+    console.log('[OCR Status] Fetching for:', docId)
     const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeader() })
     if (res.ok) {
       const data = await res.json()
+      console.log('[OCR Status] Got data for:', docId, data.status, data.stageLabel)
       docOcrStatuses.value[docId] = data
       return data
+    } else {
+      console.log('[OCR Status] Failed response for:', docId, res.status)
     }
-  } catch {}
+  } catch (e) {
+    console.log('[OCR Status] Error for:', docId, e)
+  }
   return null
 }
 
 const startDocListPolling = () => {
   if (docListPollInterval.value) return
+  console.log('[Polling] Started document list polling')
   docListPollInterval.value = setInterval(async () => {
-    if (!searchResults.value?.documents?.length) return
+    const docsToPoll = searchResults.value?.documents?.length 
+      ? searchResults.value.documents 
+      : documents.value
+    
+    if (!docsToPoll.length) return
+    
+    const pendingDocs = docsToPoll.filter(d => 
+      d.status === 'Pending' || d.status === 'Processing' || 
+      d.isOcrProcessed === false || d.isFullyProcessed === false
+    )
+    
+    if (!pendingDocs.length) {
+      console.log('[Polling] All documents indexed, stopping polling')
+      stopDocListPolling()
+      return
+    }
+    
+    console.log('[Polling] Checking', pendingDocs.length, 'pending documents')
     let hasUpdates = false
-    for (const doc of searchResults.value.documents) {
-      // Check main document status - refresh when Processing/Pending becomes Indexed
-      if (doc.status === 'Processing' || doc.status === 'Pending') {
-        // Also check OCR status for additional info
-        if (!docOcrStatuses.value[doc.id] || docOcrStatuses.value[doc.id].status !== 'Completed') {
-          await fetchDocOcrStatus(doc.id)
-        }
-        // Fetch fresh doc to check if status changed
-        try {
-          const res = await fetch(`/api/documents/${doc.id}`, { headers: authHeader() })
-          if (res.ok) {
-            const freshDoc = await res.json()
-            if (freshDoc.status === 'Indexed' || freshDoc.status === 'Failed') {
-              hasUpdates = true
+    
+    for (const doc of pendingDocs) {
+      try {
+        const [docRes, ocrRes] = await Promise.all([
+          fetch(`/api/documents/${doc.id}`, { headers: authHeader() }),
+          fetch(`/api/documents/${doc.id}/ocr-status`, { headers: authHeader() })
+        ])
+        
+        if (docRes.status === 404) {
+          console.log('[Polling] Document deleted:', doc.id)
+          const idx = documents.value.findIndex(d => d.id === doc.id)
+          if (idx !== -1) documents.value.splice(idx, 1)
+          if (searchResults.value?.documents) {
+            const searchIdx = searchResults.value.documents.findIndex(d => d.id === doc.id)
+            if (searchIdx !== -1) {
+              searchResults.value.documents.splice(searchIdx, 1)
+              searchResults.value.totalResults = Math.max(0, (searchResults.value.totalResults || 1) - 1)
             }
           }
-        } catch {}
+          delete docOcrStatuses.value[doc.id]
+          continue
+        }
+        
+        if (docRes.ok) {
+          const freshDoc = await docRes.json()
+          const oldStatus = doc.status
+          // Preserve isFullyProcessed as it's not in the document endpoint response
+          const wasFullyProcessed = doc.isFullyProcessed
+          Object.assign(doc, freshDoc)
+          doc.isFullyProcessed = wasFullyProcessed
+          
+          if (oldStatus !== freshDoc.status) {
+            console.log('[Polling] Status changed:', doc.id, oldStatus, '->', freshDoc.status)
+            hasUpdates = true
+          }
+        }
+        
+        if (ocrRes.ok) {
+          const ocrData = await ocrRes.json()
+          const oldTags = docOcrStatuses.value[doc.id]?.tags ? [...docOcrStatuses.value[doc.id].tags] : []
+          docOcrStatuses.value[doc.id] = ocrData
+          
+          // Update isFullyProcessed based on OCR status
+          // Status 4 = Completed (full pipeline done)
+          const isFullyProcessed = ocrData.status === 4
+          if (doc.isFullyProcessed !== isFullyProcessed) {
+            doc.isFullyProcessed = isFullyProcessed
+            hasUpdates = true
+          }
+          
+          if (JSON.stringify(oldTags) !== JSON.stringify(ocrData.tags || [])) {
+            console.log('[Polling] Tags updated for', doc.id)
+            Object.assign(doc, { tags: ocrData.tags })
+            // Mark tags as updated - OCR is fully complete
+            docTagsUpdated.value[doc.id] = true
+            hasUpdates = true
+          }
+        }
+      } catch (e) {
+        console.log('[Polling] Error for', doc.id, e)
       }
     }
-    if (hasUpdates && searched.value) {
-      docOcrStatuses.value = {}  // Clear cached OCR statuses
-      searchDocuments()
+    
+    if (hasUpdates) {
+      docOcrStatuses.value = { ...docOcrStatuses.value }
     }
   }, 5000)
 }
@@ -4265,6 +4385,7 @@ onUnmounted(() => {
 .ocr-badge { display:inline-flex; align-items:center; gap:.2rem; padding:.14rem .42rem; border-radius:5px; font-size:.68rem; font-weight:700; }
 .ocr-badge-done    { background:#d1fae5; color:#065f46; border:1px solid #6ee7b7; }
 .ocr-badge-pending { background:#fef3c7; color:#92400e; border:1px solid #fde68a; }
+.ocr-badge-fail    { background:#fee2e2; color:#dc2626; border:1px solid #fecaca; }
 .ocr-quality-badge { padding:.14rem .42rem; border-radius:5px; font-size:.66rem; font-weight:700; }
 .oq-good   { background:#d1fae5; color:#065f46; }
 .oq-medium { background:#fef3c7; color:#92400e; }
@@ -4276,11 +4397,25 @@ onUnmounted(() => {
 .summary-toggle-btn { background:none; border:none; color:#2563eb; font-size:.74rem; font-weight:600; cursor:pointer; padding:0; }
 .summary-toggle-btn:hover { text-decoration:underline; }
 .doc-summary-text { margin-top:.4rem; font-size:.78rem; color:#374151; line-height:1.6; background:#f8fafc; border-left:3px solid #3b82f6; padding:.45rem .65rem; border-radius:0 6px 6px 0; }
-.ocr-progress-bar { height:24px; background:linear-gradient(135deg,#f3f4f6,#e5e7eb); border-radius:12px; position:relative; overflow:hidden; margin:8px 0; box-shadow:inset 0 2px 4px rgba(0,0,0,0.06); border:1px solid #e5e7eb; }
-.ocr-progress-fill { height:100%; background:linear-gradient(90deg,#2563eb,#3b82f6,#60a5fa); border-radius:12px; transition:width .5s cubic-bezier(0.4,0,0.2,1); position:relative; }
-.ocr-progress-fill::after { content:''; position:absolute; top:0; left:0; right:0; bottom:0; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent); animation:shimmer 2s infinite; }
+.ocr-progress-bar { height:20px; background:#f1f5f9; border-radius:10px; position:relative; overflow:hidden; margin:6px 0; border:1px solid #e2e8f0; }
+.ocr-progress-fill { height:100%; background:linear-gradient(90deg,#0ea5e9,#38bdf8); border-radius:10px; transition:width .6s ease-out; position:relative; }
+.ocr-progress-fill::before { content:''; position:absolute; top:0; left:0; right:0; bottom:0; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.25),transparent); animation:shimmer 1.5s infinite; }
 @keyframes shimmer { 0% { transform:translateX(-100%); } 100% { transform:translateX(100%); } }
-.ocr-progress-label { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:.7rem; font-weight:600; color:#1e40af; letter-spacing:0.3px; text-shadow:0 1px 2px rgba(255,255,255,0.9); }
+.ocr-progress-label { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:.65rem; font-weight:600; color:#0c4a6e; letter-spacing:0.2px; }
+
+/* OCR Status Indicator (replaces progress bar) */
+.ocr-status-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin: 4px 0; }
+.ocr-status-dot { width: 6px; height: 6px; border-radius: 50%; }
+.ocr-status-text { text-transform: uppercase; letter-spacing: 0.3px; }
+.ocr-status-indicator.status-pending { background: #f1f5f9; color: #64748b; }
+.ocr-status-indicator.status-pending .ocr-status-dot { background: #94a3b8; }
+.ocr-status-indicator.status-processing { background: #fef3c7; color: #b45309; }
+.ocr-status-indicator.status-processing .ocr-status-dot { background: #f59e0b; animation: pulse 1.5s infinite; }
+.ocr-status-indicator.status-completed { background: #dcfce7; color: #15803d; }
+.ocr-status-indicator.status-completed .ocr-status-dot { background: #22c55e; }
+.ocr-status-indicator.status-failed { background: #fee2e2; color: #dc2626; }
+.ocr-status-indicator.status-failed .ocr-status-dot { background: #ef4444; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* ── Filters reset ── */
 .filters-reset-row { margin-top:.75rem; display:flex; justify-content:flex-end; }
