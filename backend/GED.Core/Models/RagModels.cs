@@ -89,3 +89,42 @@ public class RagSource
     public string    Excerpt       { get; set; } = string.Empty;
     public List<string> Highlights { get; set; } = new();
 }
+
+/// <summary>
+/// Represents a search hit for a document chunk (used in RAG retrieval).
+/// </summary>
+public class ChunkSearchHit
+{
+    /// <summary>Unique chunk identifier.</summary>
+    public string ChunkId { get; set; } = string.Empty;
+
+    /// <summary>Parent document ID.</summary>
+    public Guid DocumentId { get; set; }
+
+    /// <summary>Zero-based chunk index.</summary>
+    public int ChunkIndex { get; set; }
+
+    /// <summary>Chunk text content.</summary>
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>Document title.</summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>Document category.</summary>
+    public string? Category { get; set; }
+
+    /// <summary>Document date.</summary>
+    public DateTime? DocumentDate { get; set; }
+
+    /// <summary>Filename.</summary>
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>MIME content type.</summary>
+    public string ContentType { get; set; } = string.Empty;
+
+    /// <summary>Document tags.</summary>
+    public List<string>? Tags { get; set; }
+
+    /// <summary>Relevance/similarity score.</summary>
+    public float Score { get; set; }
+}

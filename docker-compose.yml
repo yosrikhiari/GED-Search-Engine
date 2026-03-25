@@ -166,7 +166,7 @@ services:
       - ged-network
     environment:
       - OLLAMA_HOST=ollama:11434
-    command: ["sh", "-c", "ollama pull llama3.2:1b && ollama pull nomic-embed-text && echo 'Models ready.'"]
+    command: ["sh", "-c", "ollama pull mistral && ollama pull nomic-embed-text && echo 'Models ready.'"]
     restart: "no"
 
   # ── Backend (ASP.NET Core API) ────────────────────────────────────────────────
@@ -201,7 +201,7 @@ services:
       - NLP__Enabled=${NLP_ENABLED:-true}
       - NLP__LlmApiEndpoint=${NLP_LLM_API_ENDPOINT:-http://ollama:11434/api/generate}
       - NLP__EmbedApiEndpoint=${NLP_EMBED_API_ENDPOINT:-http://ollama:11434/api/embed}
-      - NLP__Model=${NLP_MODEL:-llama3.2:1b}
+      - NLP__Model=${NLP_MODEL:-mistral}
       - NLP__EmbedModel=${NLP_EMBED_MODEL:-nomic-embed-text}
       # Embeddings
       - Embeddings__Enabled=true

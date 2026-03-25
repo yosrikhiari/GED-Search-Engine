@@ -245,6 +245,12 @@ builder.Services.AddScoped<OcrMetadataEnrichmentService>();
 
 builder.Services.AddScoped<DocumentChunkingService>();
 
+// ── RAG Reranker Service ─────────────────────────────────────────────────────
+builder.Services.AddScoped<IChunkRerankerService, ChunkRerankerService>();
+
+// ── RAG Query Classifier Service ─────────────────────────────────────────────
+builder.Services.AddScoped<IQueryClassifierService, QueryClassifierService>();
+
 // ── Auth Service ──────────────────────────────────────────────────────────────
 builder.Services.AddSingleton<AuthService>();
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
@@ -272,6 +278,8 @@ builder.Services.AddScoped<IRagService>(sp =>
         sp.GetRequiredService<ISearchService>(),
         sp.GetRequiredService<OpenSearchService>(),
         sp.GetRequiredService<AuthService>(),
+        sp.GetRequiredService<IChunkRerankerService>(),
+        sp.GetRequiredService<IQueryClassifierService>(),
         sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(RagService)),
         sp.GetRequiredService<ILogger<RagService>>(),
         sp.GetRequiredService<IConfiguration>()

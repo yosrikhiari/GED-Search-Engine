@@ -62,11 +62,13 @@ namespace GED.Infrastructure.Services;
 /// </summary>
 public class RagService : IRagService
 {
-    private readonly ISearchService      _searchService;
-    private readonly IUserContext        _userContext;
-    private readonly OpenSearchService   _openSearch;
-    private readonly HttpClient          _httpClient;
-    private readonly ILogger<RagService>  _logger;
+    private readonly ISearchService         _searchService;
+    private readonly IUserContext           _userContext;
+    private readonly OpenSearchService      _openSearch;
+    private readonly IChunkRerankerService _reranker;
+    private readonly IQueryClassifierService _classifier;
+    private readonly HttpClient             _httpClient;
+    private readonly ILogger<RagService>     _logger;
 
     /// <summary>
     /// Ollama API endpoint for text generation.
@@ -94,9 +96,29 @@ public class RagService : IRagService
     private readonly int    _maxContextChars;
 
     /// <summary>
-    /// Minimum confidence threshold for chunk inclusion.
+    /// Minimum confidence threshold for chunk inclusion (configurable).
     /// </summary>
-    private const float RagConfidenceThreshold = 0.45f;
+    private readonly float _confidenceThreshold;
+
+    /// <summary>
+    /// Whether BM25 fallback is enabled for chunk search.
+    /// </summary>
+    private readonly bool _enableBm25Fallback;
+
+    /// <summary>
+    /// Whether chunk reranking is enabled.
+    /// </summary>
+    private readonly bool _enableReranking;
+
+    /// <summary>
+    /// Whether query classification is enabled.
+    /// </summary>
+    private readonly bool _enableQueryClassification;
+
+    /// <summary>
+    /// Max chunks per document for comparison queries.
+    /// </summary>
+    private readonly int _comparisonMaxChunksPerDoc;
 
     /// <summary>
     /// Initializes a new instance of <see cref="RagService"/>.
@@ -104,20 +126,26 @@ public class RagService : IRagService
     /// <param name="searchService">Search service for document retrieval.</param>
     /// <param name="openSearch">OpenSearch service for chunk search.</param>
     /// <param name="userContext">User context for ACL enforcement.</param>
+    /// <param name="reranker">Chunk reranker service.</param>
+    /// <param name="classifier">Query classifier service.</param>
     /// <param name="httpClient">HTTP client for Ollama API.</param>
     /// <param name="logger">Logger for RAG events.</param>
     /// <param name="configuration">Application configuration.</param>
     public RagService(
-        ISearchService      searchService,
-        OpenSearchService   openSearch,
-        IUserContext        userContext,
-        HttpClient          httpClient,
-        ILogger<RagService> logger,
-        IConfiguration      configuration)
+        ISearchService         searchService,
+        OpenSearchService      openSearch,
+        IUserContext           userContext,
+        IChunkRerankerService  reranker,
+        IQueryClassifierService classifier,
+        HttpClient             httpClient,
+        ILogger<RagService>    logger,
+        IConfiguration         configuration)
     {
         _searchService   = searchService;
         _openSearch      = openSearch;
         _userContext     = userContext;
+        _reranker        = reranker;
+        _classifier      = classifier;
         _httpClient      = httpClient;
         _logger          = logger;
         _llmEndpoint     = configuration["NLP:LlmApiEndpoint"] ?? "http://localhost:11434/api/generate";
@@ -125,6 +153,11 @@ public class RagService : IRagService
         _enabled         = configuration.GetValue<bool>("NLP:Enabled", true);
         _topK            = configuration.GetValue<int>("RAG:TopK", 5);
         _maxContextChars = configuration.GetValue<int>("RAG:MaxContextChars", 6000);
+        _confidenceThreshold = configuration.GetValue<float>("RAG:ConfidenceThreshold", 0.45f);
+        _enableBm25Fallback = configuration.GetValue<bool>("RAG:EnableBm25Fallback", true);
+        _enableReranking = configuration.GetValue<bool>("RAG:EnableReranking", false);
+        _enableQueryClassification = configuration.GetValue<bool>("RAG:EnableQueryClassification", true);
+        _comparisonMaxChunksPerDoc = configuration.GetValue<int>("RAG:QueryClassification:ComparisonMaxChunksPerDoc", 2);
     }
 
     /// <inheritdoc />
@@ -285,6 +318,19 @@ public class RagService : IRagService
 
         var effectiveCategories = allowedCategories ?? request.Categories;
 
+        // Query classification to determine retrieval strategy
+        var classification = await _classifier.ClassifyAsync(request.Query, cancellationToken);
+        var effectiveTopK = classification?.RecommendedTopK ?? _topK;
+        var effectiveThreshold = classification?.RecommendedConfidenceThreshold ?? _confidenceThreshold;
+
+        _logger.LogInformation(
+            "📊 Query classified: type={Type}, confidence={Conf:F2}, topK={TopK}, threshold={Threshold}{Fallback}",
+            classification?.QueryType ?? "unknown",
+            classification?.Confidence ?? 1.0f,
+            effectiveTopK,
+            effectiveThreshold,
+            classification?.IsAmbiguous == true ? " (fallback to factual)" : "");
+
         // Search for relevant chunks
         List<ChunkSearchHit> chunkHits = new();
         try
@@ -293,7 +339,7 @@ public class RagService : IRagService
                 .GetProperty("Role")?.GetValue(_userContext)?.ToString() ?? "User";
             
             chunkHits = await _openSearch.SearchChunksAsync(
-                request.Query, topK: _topK,
+                request.Query, topK: effectiveTopK,
                 categories: effectiveCategories,
                 documentIds: request.DocumentIds,
                 userId: request.UserId ?? request.Username,
@@ -301,15 +347,47 @@ public class RagService : IRagService
                 userAllowedCategories: effectiveCategories,
                 cancellationToken: cancellationToken);
 
-            _logger.LogInformation("🔍 RAG chunk search: {Count} chunk hits", chunkHits.Count);
+            _logger.LogInformation(
+                "🔍 RAG chunk search: {Count} chunk hits, scores: [{Scores}]",
+                chunkHits.Count,
+                string.Join(", ", chunkHits.Select(c => $"{c.Title?.Split(':').LastOrDefault()?.Trim() ?? "?"}:{c.Score:F2}")));
+
+            // Log detailed chunk info for debugging
+            foreach (var (chunk, idx) in chunkHits.Select((c, i) => (c, i)))
+            {
+                _logger.LogDebug(
+                    "Chunk {Idx}: DocId={DocId}, ChunkIdx={ChunkIdx}, Score={Score:F3}, Title={Title}, TextLen={TextLen}",
+                    idx, chunk.DocumentId, chunk.ChunkIndex, chunk.Score,
+                    chunk.Title ?? "?", chunk.Text?.Length ?? 0);
+            }
+
+            // Re-rank chunks for better relevance (if enabled and we have multiple chunks)
+            if (_enableReranking && chunkHits.Count > 1 && _reranker.IsAvailable)
+            {
+                _logger.LogInformation("🔄 Re-ranking {Count} chunks for improved relevance...", chunkHits.Count);
+                var preRerankScores = chunkHits.Select(c => c.Score).ToList();
+                chunkHits = await _reranker.ReRankAsync(request.Query, chunkHits, cancellationToken);
+                _logger.LogInformation(
+                    "✅ Re-ranking complete. Score change: [{Pre}] → [{Post}]",
+                    string.Join(", ", preRerankScores.Select(s => $"{s:F2}")),
+                    string.Join(", ", chunkHits.Select(c => $"{c.Score:F2}")));
+            }
+
+            // For comparison queries, ensure chunks come from different documents
+            if (classification?.QueryType == "comparison" && chunkHits.Count > 1)
+            {
+                _logger.LogInformation("🔄 Applying document diversity for comparison query (max {Max} chunks/doc)",
+                    _comparisonMaxChunksPerDoc);
+                chunkHits = EnsureDocumentDiversity(chunkHits, _comparisonMaxChunksPerDoc, effectiveTopK);
+            }
 
             // Check confidence threshold
-            bool hasConfidentChunks = chunkHits.Any(c => c.Score >= RagConfidenceThreshold);
+            bool hasConfidentChunks = chunkHits.Any(c => c.Score >= effectiveThreshold);
             if (chunkHits.Any() && !hasConfidentChunks)
             {
                 _logger.LogWarning(
                     "RAG: all {Count} chunks below confidence {T} — low-confidence notice",
-                    chunkHits.Count, RagConfidenceThreshold);
+                    chunkHits.Count, effectiveThreshold);
 
                 return (effectiveCategories, chunkHits, new List<RagSource>(), new StringBuilder(), 0,
                     new RagResponse
@@ -616,6 +694,38 @@ ANSWER:";
     {
         [JsonPropertyName("response")]
         public string? Response { get; set; }
+    }
+
+    /// <summary>
+    /// Ensures chunks are distributed across multiple documents for comparison queries.
+    /// Limits the number of chunks taken from each document.
+    /// </summary>
+    private static List<ChunkSearchHit> EnsureDocumentDiversity(
+        List<ChunkSearchHit> chunks,
+        int maxChunksPerDoc,
+        int maxTotalChunks)
+    {
+        var diverseChunks = new List<ChunkSearchHit>();
+        var docCounts = new Dictionary<Guid, int>();
+
+        foreach (var chunk in chunks)
+        {
+            if (!docCounts.TryGetValue(chunk.DocumentId, out var count))
+            {
+                count = 0;
+            }
+
+            if (count < maxChunksPerDoc)
+            {
+                diverseChunks.Add(chunk);
+                docCounts[chunk.DocumentId] = count + 1;
+
+                if (diverseChunks.Count >= maxTotalChunks)
+                    break;
+            }
+        }
+
+        return diverseChunks;
     }
 
     private class OllamaStreamChunk

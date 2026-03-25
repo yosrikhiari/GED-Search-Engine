@@ -1,20 +1,33 @@
 <template>
   <div class="data-display">
     <!-- Loading State -->
-    <div v-if="loading" class="data-loading">
+    <div
+      v-if="loading"
+      class="data-loading"
+    >
       <slot name="loading">
-        <div class="loading-grid" :class="gridClass">
-          <div v-for="i in skeletonCount" :key="i" class="skeleton-card">
-            <div class="skeleton-line w-3/4"></div>
-            <div class="skeleton-line w-1/2"></div>
-            <div class="skeleton-line w-full"></div>
+        <div
+          class="loading-grid"
+          :class="gridClass"
+        >
+          <div
+            v-for="i in skeletonCount"
+            :key="i"
+            class="skeleton-card"
+          >
+            <div class="skeleton-line w-3/4" />
+            <div class="skeleton-line w-1/2" />
+            <div class="skeleton-line w-full" />
           </div>
         </div>
       </slot>
     </div>
 
     <!-- Error State -->
-    <div v-else-if="error" class="data-error">
+    <div
+      v-else-if="error"
+      class="data-error"
+    >
       <slot name="error">
         <ErrorState
           :type="errorType"
@@ -28,7 +41,10 @@
     </div>
 
     <!-- Empty State -->
-    <div v-else-if="isEmpty" class="data-empty">
+    <div
+      v-else-if="isEmpty"
+      class="data-empty"
+    >
       <slot name="empty">
         <EmptyState
           v-if="showEmptyState"
@@ -40,14 +56,23 @@
             <slot name="empty-action" />
           </template>
         </EmptyState>
-        <div v-else class="text-center py-8">
-          <p class="text-gray-500 dark:text-gray-400">{{ emptyTitle }}</p>
+        <div
+          v-else
+          class="text-center py-8"
+        >
+          <p class="text-gray-500 dark:text-gray-400">
+            {{ emptyTitle }}
+          </p>
         </div>
       </slot>
     </div>
 
     <!-- Data Content -->
-    <div v-else class="data-content" :class="contentClass">
+    <div
+      v-else
+      class="data-content"
+      :class="contentClass"
+    >
       <slot />
     </div>
   </div>

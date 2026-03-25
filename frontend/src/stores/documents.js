@@ -29,17 +29,16 @@ export const useDocumentsStore = defineStore('documents', () => {
         ...params
       }
       
-      const response = await documents.list(queryParams)
-      const data = await response.json()
+      const data = await documents.list(queryParams)
       
-      if (response.ok) {
+      if (data) {
         documentsList.value = data.documents || data.results || []
         if (data.total !== undefined) {
           pagination.value.total = data.total
           pagination.value.totalPages = Math.ceil(data.total / pagination.value.pageSize)
         }
       } else {
-        error.value = data.error || 'Failed to fetch documents'
+        error.value = 'Failed to fetch documents'
       }
     } catch (e) {
       error.value = e.message || 'Network error'
@@ -53,14 +52,13 @@ export const useDocumentsStore = defineStore('documents', () => {
     error.value = null
     
     try {
-      const response = await documents.get(id)
-      const data = await response.json()
+      const data = await documents.get(id)
       
-      if (response.ok) {
+      if (data) {
         currentDocument.value = data
         return data
       } else {
-        error.value = data.error || 'Failed to fetch document'
+        error.value = 'Failed to fetch document'
         return null
       }
     } catch (e) {
@@ -76,17 +74,16 @@ export const useDocumentsStore = defineStore('documents', () => {
     error.value = null
     
     try {
-      const response = await documents.delete(id)
+      const data = await documents.delete(id)
       
-      if (response.ok) {
+      if (data !== null) {
         documentsList.value = documentsList.value.filter(d => d.id !== id)
         if (currentDocument.value?.id === id) {
           currentDocument.value = null
         }
         return { success: true }
       } else {
-        const data = await response.json()
-        error.value = data.error || 'Failed to delete document'
+        error.value = 'Failed to delete document'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -102,10 +99,9 @@ export const useDocumentsStore = defineStore('documents', () => {
     error.value = null
     
     try {
-      const response = await documents.update(id, data)
-      const result = await response.json()
+      const result = await documents.update(id, data)
       
-      if (response.ok) {
+      if (result) {
         const index = documentsList.value.findIndex(d => d.id === id)
         if (index !== -1) {
           documentsList.value[index] = { ...documentsList.value[index], ...result }
@@ -115,7 +111,7 @@ export const useDocumentsStore = defineStore('documents', () => {
         }
         return { success: true, data: result }
       } else {
-        error.value = result.error || 'Failed to update document'
+        error.value = 'Failed to update document'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -132,14 +128,13 @@ export const useDocumentsStore = defineStore('documents', () => {
     error.value = null
     
     try {
-      const response = await documents.upload(formData)
-      const result = await response.json()
+      const result = await documents.upload(formData)
       
-      if (response.ok) {
+      if (result) {
         uploadProgress.value = 100
         return { success: true, data: result }
       } else {
-        error.value = result.error || 'Failed to upload documents'
+        error.value = 'Failed to upload documents'
         return { success: false, error: error.value }
       }
     } catch (e) {

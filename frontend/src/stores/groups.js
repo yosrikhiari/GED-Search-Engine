@@ -13,13 +13,12 @@ export const useGroupsStore = defineStore('groups', () => {
     error.value = null
     
     try {
-      const response = await groups.list()
-      const data = await response.json()
+      const data = await groups.list()
       
-      if (response.ok) {
+      if (data) {
         groupsList.value = data.groups || data || []
       } else {
-        error.value = data.error || 'Failed to fetch groups'
+        error.value = 'Failed to fetch groups'
       }
     } catch (e) {
       error.value = e.message || 'Network error'
@@ -33,14 +32,13 @@ export const useGroupsStore = defineStore('groups', () => {
     error.value = null
     
     try {
-      const response = await groups.get(id)
-      const data = await response.json()
+      const data = await groups.get(id)
       
-      if (response.ok) {
+      if (data) {
         currentGroup.value = data
         return data
       } else {
-        error.value = data.error || 'Failed to fetch group'
+        error.value = 'Failed to fetch group'
         return null
       }
     } catch (e) {
@@ -56,14 +54,13 @@ export const useGroupsStore = defineStore('groups', () => {
     error.value = null
     
     try {
-      const response = await groups.create(groupData)
-      const data = await response.json()
+      const data = await groups.create(groupData)
       
-      if (response.ok) {
+      if (data) {
         groupsList.value.push(data)
         return { success: true, data }
       } else {
-        error.value = data.error || 'Failed to create group'
+        error.value = 'Failed to create group'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -79,10 +76,9 @@ export const useGroupsStore = defineStore('groups', () => {
     error.value = null
     
     try {
-      const response = await groups.update(id, groupData)
-      const data = await response.json()
+      const data = await groups.update(id, groupData)
       
-      if (response.ok) {
+      if (data) {
         const index = groupsList.value.findIndex(g => g.id === id)
         if (index !== -1) {
           groupsList.value[index] = data
@@ -92,7 +88,7 @@ export const useGroupsStore = defineStore('groups', () => {
         }
         return { success: true, data }
       } else {
-        error.value = data.error || 'Failed to update group'
+        error.value = 'Failed to update group'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -108,17 +104,16 @@ export const useGroupsStore = defineStore('groups', () => {
     error.value = null
     
     try {
-      const response = await groups.delete(id)
+      const data = await groups.delete(id)
       
-      if (response.ok) {
+      if (data !== null) {
         groupsList.value = groupsList.value.filter(g => g.id !== id)
         if (currentGroup.value?.id === id) {
           currentGroup.value = null
         }
         return { success: true }
       } else {
-        const data = await response.json()
-        error.value = data.error || 'Failed to delete group'
+        error.value = 'Failed to delete group'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -131,13 +126,12 @@ export const useGroupsStore = defineStore('groups', () => {
 
   async function addDocumentsToGroup(groupId, documentIds) {
     try {
-      const response = await groups.addDocuments(groupId, { documentIds })
-      const data = await response.json()
+      const data = await groups.addDocuments(groupId, { documentIds })
       
-      if (response.ok) {
+      if (data) {
         return { success: true, data }
       } else {
-        return { success: false, error: data.error }
+        return { success: false, error: 'Failed to add documents' }
       }
     } catch (e) {
       return { success: false, error: e.message }
@@ -146,17 +140,16 @@ export const useGroupsStore = defineStore('groups', () => {
 
   async function assignUserToGroup(groupId, userId, permission, expiresAt = null) {
     try {
-      const response = await groups.assign(groupId, {
+      const data = await groups.assign(groupId, {
         userId,
         permission,
         expiresAt
       })
-      const data = await response.json()
       
-      if (response.ok) {
+      if (data) {
         return { success: true, data }
       } else {
-        return { success: false, error: data.error }
+        return { success: false, error: 'Failed to assign user' }
       }
     } catch (e) {
       return { success: false, error: e.message }
@@ -165,13 +158,12 @@ export const useGroupsStore = defineStore('groups', () => {
 
   async function revokeUserFromGroup(groupId, assignmentId) {
     try {
-      const response = await groups.revokeAssignment(groupId, assignmentId)
+      const data = await groups.revokeAssignment(groupId, assignmentId)
       
-      if (response.ok) {
+      if (data !== null) {
         return { success: true }
       } else {
-        const data = await response.json()
-        return { success: false, error: data.error }
+        return { success: false, error: 'Failed to revoke user' }
       }
     } catch (e) {
       return { success: false, error: e.message }

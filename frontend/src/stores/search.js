@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive } from 'vue'
-import { search } from '@/api.js'
+import { search, rag } from '@/api.js'
 
 export const useSearchStore = defineStore('search', () => {
   const query = ref('')
@@ -55,10 +55,9 @@ export const useSearchStore = defineStore('search', () => {
         ...buildFilters()
       }
       
-      const response = await search.query(params)
-      const data = await response.json()
+      const data = await search.query(params)
       
-      if (response.ok) {
+      if (data) {
         results.value = data.documents || data.results || []
         if (data.totalResults !== undefined) {
           pagination.value.total = data.totalResults
@@ -68,7 +67,7 @@ export const useSearchStore = defineStore('search', () => {
           nlpInterpretation.value = data.nlpInterpretation
         }
       } else {
-        error.value = data.error || 'Search failed'
+        error.value = 'Search failed'
       }
     } catch (e) {
       error.value = e.message || 'Network error'
@@ -109,10 +108,9 @@ export const useSearchStore = defineStore('search', () => {
     }
     
     try {
-      const response = await search.suggestions(q)
-      const data = await response.json()
+      const data = await search.suggestions(q)
       
-      if (response.ok) {
+      if (data) {
         suggestions.value = data.suggestions || []
       }
     } catch (e) {
@@ -126,16 +124,15 @@ export const useSearchStore = defineStore('search', () => {
     error.value = null
     
     try {
-      const response = await search.askRag({
+      const data = await rag.ask({
         query: question,
         documentIds
       })
-      const data = await response.json()
       
-      if (response.ok) {
+      if (data) {
         ragAnswer.value = data
       } else {
-        error.value = data.error || 'RAG query failed'
+        error.value = 'RAG query failed'
       }
     } catch (e) {
       error.value = e.message || 'Network error'

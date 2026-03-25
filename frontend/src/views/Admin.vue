@@ -799,7 +799,7 @@
                       class="pipeline-status-indicator"
                       :class="getPipelineDisplay(doc.id).class"
                     >
-                      <span class="pipeline-status-dot"></span>
+                      <span class="pipeline-status-dot" />
                       <span class="pipeline-status-text">{{ getPipelineDisplay(doc.id).text }}</span>
                     </div>
                   </div>

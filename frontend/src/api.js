@@ -52,6 +52,12 @@ async function apiFetch(path, options = {}) {
     headers['Content-Type'] = 'application/json'
   }
 
+  // Fallback: Add Authorization header if cookie auth might fail (CORS scenarios)
+  const token = localStorage.getItem('ged_access_token')
+  if (token && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const method = options.method || 'GET'
   const url = `${BASE_URL}${path}`
 
@@ -158,6 +164,7 @@ export const auth = {
   logout: async () => {
     await apiFetch('/api/auth/logout', { method: 'POST' })
     localStorage.removeItem('ged_user')
+    localStorage.removeItem('ged_access_token')
     window.location.href = '/login'
   },
 

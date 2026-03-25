@@ -56,7 +56,10 @@ function getToastMessage(toast) {
           />
           
           <div class="flex-1 min-w-0">
-            <p v-if="getToastMessage(toast).title" class="text-sm font-semibold">
+            <p
+              v-if="getToastMessage(toast).title"
+              class="text-sm font-semibold"
+            >
               {{ getToastMessage(toast).title }}
             </p>
             <p 

@@ -8,6 +8,7 @@ using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
 using System.Security.Claims;
+using static GED.Core.Models.OcrConstants;
 
 namespace GED.API.Controllers;
 
@@ -56,8 +57,6 @@ public class DocumentsController : ControllerBase
         _authService     = authService;
         _auditService    = auditService;
     }
-
-    private static readonly string[] AdminOnlyCategories = { };
 
 [HttpPost("upload")]
 public async Task<ActionResult<Document>> UploadDocument(
@@ -467,26 +466,48 @@ public async Task<ActionResult<Document>> UploadDocument(
             return BadRequest(new { error = "No document IDs provided" });
 
         var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+        
+        // Fetch all documents in a single query to minimize DB round trips
+        var existingDocs = await _db.Documents
+            .Where(d => documentIds.Contains(d.Id))
+            .Select(d => d.Id)
+            .ToListAsync();
+        
+        var foundIds = new HashSet<Guid>(existingDocs);
         var results = new List<dynamic>();
         var deletedCount = 0;
 
+        // Process documents - parallel for search index deletion (independent)
+        var searchDeleteTasks = documentIds
+            .Where(id => foundIds.Contains(id))
+            .Select(id => _searchService.DeleteDocumentIndexAsync(id));
+        
+        await Task.WhenAll(searchDeleteTasks);
+
+        // Process each document
         foreach (var id in documentIds)
         {
             try
             {
-                var marked = await _documentService.MarkDocumentAsDeletedAsync(id);
-                if (!marked)
+                if (!foundIds.Contains(id))
                 {
                     results.Add(new { id, success = false, error = "Document not found" });
                     continue;
                 }
 
-                await _searchService.DeleteDocumentIndexAsync(id);
-                await _documentService.DeleteDocumentAsync(id);
+                var marked = await _documentService.MarkDocumentAsDeletedAsync(id);
+                var deleted = await _documentService.DeleteDocumentAsync(id);
                 
-                _auditService.LogDocumentDelete(id, username, "Bulk delete");
-                deletedCount++;
-                results.Add(new { id, success = true });
+                if (marked || deleted)
+                {
+                    _auditService.LogDocumentDelete(id, username, "Bulk delete");
+                    deletedCount++;
+                    results.Add(new { id, success = true });
+                }
+                else
+                {
+                    results.Add(new { id, success = false, error = "Failed to delete" });
+                }
             }
             catch (Exception ex)
             {
@@ -585,7 +606,7 @@ public async Task<ActionResult<Document>> UploadDocument(
     /// <summary>
     /// Returns the current OCR pipeline stage for a document.
     ///
-    /// Stage progression stored in document.Metadata:
+    /// Stage progression stored in document.Metadata (see OcrConstants.Stages):
     ///
     ///   (nothing)                      → Pending        (0)
     ///   ocr_stage = "processing"       → Processing     (1)
@@ -623,28 +644,28 @@ public async Task<ActionResult<Document>> UploadDocument(
 
             // ── Resolve pipeline stage from metadata ─────────────────────────
             var meta  = entity.Metadata;
-            var stage = GetMetaString(meta, "ocr_stage");
+            var stage = GetMetaString(meta, OcrConstants.MetadataKeys.OcrStage);
 
-            if (entity.Metadata != null && entity.Metadata.ContainsKey("ocr_error"))
+            if (entity.Metadata != null && entity.Metadata.ContainsKey(OcrConstants.MetadataKeys.OcrError))
             {
                 // Hard failure at any stage
                 ocrJob.Status       = OcrStatus.Failed;
-                ocrJob.ErrorMessage = GetMetaString(meta, "ocr_error");
+                ocrJob.ErrorMessage = GetMetaString(meta, OcrConstants.MetadataKeys.OcrError);
                 ocrJob.StageLabel   = "Failed";
             }
-            else if (entity.IsOcrProcessed && stage == "completed")
+            else if (entity.IsOcrProcessed && stage == OcrConstants.Stages.Completed)
             {
                 // Full pipeline done
                 ocrJob.Status     = OcrStatus.Completed;
                 ocrJob.StageLabel = "Complete";
             }
-            else if (entity.IsOcrProcessed && stage == "llm_cleaning")
+            else if (entity.IsOcrProcessed && stage == OcrConstants.Stages.LlmCleaning)
             {
                 // IsOcrProcessed was set after Tesseract, LLM still running
                 ocrJob.Status     = OcrStatus.LlmCleaning;
                 ocrJob.StageLabel = "Enhancing with AI…";
             }
-            else if (entity.IsOcrProcessed && stage == "text_extracted")
+            else if (entity.IsOcrProcessed && stage == OcrConstants.Stages.TextExtracted)
             {
                 // Tesseract finished, LLM hasn't started yet
                 ocrJob.Status     = OcrStatus.TextExtracted;
@@ -731,25 +752,43 @@ public async Task<ActionResult<Document>> UploadDocument(
     }
 
     /// <summary>
-    /// Export documents to CSV format
+    /// Export documents to CSV format with pagination support
     /// </summary>
     [HttpPost("export")]
-    public async Task<IActionResult> ExportDocuments([FromBody] List<Guid>? documentIds = null)
+    public async Task<IActionResult> ExportDocuments(
+        [FromBody] List<Guid>? documentIds = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 1000)
     {
         try
         {
+            // Enforce max page size to prevent memory issues
+            pageSize = Math.Min(pageSize, 5000);
+            page = Math.Max(page, 1);
+
             List<Document> documents;
+            int totalCount;
 
             if (documentIds != null && documentIds.Any())
             {
-                documents = await _documentService.GetDocumentsByIdsAsync(documentIds);
+                // Export specific documents (respect pagination)
+                var skip = (page - 1) * pageSize;
+                var pagedIds = documentIds.Skip(skip).Take(pageSize).ToList();
+                documents = await _documentService.GetDocumentsByIdsAsync(pagedIds);
+                totalCount = documentIds.Count;
             }
             else
             {
-                // Export all accessible documents
-                documents = await _db.Documents
-                    .Where(d => d.Status != DocumentStatus.Deleted)
-                    .Take(1000)
+                // Export all accessible documents with pagination
+                var query = _db.Documents
+                    .Where(d => d.Status != DocumentStatus.Deleted);
+                
+                totalCount = await query.CountAsync();
+                
+                documents = await query
+                    .OrderByDescending(d => d.CreatedAt)
+                    .Skip((page - 1) * pageSize)
+                    .Take(pageSize)
                     .ToListAsync()
                     .ContinueWith(t => t.Result.Select(MapToDocumentDto).ToList());
             }
@@ -765,7 +804,13 @@ public async Task<ActionResult<Document>> UploadDocument(
             }
 
             var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
-            return File(bytes, "text/csv", $"ged-export-{DateTime.UtcNow:yyyyMMdd}.csv");
+            
+            // Add pagination info to response headers
+            Response.Headers["X-Total-Count"] = totalCount.ToString();
+            Response.Headers["X-Page"] = page.ToString();
+            Response.Headers["X-Page-Size"] = pageSize.ToString();
+            
+            return File(bytes, "text/csv", $"ged-export-{DateTime.UtcNow:yyyyMMdd}-page{page}.csv");
         }
         catch (Exception ex)
         {

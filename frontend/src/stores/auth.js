@@ -31,15 +31,14 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = null
     
     try {
-      const response = await auth.login(username, password)
-      const data = await response.json()
+      const data = await auth.login(username, password)
       
-      if (response.ok) {
+      if (data) {
         user.value = data
         localStorage.setItem('ged_user', JSON.stringify(data))
         return { success: true }
       } else {
-        error.value = data.error || 'Login failed'
+        error.value = 'Login failed'
         return { success: false, error: error.value }
       }
     } catch (e) {
@@ -59,15 +58,15 @@ export const useAuthStore = defineStore('auth', () => {
     } finally {
       user.value = null
       localStorage.removeItem('ged_user')
+      localStorage.removeItem('ged_access_token')
       isLoading.value = false
     }
   }
 
   async function fetchCurrentUser() {
     try {
-      const response = await auth.me()
-      if (response.ok) {
-        const data = await response.json()
+      const data = await auth.me()
+      if (data) {
         user.value = data
         localStorage.setItem('ged_user', JSON.stringify(data))
       }
