@@ -89,3 +89,6 @@ backend/Dockerfile.tests
 Docs/DEPLOYMENT.md
 Docs/REVIEWS.md
 cookies_after_logout.txt
+cookies2.txt
+ENV_VARS.md
+test.txt

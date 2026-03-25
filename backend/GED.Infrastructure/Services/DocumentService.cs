@@ -169,24 +169,31 @@ public class DocumentService : IDocumentService
 
             var fileInfo = new FileInfo(savedPath);
 
-            // ── 2. Read file bytes for text extraction (needed by ingestion pipeline) ─
-            // For large files, we read in chunks, but for text extraction we need the full content
-            // TODO: Consider refactoring pipeline to support streaming for even better memory efficiency
-            byte[] fileBytes;
+            // ── 2. Run enrichment pipeline with file stream (streaming from disk) ─
+            // Instead of loading entire file into memory, we pass a FileStream
+            // This allows Tika to read directly from disk without holding the full file in RAM
+            var category = metadata?.GetValueOrDefault("category")?.ToString();
+            DocumentIngestionPipeline.IngestionResult ingestion;
             try
             {
-                fileBytes = await File.ReadAllBytesAsync(savedPath, cancellationToken);
+                await using var fileStreamForExtraction = new FileStream(
+                    savedPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: 4096,
+                    useAsync: true);
+
+                ingestion = await _ingestionPipeline.RunAsync(
+                    fileStreamForExtraction, fileName, contentType, category, cancellationToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to read file bytes for document {DocumentId}", documentId);
+                _logger.LogError(ex, "Failed to run ingestion pipeline for document {DocumentId}", documentId);
                 throw;
             }
 
-            // ── 3. RUN ALL ENRICHMENT STEPS VIA PIPELINE ─────────────────────
-            var category = metadata?.GetValueOrDefault("category")?.ToString();
-            var ingestion = await _ingestionPipeline.RunAsync(
-                fileBytes, fileName, contentType, category, cancellationToken);
+            // ── 3. MERGE PIPELINE METADATA WITH CALLER-SUPPLIED METADATA ─────
 
             // ── 3. MERGE PIPELINE METADATA WITH CALLER-SUPPLIED METADATA ─────
             var mergedMetadata = metadata ?? new Dictionary<string, object>();

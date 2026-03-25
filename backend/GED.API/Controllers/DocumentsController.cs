@@ -224,7 +224,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
-            return StatusCode(500, new { error = "Upload failed", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while uploading the document.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -404,7 +407,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting document {DocumentId}", id);
-            return StatusCode(500, new { error = "Failed to get document", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while retrieving the document.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -422,7 +428,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error downloading document {DocumentId}", id);
-            return StatusCode(500, new { error = "Download failed", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while downloading the document.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -452,7 +461,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error deleting document {DocumentId}", id);
-            return StatusCode(500, new { error = "Delete failed", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while deleting the document.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -599,7 +611,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error updating document {DocumentId}", id);
-            return StatusCode(500, new { error = "Update failed", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while updating the document.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -713,7 +728,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting OCR status for document {DocumentId}", id);
-            return StatusCode(500, new { error = "Failed to get OCR status", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while getting OCR status.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 
@@ -752,70 +770,96 @@ public async Task<ActionResult<Document>> UploadDocument(
     }
 
     /// <summary>
-    /// Export documents to CSV format with pagination support
+    /// Export documents to CSV format with pagination support and streaming
     /// </summary>
     [HttpPost("export")]
-    public async Task<IActionResult> ExportDocuments(
+    public async Task ExportDocuments(
         [FromBody] List<Guid>? documentIds = null,
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 1000)
+        [FromQuery] int pageSize = 1000,
+        CancellationToken cancellationToken = default)
     {
+        // Enforce max page size to prevent memory issues
+        pageSize = Math.Min(pageSize, 5000);
+        page = Math.Max(page, 1);
+
         try
         {
-            // Enforce max page size to prevent memory issues
-            pageSize = Math.Min(pageSize, 5000);
-            page = Math.Max(page, 1);
-
-            List<Document> documents;
+            // FIRST: Get total count (before any response body is written)
             int totalCount;
-
             if (documentIds != null && documentIds.Any())
             {
-                // Export specific documents (respect pagination)
-                var skip = (page - 1) * pageSize;
-                var pagedIds = documentIds.Skip(skip).Take(pageSize).ToList();
-                documents = await _documentService.GetDocumentsByIdsAsync(pagedIds);
                 totalCount = documentIds.Count;
             }
             else
             {
-                // Export all accessible documents with pagination
-                var query = _db.Documents
-                    .Where(d => d.Status != DocumentStatus.Deleted);
-                
-                totalCount = await query.CountAsync();
-                
-                documents = await query
-                    .OrderByDescending(d => d.CreatedAt)
-                    .Skip((page - 1) * pageSize)
-                    .Take(pageSize)
-                    .ToListAsync()
-                    .ContinueWith(t => t.Result.Select(MapToDocumentDto).ToList());
+                totalCount = await _db.Documents
+                    .Where(d => d.Status != DocumentStatus.Deleted)
+                    .CountAsync(cancellationToken);
             }
 
-            // Generate CSV
-            var csv = new System.Text.StringBuilder();
-            csv.AppendLine("Id,Title,Description,FileName,ContentType,FileSize,Category,Tags,CreatedAt,DocumentDate,Status");
-
-            foreach (var doc in documents)
-            {
-                var tags = doc.Tags != null ? string.Join(";", doc.Tags) : "";
-                csv.AppendLine($"\"{doc.Id}\",\"{EscapeCsv(doc.Title)}\",\"{EscapeCsv(doc.Description ?? "")}\",\"{EscapeCsv(doc.FileName)}\",\"{doc.ContentType}\",{doc.FileSize},\"{doc.Category}\",\"{EscapeCsv(tags)}\",\"{doc.CreatedAt:yyyy-MM-dd HH:mm:ss}\",\"{doc.DocumentDate:yyyy-MM-dd}\",\"{doc.Status}\"");
-            }
-
-            var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
-            
-            // Add pagination info to response headers
+            // SECOND: Set headers (now that count is known, before any body is written)
             Response.Headers["X-Total-Count"] = totalCount.ToString();
             Response.Headers["X-Page"] = page.ToString();
             Response.Headers["X-Page-Size"] = pageSize.ToString();
+            Response.Headers["Content-Type"] = "text/csv";
+            Response.Headers["Content-Disposition"] = $"attachment; filename=\"ged-export-{DateTime.UtcNow:yyyyMMdd}-page{page}.csv\"";
+
+            // THIRD: Write header and stream data
+            await Response.WriteAsync("Id,Title,Description,FileName,ContentType,FileSize,Category,Tags,CreatedAt,DocumentDate,Status\n", cancellationToken);
+
+            // Fetch paginated documents
+            var skip = (page - 1) * pageSize;
             
-            return File(bytes, "text/csv", $"ged-export-{DateTime.UtcNow:yyyyMMdd}-page{page}.csv");
+            if (documentIds != null && documentIds.Any())
+            {
+                // Specific document IDs
+                var pagedIds = documentIds.Skip(skip).Take(pageSize).ToList();
+                var docs = await _documentService.GetDocumentsByIdsAsync(pagedIds);
+                
+                foreach (var doc in docs)
+                {
+                    var tags = doc.Tags != null ? string.Join(";", doc.Tags) : "";
+                    var line = $"\"{doc.Id}\",\"{EscapeCsv(doc.Title)}\",\"{EscapeCsv(doc.Description ?? "")}\",\"{EscapeCsv(doc.FileName)}\",\"{doc.ContentType}\",{doc.FileSize},\"{doc.Category}\",\"{EscapeCsv(tags)}\",\"{doc.CreatedAt:yyyy-MM-dd HH:mm:ss}\",\"{doc.DocumentDate:yyyy-MM-dd}\",\"{doc.Status}\"\n";
+                    await Response.WriteAsync(line, cancellationToken);
+                    await Response.Body.FlushAsync(cancellationToken);
+                }
+            }
+            else
+            {
+                // Stream from database - process in batches to avoid loading all into memory
+                var batchSize = 100;
+                var currentSkip = skip;
+                
+                while (true)
+                {
+                    var batch = await _db.Documents
+                        .Where(d => d.Status != DocumentStatus.Deleted)
+                        .OrderByDescending(d => d.CreatedAt)
+                        .Skip(currentSkip)
+                        .Take(batchSize)
+                        .ToListAsync(cancellationToken);
+                    
+                    if (!batch.Any()) break;
+                    
+                    foreach (var entity in batch)
+                    {
+                        var doc = MapToDocumentDto(entity);
+                        var tags = doc.Tags != null ? string.Join(";", doc.Tags) : "";
+                        var line = $"\"{doc.Id}\",\"{EscapeCsv(doc.Title)}\",\"{EscapeCsv(doc.Description ?? "")}\",\"{EscapeCsv(doc.FileName)}\",\"{doc.ContentType}\",{doc.FileSize},\"{doc.Category}\",\"{EscapeCsv(tags)}\",\"{doc.CreatedAt:yyyy-MM-dd HH:mm:ss}\",\"{doc.DocumentDate:yyyy-MM-dd}\",\"{doc.Status}\"\n";
+                        await Response.WriteAsync(line, cancellationToken);
+                        await Response.Body.FlushAsync(cancellationToken);
+                    }
+                    
+                    currentSkip += batchSize;
+                    if (batch.Count < batchSize) break; // Last batch
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error exporting documents");
-            return StatusCode(500, new { error = "Export failed", message = ex.Message });
+            // Can't change status now - headers already sent
         }
     }
 
@@ -901,7 +945,10 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error retrying OCR");
-            return StatusCode(500, new { error = "Retry failed", message = ex.Message });
+            return StatusCode(500, new { 
+                error = "An error occurred while retrying OCR.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
         }
     }
 

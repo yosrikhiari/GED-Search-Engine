@@ -65,7 +65,9 @@ public class TikaTextExtractionService : ITextExtractionService
         _logger       = logger;
         _fallback     = fallback;
         _tikaUrl      = configuration["Tika:Url"] ?? "http://localhost:9998";
-        _tikaEnabled  = configuration.GetValue<bool>("Tika:Enabled", true);
+        
+        var enabledStr = configuration["Tika:Enabled"];
+        _tikaEnabled = bool.TryParse(enabledStr, out var enabled) ? enabled : true;
 
         // Set a sensible default timeout on the shared HttpClient
         if (_httpClient.Timeout == Timeout.InfiniteTimeSpan ||
@@ -108,6 +110,15 @@ public class TikaTextExtractionService : ITextExtractionService
             return Task.FromResult(true);
 
         return _fallback.SupportsContentType(contentType);
+    }
+
+    /// <summary>
+    /// Simulates a Tika failure for testing circuit breaker behavior.
+    /// Throws HttpRequestException to simulate an unavailable Tika server.
+    /// </summary>
+    public Task SimulateFailureAsync()
+    {
+        throw new HttpRequestException("Simulated Tika failure for testing");
     }
 
     // ── Private ───────────────────────────────────────────────────────────────

@@ -100,7 +100,7 @@ public class DocumentIngestionPipeline
     /// <summary>
     /// Runs all ingestion steps for a document.
     /// </summary>
-    /// <param name="fileBytes">Raw file bytes.</param>
+    /// <param name="fileStream">Stream containing the file data. Caller must ensure stream is readable.</param>
     /// <param name="fileName">Original filename.</param>
     /// <param name="contentType">MIME type of the file.</param>
     /// <param name="category">Document category (optional).</param>
@@ -116,9 +116,11 @@ public class DocumentIngestionPipeline
     /// 
     /// Tags are NOT generated here — they are generated later by OcrWorkerService
     /// after OCR completes, either via LLM enrichment or keyword fallback.
+    /// 
+    /// Note: The stream is NOT disposed by this method - the caller retains ownership.
     /// </remarks>
     public async Task<IngestionResult> RunAsync(
-        byte[]            fileBytes,
+        Stream            fileStream,
         string            fileName,
         string            contentType,
         string?           category,
@@ -126,8 +128,12 @@ public class DocumentIngestionPipeline
     {
         var metadata = new Dictionary<string, object>();
 
+        // Reset stream position if seekable
+        if (fileStream.CanSeek)
+            fileStream.Position = 0;
+
         // Step 1: Extract text (fast — Tika or built-in parser)
-        var extractedText = await ExtractTextSafeAsync(fileBytes, contentType, ct);
+        var extractedText = await ExtractTextSafeAsync(fileStream, contentType, ct);
 
         // Step 2: Generate description (synchronous, no LLM)
         var description = GenerateDescription(extractedText, fileName);
@@ -151,12 +157,15 @@ public class DocumentIngestionPipeline
     /// Safely extracts text from a document, handling errors gracefully.
     /// </summary>
     private async Task<string?> ExtractTextSafeAsync(
-        byte[] fileBytes, string contentType, CancellationToken ct)
+        Stream fileStream, string contentType, CancellationToken ct)
     {
         try
         {
-            using var stream = new MemoryStream(fileBytes);
-            var text = await _textExtractor.ExtractTextAsync(stream, contentType, ct);
+            // Reset position before extraction
+            if (fileStream.CanSeek)
+                fileStream.Position = 0;
+
+            var text = await _textExtractor.ExtractTextAsync(fileStream, contentType, ct);
             _logger.LogDebug("Text extraction: {Chars} chars from {Type}", text?.Length ?? 0, contentType);
             return text;
         }

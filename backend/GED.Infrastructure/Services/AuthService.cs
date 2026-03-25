@@ -2,6 +2,8 @@ using GED.Core.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.EntityFrameworkCore;
+using GED.Infrastructure.Data;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +15,7 @@ namespace GED.Infrastructure.Services;
 /// Authentication and user management service.
 /// 
 /// Provides:
-///   - User registration and login with bcrypt-style password hashing
+///   - User registration and login with PBKDF2 password hashing
 ///   - Session-based authentication (cookie) with role claims
 ///   - User CRUD (Admin only)
 ///
@@ -26,10 +28,13 @@ namespace GED.Infrastructure.Services;
 public class AuthService : IUserContext
 {
     private readonly ILogger<AuthService> _logger;
-    private readonly string _usersFilePath;
+    private readonly IDbContextFactory<GedDbContext>? _dbFactory;
+    private readonly string? _usersFilePath;
     private readonly IDistributedCache? _cache;
     private readonly TimeSpan _sessionDuration;
     private readonly bool _useRedis;
+    private readonly bool _useDatabase;
+    private bool _initialized;
 
     /// <summary>
     /// In-memory user store, backed by JSON file for persistence.
@@ -57,21 +62,27 @@ public class AuthService : IUserContext
 
     /// <summary>
     /// Initializes a new instance of <see cref="AuthService"/> with Redis session support.
+    /// Note: Initialization is deferred to InitializeAsync() to avoid file I/O in constructor.
     /// </summary>
     /// <param name="logger">Logger for authentication events.</param>
     /// <param name="configuration">Application configuration containing Auth:UsersFilePath setting.</param>
     /// <param name="cache">Optional Redis cache for session storage. If null, uses in-memory sessions.</param>
+    /// <param name="dbFactory">Optional DbContextFactory for database-backed user storage.</param>
     public AuthService(
         ILogger<AuthService> logger, 
         IConfiguration configuration,
-        IDistributedCache? cache = null)
+        IDistributedCache? cache = null,
+        IDbContextFactory<GedDbContext>? dbFactory = null)
     {
         _logger         = logger;
-        _usersFilePath  = configuration["Auth:UsersFilePath"] ?? "/var/lib/ged/users.json";
+        _dbFactory      = dbFactory;
+        _usersFilePath  = configuration["Auth:UsersFilePath"];
         _cache          = cache;
         _useRedis       = cache != null;
-        _sessionDuration = TimeSpan.FromHours(
-            configuration.GetValue<int>("Auth:SessionDurationHours", 8));
+        _useDatabase    = dbFactory != null;
+        
+        var sessionHours = configuration["Auth:SessionDurationHours"];
+        _sessionDuration = TimeSpan.FromHours(int.TryParse(sessionHours, out var h) ? h : 8);
 
         if (_useRedis)
         {
@@ -79,11 +90,29 @@ public class AuthService : IUserContext
         }
         else
         {
-            _logger.LogWarning("Redis not available - using in-memory session storage (not scalable)");
+            _logger.LogWarning("Redis not available - using in-memory session storage");
+        }
+        // Note: LoadUsers() and EnsureDefaultAdmin() are now called via InitializeAsync()
+    }
+
+    /// <summary>
+    /// Initializes the AuthService by loading users from database or file.
+    /// Call this once at application startup via AuthInitializationHostedService.
+    /// </summary>
+    public Task InitializeAsync()
+    {
+        if (_initialized)
+        {
+            _logger.LogDebug("AuthService already initialized, skipping");
+            return Task.CompletedTask;
         }
 
+        _logger.LogInformation("Initializing AuthService...");
         LoadUsers();
         EnsureDefaultAdmin();
+        _initialized = true;
+        _logger.LogInformation("AuthService initialized with {UserCount} users", _users.Count);
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -236,11 +265,27 @@ public class AuthService : IUserContext
             return null;
         }
 
-        // Update last login time
+        // Migrate password hash to new iteration count if needed
+        var currentIterations = GetIterationsFromHash(user.PasswordHash);
+        bool passwordHashMigrated = false;
+        if (currentIterations < CurrentIterationCount)
+        {
+            _logger.LogInformation(
+                "Migrating password hash for user '{Username}' from {OldIter} to {NewIter} iterations",
+                user.Username, currentIterations, CurrentIterationCount);
+            
+            user.PasswordHash = HashPassword(request.Password);
+            passwordHashMigrated = true;
+        }
+
+        // Update last login time and save if password was migrated
         lock (_lock)
         {
             user.LastLoginAt = DateTime.UtcNow;
-            SaveUsers();
+            if (passwordHashMigrated)
+            {
+                SaveUsers();
+            }
         }
 
         // Generate cryptographically secure session token (256 bits)
@@ -432,42 +477,82 @@ public class AuthService : IUserContext
     }
 
     /// <summary>
+    /// Current PBKDF2 iteration count (OWASP 2023 recommended minimum: 310,000 for SHA-256).
+    /// </summary>
+    private const int CurrentIterationCount = 310_000;
+
+    /// <summary>
     /// Hashes a password using PBKDF2 with SHA-256.
-    /// Uses 100,000 iterations for security against brute-force attacks.
+    /// Uses 310,000 iterations for security against brute-force attacks (OWASP 2023).
+    /// Format: "iterations:salt:hash" to support future migrations.
     /// </summary>
     /// <param name="password">The plaintext password to hash.</param>
-    /// <returns>Base64-encoded salt and hash in format "salt:hash".</returns>
+    /// <returns>Base64-encoded salt and hash in format "iterations:salt:hash".</returns>
     private static string HashPassword(string password)
     {
-        // PBKDF2 with SHA-256, 100k iterations — secure without BCrypt dependency
         var salt = RandomNumberGenerator.GetBytes(16);
         var hash = Rfc2898DeriveBytes.Pbkdf2(
             Encoding.UTF8.GetBytes(password), salt,
-            100_000, HashAlgorithmName.SHA256, 32);
+            CurrentIterationCount, HashAlgorithmName.SHA256, 32);
 
-        return Convert.ToBase64String(salt) + ":" + Convert.ToBase64String(hash);
+        return $"{CurrentIterationCount}:{Convert.ToBase64String(salt)}:{Convert.ToBase64String(hash)}";
+    }
+
+    /// <summary>
+    /// Parses the iteration count from a stored hash.
+    /// Returns default for legacy hashes (format: "salt:hash" without iteration count).
+    /// </summary>
+    private static int GetIterationsFromHash(string storedHash)
+    {
+        var parts = storedHash.Split(':');
+        if (parts.Length == 3 && int.TryParse(parts[0], out var iterations))
+        {
+            return iterations;
+        }
+        return 100_000; // Legacy default
     }
 
     /// <summary>
     /// Verifies a password against a stored hash using constant-time comparison.
+    /// Supports both legacy format ("salt:hash") and new format ("iterations:salt:hash").
     /// </summary>
     /// <param name="password">The plaintext password to verify.</param>
-    /// <param name="storedHash">The stored hash in "salt:hash" format.</param>
+    /// <param name="storedHash">The stored hash in either format.</param>
     /// <returns>True if password matches, false otherwise.</returns>
     private static bool VerifyPassword(string password, string storedHash)
     {
         try
         {
             var parts = storedHash.Split(':');
-            if (parts.Length != 2) return false;
+            int iterations;
+            string saltBase64;
+            string hashBase64;
 
-            var salt       = Convert.FromBase64String(parts[0]);
-            var storedBytes = Convert.FromBase64String(parts[1]);
+            if (parts.Length == 3)
+            {
+                // New format: "iterations:salt:hash"
+                iterations = int.Parse(parts[0]);
+                saltBase64 = parts[1];
+                hashBase64 = parts[2];
+            }
+            else if (parts.Length == 2)
+            {
+                // Legacy format: "salt:hash"
+                iterations = 100_000;
+                saltBase64 = parts[0];
+                hashBase64 = parts[1];
+            }
+            else
+            {
+                return false;
+            }
 
-            // Re-compute hash with same salt and compare using constant-time algorithm
+            var salt = Convert.FromBase64String(saltBase64);
+            var storedBytes = Convert.FromBase64String(hashBase64);
+
             var hash = Rfc2898DeriveBytes.Pbkdf2(
                 Encoding.UTF8.GetBytes(password), salt,
-                100_000, HashAlgorithmName.SHA256, 32);
+                iterations, HashAlgorithmName.SHA256, 32);
 
             return CryptographicOperations.FixedTimeEquals(hash, storedBytes);
         }
@@ -565,20 +650,56 @@ public class AuthService : IUserContext
     }
 
     /// <summary>
-    /// Loads users from the JSON file into memory.
+    /// Loads users from database or JSON file into memory.
     /// Builds the username index for fast lookups.
     /// </summary>
     private void LoadUsers()
     {
+        if (_useDatabase && _dbFactory != null)
+        {
+            LoadUsersFromDatabase();
+        }
+        else
+        {
+            LoadUsersFromFile();
+        }
+    }
+
+    private void LoadUsersFromDatabase()
+    {
         try
         {
-            if (!File.Exists(_usersFilePath)) return;
+            using var db = _dbFactory!.CreateDbContext();
+            var entities = db.Users.AsNoTracking().ToList();
+            
+            _users.Clear();
+            _usersByUsername.Clear();
+            
+            // Users table already maps to AppUser in Core
+            foreach (var e in entities)
+            {
+                _users.Add(e);
+                _usersByUsername[e.Username.ToLowerInvariant()] = e;
+            }
+            _logger.LogInformation("✅ Loaded {Count} users from database", _users.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load users from database, falling back to file");
+            LoadUsersFromFile();
+        }
+    }
+
+    private void LoadUsersFromFile()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_usersFilePath) || !File.Exists(_usersFilePath)) return;
             var json  = File.ReadAllText(_usersFilePath);
             var users = JsonSerializer.Deserialize<List<AppUser>>(json);
             if (users != null)
             {
                 _users.AddRange(users);
-                // Build username index for O(1) lookup
                 foreach (var u in users)
                 {
                     _usersByUsername[u.Username.ToLowerInvariant()] = u;
@@ -593,11 +714,51 @@ public class AuthService : IUserContext
     }
 
     /// <summary>
-    /// Persists the in-memory user list to the JSON file.
-    /// Creates the directory if it doesn't exist.
+    /// Persists the in-memory user list to database or JSON file.
     /// </summary>
     private void SaveUsers()
     {
+        if (_useDatabase && _dbFactory != null)
+        {
+            SaveUsersToDatabase();
+        }
+        else
+        {
+            SaveUsersToFile();
+        }
+    }
+
+    private void SaveUsersToDatabase()
+    {
+        try
+        {
+            using var db = _dbFactory!.CreateDbContext();
+            
+            foreach (var user in _users)
+            {
+                var existing = db.Users.Find(user.Id);
+                if (existing == null)
+                {
+                    db.Users.Add(user);
+                }
+                else
+                {
+                    // Attach and update - let EF handle enum conversion
+                    db.Entry(existing).CurrentValues.SetValues(user);
+                }
+            }
+            db.SaveChanges();
+            _logger.LogInformation("✅ Saved {Count} users to database", _users.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save users to database");
+        }
+    }
+
+    private void SaveUsersToFile()
+    {
+        if (string.IsNullOrEmpty(_usersFilePath)) return;
         try
         {
             var dir = Path.GetDirectoryName(_usersFilePath);
@@ -606,6 +767,7 @@ public class AuthService : IUserContext
             var json = JsonSerializer.Serialize(_users,
                 new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(_usersFilePath, json);
+            _logger.LogInformation("✅ Saved {Count} users to {Path}", _users.Count, _usersFilePath);
         }
         catch (Exception ex)
         {

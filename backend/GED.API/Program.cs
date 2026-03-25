@@ -1,5 +1,6 @@
 using AspNetCoreRateLimit;
 using GED.API.Middleware;
+using GED.API.Services;
 using GED.Infrastructure.Resilience;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using HealthChecks.UI.Client;
@@ -14,18 +15,36 @@ using Microsoft.OpenApi.Models;
 using OpenSearch.Client;
 using OpenSearch.Net;
 using Serilog;
+using Polly;
+using Polly.CircuitBreaker;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // ── Serilog ───────────────────────────────────────────────────────────────────
+var logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+Directory.CreateDirectory(logDirectory);
+
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
     .WriteTo.Console()
-    .WriteTo.File("logs/ged-.txt", rollingInterval: RollingInterval.Day)
+    .WriteTo.File(Path.Combine(logDirectory, "ged-.txt"), rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
 builder.Host.UseSerilog();
+
+// ── OpenTelemetry Metrics ──────────────────────────────────────────────────────
+// TODO: Enable after package versions are verified
+// builder.Services.AddOpenTelemetry()
+//     .ConfigureResource(resource => resource.AddService("GED.API"))
+//     .WithMetrics(metrics => metrics
+//         .AddMeter("GED.API")
+//         .AddMeter("GED.Infrastructure")
+//         .AddHttpClientInstrumentation()
+//         .AddAspNetCoreInstrumentation());
+
+builder.Services.AddSingleton<IRabbitMqStatusProvider, RabbitMqStatusProvider>();
+builder.Services.AddSingleton<MetricsRegistry>();
 
 // ── Controllers & Swagger ─────────────────────────────────────────────────────
 builder.Services.AddControllers()
@@ -109,12 +128,24 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = (long)maxUploadMb * 1024 * 1024;
 });
 
+// ── Required Configuration Validation ───────────────────────────────────────────
+var isDevelopment = builder.Environment.IsDevelopment();
+ValidateRequiredConfiguration(builder.Configuration, isDevelopment);
+
 // ── SQL Server / EF Core ──────────────────────────────────────────────────────
-var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? "Server=localhost;Database=ged_db;User Id=ged_user;Password=ged_pass;TrustServerCertificate=True;";
+var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 // Resolve environment variable placeholders like ${VAR_NAME}
-var connectionString = ResolveEnvironmentVariables(rawConnectionString);
+var connectionString = ResolveEnvironmentVariables(rawConnectionString ?? "");
+
+// Validate required configuration - fail fast if not set
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException(
+        "FATAL: ConnectionStrings__DefaultConnection is not set. " +
+        "Please configure the database connection via environment variable. " +
+        "Example: ConnectionStrings__DefaultConnection='Server=myserver;Database=ged_db;User Id=myuser;Password=mypassword;TrustServerCertificate=True;'");
+}
 
 // Add connection pooling parameters to connection string
 if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
@@ -125,6 +156,15 @@ if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
 
 Log.Information("Database connection string configured (password masked): {ConnStr}", MaskConnectionString(connectionString));
 
+// AddDbContextFactory for singleton services that need DbContext (e.g., AuthService)
+builder.Services.AddDbContextFactory<GedDbContext>(options =>
+    options.UseSqlServer(connectionString, sqlServer =>
+    {
+        sqlServer.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), null);
+    })
+);
+
+// Also register DbContext as Scoped for controllers and other services
 builder.Services.AddDbContext<GedDbContext>(options =>
     options.UseSqlServer(connectionString, sqlServer =>
     {
@@ -170,7 +210,6 @@ var opensearchUsername = ResolveEnvironmentVariables(builder.Configuration["Open
 var opensearchPassword = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Password"] ?? "");
 var opensearchSecurityEnabledRaw = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:SecurityEnabled"] ?? "false");
 var opensearchSecurityEnabled = bool.TryParse(opensearchSecurityEnabledRaw, out var osSec) && osSec;
-var isDevelopment = builder.Environment.IsDevelopment();
 
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
@@ -235,7 +274,25 @@ else
 
 // ── Text Extraction ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<TextExtractionService>();
-builder.Services.AddHttpClient<TikaTextExtractionService>();
+builder.Services.AddHttpClient<TikaTextExtractionService>()
+    .AddPolicyHandler((serviceProvider, request) =>
+    {
+        return Policy<HttpResponseMessage>
+            .Handle<HttpRequestException>()
+            .OrResult(response => (int)response.StatusCode >= 500)
+            .CircuitBreakerAsync(
+                handledEventsAllowedBeforeBreaking: 5,
+                durationOfBreak: TimeSpan.FromSeconds(30),
+                onBreak: (outcome, breakDuration) =>
+                {
+                    Log.Warning(
+                        "Tika circuit breaker OPEN for {Duration}s due to: {Failure}",
+                        breakDuration.TotalSeconds, 
+                        outcome.Exception?.Message ?? outcome.Result?.StatusCode.ToString());
+                },
+                onReset: () => Log.Information("Tika circuit breaker RESET - resuming normal operation"),
+                onHalfOpen: () => Log.Information("Tika circuit breaker HALF-OPEN - testing connection"));
+    });
 builder.Services.AddScoped<ITextExtractionService>(sp =>
 {
     var fallback = sp.GetRequiredService<TextExtractionService>();
@@ -276,15 +333,21 @@ builder.Services.AddScoped<IChunkRerankerService, ChunkRerankerService>();
 builder.Services.AddScoped<IQueryClassifierService, QueryClassifierService>();
 
 // ── Auth Service ──────────────────────────────────────────────────────────────
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+
 builder.Services.AddSingleton<AuthService>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<AuthService>>();
     var config = sp.GetRequiredService<IConfiguration>();
     var cache = sp.GetService<IDistributedCache>(); // Nullable - AuthService handles null
+    var dbFactory = sp.GetService<IDbContextFactory<GedDbContext>>(); // Nullable - uses file fallback
     
-    return new AuthService(logger, config, cache);
+    return new AuthService(logger, config, cache, dbFactory);
 });
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
+
+// Initialize AuthService at startup (via hosted service)
+builder.Services.AddHostedService<AuthInitializationHostedService>();
 
 // ── Audit Service ─────────────────────────────────────────────────────────────
 builder.Services.AddScoped<IAuditService, AuditService>();
@@ -351,25 +414,23 @@ builder.Services.AddScoped<DocumentIngestionPipeline>();
 // ── Health Checks ─────────────────────────────────────────────────────────────
 var sqlConnectionStr = connectionString;
 var redisConnection  = redisConnectionStr;
-var rabbitHost       = rabbitMqHost;
-var rabbitUser       = rabbitMqUser;
-var rabbitPass       = rabbitMqPass;
 
-builder.Services.AddSingleton(new Lazy<RabbitMQ.Client.IConnection>(() =>
-{
-    var factory = new ConnectionFactory
-    {
-        Uri = new Uri($"amqp://{rabbitUser}:{rabbitPass}@{rabbitHost}")
-    };
-    return factory.CreateConnectionAsync().GetAwaiter().GetResult();
-}));
+// ── RabbitMQ Connection (async, non-blocking) ─────────────────────────────────
+builder.Services.AddSingleton<RabbitMqConnectionService>();
+builder.Services.AddSingleton(sp => sp.GetRequiredService<RabbitMqConnectionService>().Connection!);
 
 builder.Services.AddHealthChecks()
     .AddSqlServer(sqlConnectionStr, name: "sqlserver", tags: new[] { "db", "critical" },
         timeout: TimeSpan.FromSeconds(3))
     .AddRedis(redisConnection, name: "redis", tags: new[] { "cache" },
         timeout: TimeSpan.FromSeconds(2))
-    .AddRabbitMQ(sp => sp.GetRequiredService<Lazy<RabbitMQ.Client.IConnection>>().Value,
+    .AddRabbitMQ(sp => 
+    {
+        var conn = sp.GetRequiredService<RabbitMqConnectionService>().Connection;
+        if (conn == null || !conn.IsOpen)
+            throw new InvalidOperationException("RabbitMQ not connected");
+        return conn;
+    },
         name: "rabbitmq", tags: new[] { "messaging", "critical" },
         timeout: TimeSpan.FromSeconds(5));
 
@@ -647,5 +708,38 @@ public partial class Program
                 var defaultValue = match.Groups[2].Success ? match.Groups[2].Value : "";
                 return Environment.GetEnvironmentVariable(varName) ?? defaultValue;
             });
+    }
+
+    /// <summary>
+    /// Validates required environment variables in non-development environments.
+    /// Fails fast if critical configuration is missing.
+    /// </summary>
+    private static void ValidateRequiredConfiguration(IConfiguration configuration, bool isDevelopment)
+    {
+        var errors = new List<string>();
+        
+        // Database connection - critical in production
+        var dbConn = ResolveEnvironmentVariables(configuration.GetConnectionString("DefaultConnection") ?? "");
+        if (string.IsNullOrWhiteSpace(dbConn) && !isDevelopment)
+            errors.Add("ConnectionStrings__DefaultConnection (database)");
+        
+        // RabbitMQ - critical
+        var rabbitHost = ResolveEnvironmentVariables(configuration["RabbitMQ:Host"] ?? "");
+        if (string.IsNullOrWhiteSpace(rabbitHost) && !isDevelopment)
+            errors.Add("RabbitMQ:Host");
+        
+        // OpenSearch - critical
+        var opensearchUrl = ResolveEnvironmentVariables(configuration["OpenSearch:Url"] ?? "");
+        if (string.IsNullOrWhiteSpace(opensearchUrl) && !isDevelopment)
+            errors.Add("OpenSearch:Url");
+        
+        if (errors.Any())
+        {
+            throw new InvalidOperationException(
+                $"FATAL: Missing required production configuration. Please set the following environment variables:\n" +
+                string.Join("\n", errors.Select(e => $"  - {e}")));
+        }
+        
+        Log.Information("Configuration validation passed");
     }
 }
