@@ -1031,8 +1031,7 @@ import { auth } from '../api.js'
 
 // ── API helpers ────────────────────────────────────────────────────────────────
 const apiFetch = async (path, opts = {}) => {
-  const token = localStorage.getItem('ged_token')
-  const headers = { ...(opts.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+  const headers = { ...(opts.headers || {}) }
   if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json'
   return fetch(path, { ...opts, headers, credentials: 'include' })
 }

@@ -4,6 +4,10 @@
       <div>
         <h1 class="page-title">
           Taxonomie des documents
+          <span
+            class="help-icon"
+            title="La taxonomie définit comment vos documents sont classés. Les catégories sont des regroupements de haut niveau (Facture, Contrat...) et les étiquettes sont des labels d'utilisation (urgent, important...). Les éléments système ne peuvent pas être supprimés."
+          >ℹ️</span>
         </h1>
         <p class="page-subtitle">
           Gérez les catégories, étiquettes et la structure de classification
@@ -59,13 +63,19 @@
             </div>
           </div>
           <div class="cat-footer">
-            <span class="cat-meta">
-              {{ cat.isSystem ? '🔒 Système' : 'Personnalisé' }}
-              <span
-                v-if="!cat.isActive"
-                class="inactive-badge"
-              >Désactivé</span>
-            </span>
+              <span class="cat-meta">
+                <span
+                  :title="cat.isSystem ? 'Catégorie système : gérée par le système, ne peut pas être supprimée' : 'Catégorie personnalisée : créée par un administrateur'"
+                >{{ cat.isSystem ? '🔒 Système' : 'Personnalisé' }}</span>
+                <span
+                  v-if="categoryTagCounts[cat.name]"
+                  class="tag-count-badge"
+                >#️⃣ {{ categoryTagCounts[cat.name] }}</span>
+                <span
+                  v-if="!cat.isActive"
+                  class="inactive-badge"
+                >Désactivé</span>
+              </span>
             <div class="cat-actions">
               <button
                 class="btn-icon-sm"
@@ -207,7 +217,9 @@
             </p>
             <div class="tag-footer">
               <span class="tag-meta">
-                {{ tag.isSystem ? '🔒 Système' : 'Personnalisé' }}
+                <span
+                  :title="tag.isSystem ? 'Étiquette système : gérée par le système, ne peut pas être supprimée' : 'Étiquette personnalisée : créée par un administrateur'"
+                >{{ tag.isSystem ? '🔒 Système' : 'Personnalisé' }}</span>
                 <span
                   v-if="!tag.isActive"
                   class="inactive-badge"
@@ -488,7 +500,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 const tabs = [
   { id: 'categories', label: 'Catégories', icon: '📁' },
@@ -510,6 +522,16 @@ const fetchCategories = async () => {
     if (res.ok) categories.value = await res.json()
   } catch (e) { console.error('[Taxonomy] fetchCategories:', e) }
 }
+
+const categoryTagCounts = computed(() => {
+  const counts = {}
+  tags.value.forEach(t => {
+    if (t.category) {
+      counts[t.category] = (counts[t.category] || 0) + 1
+    }
+  })
+  return counts
+})
 
 const saveCategory = async () => {
   if (!categoryForm.value.name?.trim()) return
@@ -656,6 +678,9 @@ onMounted(() => {
 
 <style scoped>
 .taxonomy-page { padding: 1.5rem; }
+.page-title { display: flex; align-items: center; gap: 0.5rem; }
+.help-icon { cursor: help; font-size: 1rem; opacity: 0.6; }
+.help-icon:hover { opacity: 1; }
 .taxonomy-tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; }
 .tab-btn { padding: 0.5rem 1rem; border: none; background: none; cursor: pointer; border-radius: 6px; font-size: 0.9rem; color: #6b7280; transition: all 0.15s; }
 .tab-btn:hover { background: #f3f4f6; color: #374151; }
@@ -674,6 +699,7 @@ onMounted(() => {
 .cat-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 0.75rem; border-top: 1px solid #f3f4f6; }
 .cat-meta, .tag-meta { font-size: 0.75rem; color: #9ca3af; }
 .inactive-badge { background: #fef3c7; color: #d97706; padding: 0.1rem 0.4rem; border-radius: 4px; margin-left: 0.25rem; font-size: 0.7rem; }
+.tag-count-badge { background: #eff6ff; color: #2563eb; padding: 0.1rem 0.4rem; border-radius: 4px; margin-left: 0.5rem; font-size: 0.7rem; }
 .cat-actions, .tag-actions { display: flex; gap: 0.25rem; }
 .tags-toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
 .search-input-wrap { position: relative; flex: 1; min-width: 200px; }

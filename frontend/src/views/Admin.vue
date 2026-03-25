@@ -972,7 +972,7 @@
               Gestion des utilisateurs
             </h1>
             <p class="page-subtitle">
-              {{ users.length }} utilisateur(s) enregistré(s)
+              {{ filteredUsers.length }} utilisateur(s) trouvé(s)
             </p>
           </div>
           <button
@@ -984,6 +984,38 @@
         </div>
 
         <div class="table-card">
+          <!-- Search bar -->
+          <div class="users-search-bar">
+            <div class="search-input-wrap">
+              <svg
+                class="search-icon"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+              <input
+                v-model="userSearch"
+                type="text"
+                placeholder="Rechercher un utilisateur..."
+                class="search-input-inline"
+              >
+              <button
+                v-if="userSearch"
+                class="search-clear"
+                @click="userSearch = ''"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
           <div
             v-if="loadingUsers"
             class="loading-state"
@@ -1005,7 +1037,7 @@
             </thead>
             <tbody>
               <tr
-                v-for="u in users"
+                v-for="u in filteredUsers"
                 :key="u.id"
               >
                 <td>
@@ -1040,8 +1072,16 @@
                 </td>
                 <td>
                   <button
+                    class="btn-icon-sm"
+                    title="Modifier"
+                    @click="editUser(u)"
+                  >
+                    ✏️
+                  </button>
+                  <button
                     v-if="u.isActive"
                     class="btn-icon-sm danger"
+                    title="Désactiver"
                     @click="deactivateUser(u)"
                   >
                     Désactiver
@@ -1072,26 +1112,48 @@
               Vue d'ensemble de la GED et de la file OCR
             </p>
           </div>
-          <button
-            class="btn-secondary"
-            :disabled="statsLoading"
-            @click="fetchStats"
-          >
-            <svg
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              style="width:15px;height:15px"
+          <div class="stats-actions">
+            <button
+              class="btn-secondary"
+              :disabled="statsLoading"
+              @click="exportStatsCsv"
             >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-              />
-            </svg>
-            Actualiser
-          </button>
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                style="width:15px;height:15px"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                />
+              </svg>
+              Exporter CSV
+            </button>
+            <button
+              class="btn-secondary"
+              :disabled="statsLoading"
+              @click="fetchStats"
+            >
+              <svg
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                style="width:15px;height:15px"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+              Actualiser
+            </button>
+          </div>
         </div>
 
         <!-- KPI cards -->
@@ -1222,6 +1284,13 @@
         </div>
 
         <!-- OCR queue -->
+        <!-- ═══════════════════════════════════════════════════════════════════════
+        OCR Queue - DISABLED pending backend endpoint
+        TODO: Re-enable when backend exposes GET /api/ocr/pending-jobs or similar
+        The OCR queue is RabbitMQ-based (queue: "ocr-queue") but no API exists to 
+        query pending jobs. Currently shows empty state which is misleading.
+        ═══════════════════════════════════════════════════════════════════════ -->
+        <!--
         <div class="stats-card">
           <h2 class="stats-card-title">
             <svg
@@ -1267,6 +1336,7 @@
             </div>
           </div>
         </div>
+        -->
 
         <!-- Users breakdown -->
         <div class="stats-card">
@@ -1389,7 +1459,7 @@
               title="Documents récents"
               subtitle="Derniers documents ajoutés"
               :show-view-all="false"
-              @select="(doc) => { /* TODO: navigate to document */ }"
+              @select="viewDocument"
             />
           </div>
         </div>
@@ -2662,31 +2732,19 @@
     <div
       v-if="showCreateUser"
       class="modal-overlay"
-      @click.self="showCreateUser = false"
+      @click.self="showCreateUser = false; editingUserId = null"
     >
       <div class="modal">
         <div class="modal-header">
-          <h2>Créer un utilisateur</h2>
+          <h2>{{ editingUserId ? 'Modifier l\'utilisateur' : 'Créer un utilisateur' }}</h2>
           <button
             class="close-btn"
-            @click="showCreateUser = false"
+            @click="showCreateUser = false; editingUserId = null"
           >
             ✕
           </button>
         </div>
         <div class="modal-body">
-          <div
-            v-if="userError"
-            class="banner error"
-          >
-            {{ userError }}
-          </div>
-          <div
-            v-if="userSuccess"
-            class="banner success"
-          >
-            {{ userSuccess }}
-          </div>
           <div class="form-row">
             <label class="form-label">Nom d'utilisateur *</label>
             <input
@@ -2696,12 +2754,12 @@
             >
           </div>
           <div class="form-row">
-            <label class="form-label">Mot de passe *</label>
+            <label class="form-label">Mot de passe {{ editingUserId ? '(laisser vide pour garder l\'actuel)' : '*' }}</label>
             <input
               v-model="newUser.password"
               type="password"
               class="form-input"
-              placeholder="Min. 8 caractères"
+              :placeholder="editingUserId ? '••••••••' : 'Min. 8 caractères'"
             >
           </div>
           <div class="form-row">
@@ -2744,7 +2802,7 @@
           <div class="modal-footer">
             <button
               class="btn-ghost"
-              @click="showCreateUser = false"
+              @click="showCreateUser = false; editingUserId = null"
             >
               Annuler
             </button>
@@ -2753,7 +2811,7 @@
               class="btn-primary"
               @click="createUser"
             >
-              {{ savingUser ? 'Création…' : 'Créer' }}
+              {{ savingUser ? 'Enregistrement…' : (editingUserId ? 'Enregistrer' : 'Créer') }}
             </button>
           </div>
         </div>
@@ -2765,6 +2823,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
+import { useUiStore } from '@/stores/ui.js'
 import AccessManagementModal from '../components/AccessManagementModal.vue'
 import TaxonomyManager from '../components/TaxonomyManager.vue'
 import ChartWidget from '../shared/ui/ChartWidget.vue'
@@ -2797,6 +2856,7 @@ const taxonomyBreadcrumbs = computed(() => [
 ])
 
 const router = useRouter()
+const ui = useUiStore()
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 const user = computed(() => JSON.parse(localStorage.getItem('ged_user') || '{}'))
@@ -2804,7 +2864,7 @@ const userInitials = computed(() => {
   const n = user.value?.fullName || user.value?.username || '?'
   return n.split(' ').map(c => c[0]).join('').toUpperCase().slice(0, 2)
 })
-const authHeader = () => ({ 'Authorization': `Bearer ${localStorage.getItem('ged_token')}`, 'Content-Type': 'application/json' })
+const jsonHeaders = () => ({ 'Content-Type': 'application/json' })
 const logout = () => { localStorage.clear(); router.push('/login') }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────────
@@ -2995,7 +3055,7 @@ const fetchPickerDocs = async () => {
     // Use wildcard search to get all documents
     const res = await fetch('/api/search/query', {
       method: 'POST',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 500 })
     })
     if (res.ok) {
@@ -3031,7 +3091,7 @@ const onSearchInput = () => {
   if (docSearch.value.trim().length < 2) { showAutocomplete.value = false; autocompleteSuggestions.value = []; return }
   _acTimer = setTimeout(async () => {
     try {
-      const r = await fetch(`/api/search/suggestions?q=${encodeURIComponent(docSearch.value)}`, { headers: authHeader() })
+      const r = await fetch(`/api/search/suggestions?q=${encodeURIComponent(docSearch.value)}`, { headers: jsonHeaders() })
       if (r.ok) {
         const data = await r.json()
         autocompleteSuggestions.value = Array.isArray(data) ? data.slice(0, 7) : []
@@ -3082,7 +3142,7 @@ const fetchDocuments = async (query = '') => {
     const body = { query: query.trim() || '*', searchType, page: 1, pageSize: 50 }
     const res = await fetch('/api/search/query', {
       method: 'POST',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body: JSON.stringify(body)
     })
     if (res.ok) {
@@ -3136,7 +3196,7 @@ const askRag = async () => {
   try {
     const res = await fetch('/api/rag/ask', {
       method: 'POST',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body: JSON.stringify({
         query,
         language: 'fr',
@@ -3167,7 +3227,7 @@ const searchDocuments = async () => {
   try {
     const res = await fetch('/api/search/query', {
       method:  'POST',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body:    JSON.stringify(buildSearchBody(1))
     })
 
@@ -3239,7 +3299,7 @@ const goToPage = async (page) => {
   try {
     const res = await fetch('/api/search/query', {
       method:  'POST',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body:    JSON.stringify(buildSearchBody(page))
     })
     if (res.ok) {
@@ -3266,10 +3326,12 @@ const deleteDoc = async (doc) => {
   
   delete docPipelineStatuses.value[docId]
   
-  const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE', headers: authHeader() })
-  if (!res.ok) {
+  const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE', headers: jsonHeaders() })
+  if (res.ok) {
+    ui.success('Document supprimé.')
+  } else {
     await fetchDocuments()
-    alert('Erreur lors de la suppression.')
+    ui.error('Erreur lors de la suppression.')
   }
 }
 
@@ -3321,7 +3383,6 @@ const doUploadBatch = async () => {
       
       const res = await fetch('/api/documents/upload', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` },
         body: form
       })
       
@@ -3371,7 +3432,7 @@ const editError   = ref('')
 let _blobUrl = null
 const revokeBlobUrl = () => { if (_blobUrl) { URL.revokeObjectURL(_blobUrl); _blobUrl = null } }
 const fetchBlobUrl  = async (path, mime) => {
-  const res  = await fetch(path, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+  const res  = await fetch(path)
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const buf  = await res.arrayBuffer()
   const type = mime || res.headers.get('content-type')?.split(';')[0].trim() || 'application/octet-stream'
@@ -3412,7 +3473,7 @@ const startOcrPolling = (docId) => {
   ocrPollInterval.value = setInterval(async () => {
     n++
     try {
-      const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+      const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: jsonHeaders() })
       if (!res.ok) { if (n >= 50) stopOcrPolling(); return }
       const d = await res.json(); ocrStatus.value = d
       if (d.status === OcrStatus.TextExtracted && d.extractedText && !documentContent.value) {
@@ -3451,7 +3512,7 @@ const getOcrStatusClass = (status) => {
 const fetchDocOcrStatus = async (docId) => {
   try {
     console.log('[Pipeline Status] Fetching for:', docId)
-    const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeader() })
+    const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: jsonHeaders() })
     if (res.ok) {
       const data = await res.json()
       console.log('[Pipeline Status] Got data for:', docId, data.status, data.stageLabel)
@@ -3493,8 +3554,8 @@ const startDocListPolling = () => {
     for (const doc of pendingDocs) {
       try {
         const [docRes, ocrRes] = await Promise.all([
-          fetch(`/api/documents/${doc.id}`, { headers: authHeader() }),
-          fetch(`/api/documents/${doc.id}/ocr-status`, { headers: authHeader() })
+          fetch(`/api/documents/${doc.id}`, { headers: jsonHeaders() }),
+          fetch(`/api/documents/${doc.id}/ocr-status`, { headers: jsonHeaders() })
         ])
         
         if (docRes.status === 404) {
@@ -3600,7 +3661,7 @@ const viewDocument = async (doc) => {
   editError.value = ''
 
   try {
-    const r = await fetch(`/api/documents/${doc.id}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+    const r = await fetch(`/api/documents/${doc.id}`, { headers: jsonHeaders() })
     if (r.ok) {
       const fresh = await r.json()
       currentDocument.value = { ...fresh, score: doc.score, highlights: doc.highlights }
@@ -3619,17 +3680,17 @@ const viewDocument = async (doc) => {
     if (isPDF(doc.contentType) || isImage(doc.contentType) || isAudio(doc.contentType) || isVideo(doc.contentType)) {
       try { documentUrl.value = await fetchBlobUrl(dlPath, doc.contentType) } catch { documentUrl.value = dlPath }
     } else if (isText(doc.contentType)) {
-      const r = await fetch(dlPath, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+      const r = await fetch(dlPath)
       documentContent.value = r.ok ? await r.text() : '(impossible de charger le fichier)'
     } else if (isOffice(doc.contentType)) {
       try {
-        const r = await fetch(ocrPath, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+        const r = await fetch(ocrPath, { headers: jsonHeaders() })
         if (r.ok) { const d = await r.json(); ocrStatus.value = d; if (d.extractedText) documentContent.value = d.extractedText }
       } catch { /* non-fatal */ }
     }
     if (isPDF(doc.contentType) || isImage(doc.contentType)) {
       try {
-        const r = await fetch(ocrPath, { headers: { 'Authorization': `Bearer ${localStorage.getItem('ged_token')}` } })
+        const r = await fetch(ocrPath, { headers: jsonHeaders() })
         if (r.ok) {
           const d = await r.json(); ocrStatus.value = d
           if ([OcrStatus.Pending, OcrStatus.Processing, OcrStatus.TextExtracted, OcrStatus.LlmCleaning].includes(d.status)) startOcrPolling(doc.id)
@@ -3652,7 +3713,7 @@ const closeDocumentViewer = () => {
 const deleteDocFromViewer = async () => {
   if (!currentDocument.value) return
   if (!confirm(`Supprimer "${currentDocument.value.title}" ? Cette action est irréversible.`)) return
-  const res = await fetch(`/api/documents/${currentDocument.value.id}`, { method: 'DELETE', headers: authHeader() })
+  const res = await fetch(`/api/documents/${currentDocument.value.id}`, { method: 'DELETE', headers: jsonHeaders() })
   if (res.ok) {
     closeDocumentViewer()
     if (searched.value) searchDocuments()
@@ -3682,7 +3743,7 @@ const saveDocument = async () => {
     }
     const res = await fetch(`/api/documents/${currentDocument.value.id}`, {
       method: 'PUT',
-      headers: authHeader(),
+      headers: jsonHeaders(),
       body: JSON.stringify(payload)
     })
     if (res.ok) {
@@ -3722,9 +3783,19 @@ const accessGroups     = ref([])
 const accessSummaryData = ref([])  // Raw access summary for modal
 const accessStats      = reactive({ groups: 0, activeGrants: 0, expiredGrants: 0 })
 const savingUser     = ref(false)
-const userError      = ref('')
-const userSuccess    = ref('')
 const newUser        = ref({ username: '', password: '', fullName: '', email: '', role: 'User' })
+const editingUserId  = ref(null)
+const userSearch     = ref('')
+
+const filteredUsers = computed(() => {
+  if (!userSearch.value.trim()) return users.value
+  const q = userSearch.value.toLowerCase()
+  return users.value.filter(u => 
+    (u.username || '').toLowerCase().includes(q) ||
+    (u.fullName || '').toLowerCase().includes(q) ||
+    (u.email || '').toLowerCase().includes(q)
+  )
+})
 
 const nonAdminUsers = computed(() => users.value.filter(u => u.role !== 'Admin' && u.isActive))
 
@@ -3742,7 +3813,7 @@ const onAccessSaved = () => {
 /** Charge les groupes pour l'aperçu */
 const loadGroups = async () => {
   try {
-    const gRes = await fetch('/api/groups', { headers: authHeader() })
+    const gRes = await fetch('/api/groups', { headers: jsonHeaders() })
     if (gRes.ok) {
       const gs = await gRes.json()
       accessGroups.value = gs
@@ -3756,7 +3827,7 @@ const loadGroups = async () => {
 /** Charge les droits d'accès */
 const loadRights = async () => {
   try {
-    const rRes = await fetch('/api/groups/users/access-summary', { headers: authHeader() })
+    const rRes = await fetch('/api/groups/users/access-summary', { headers: jsonHeaders() })
     if (rRes.ok) {
       const summary = await rRes.json()
       accessSummaryData.value = summary  // Store raw data for modal
@@ -3793,38 +3864,65 @@ watch(activeTab, async (tab) => {
 const fetchUsers = async () => {
   loadingUsers.value = true
   try {
-    const res = await fetch('/api/auth/users', { headers: authHeader() })
+    const res = await fetch('/api/auth/users', { headers: jsonHeaders() })
     if (res.ok) users.value = await res.json()
   } finally { loadingUsers.value = false }
 }
 
 const createUser = async () => {
-  userError.value = userSuccess.value = ''
-  if (!newUser.value.username || !newUser.value.password) {
-    userError.value = 'Nom d\'utilisateur et mot de passe obligatoires.'
+  if (!newUser.value.username || (!newUser.value.password && !editingUserId.value)) {
+    ui.error('Nom d\'utilisateur obligatoire.')
     return
   }
   savingUser.value = true
   try {
-    const res = await fetch('/api/auth/register', {
-      method: 'POST', headers: authHeader(), body: JSON.stringify(newUser.value)
-    })
+    const payload = { ...newUser.value }
+    if (editingUserId.value) delete payload.password  // Don't update password if not provided
+    
+    const res = editingUserId.value
+      ? await fetch(`/api/auth/users/${editingUserId.value}`, {
+          method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(payload)
+        })
+      : await fetch('/api/auth/register', {
+          method: 'POST', headers: jsonHeaders(), body: JSON.stringify(payload)
+        })
+    
     if (res.ok) {
-      userSuccess.value = `Utilisateur "${newUser.value.username}" créé.`
+      ui.success(editingUserId.value ? 'Utilisateur mis à jour.' : `Utilisateur "${newUser.value.username}" créé.`)
       newUser.value = { username: '', password: '', fullName: '', email: '', role: 'User' }
+      editingUserId.value = null
       await fetchUsers()
-      setTimeout(() => { showCreateUser.value = false; userSuccess.value = '' }, 1500)
+      setTimeout(() => { showCreateUser.value = false }, 1500)
     } else {
       const e = await res.json()
-      userError.value = e.error || 'Erreur.'
+      ui.error(e.error || 'Erreur lors de l\'opération.')
     }
+  } catch (e) {
+    ui.error('Erreur de connexion.')
   } finally { savingUser.value = false }
+}
+
+const editUser = (u) => {
+  editingUserId.value = u.id
+  newUser.value = {
+    username: u.username || '',
+    password: '',  // Don't pre-fill password
+    fullName: u.fullName || '',
+    email: u.email || '',
+    role: u.role || 'User'
+  }
+  showCreateUser.value = true
 }
 
 const deactivateUser = async (u) => {
   if (!confirm(`Désactiver "${u.username}" ?`)) return
-  const res = await fetch(`/api/auth/users/${u.id}`, { method: 'DELETE', headers: authHeader() })
-  if (res.ok) fetchUsers()
+  const res = await fetch(`/api/auth/users/${u.id}`, { method: 'DELETE', headers: jsonHeaders() })
+  if (res.ok) {
+    ui.success(`Utilisateur "${u.username}" désactivé.`)
+    fetchUsers()
+  } else {
+    ui.error('Erreur lors de la désactivation.')
+  }
 }
 
 // ── ACL ────────────────────────────────────────────────────────────────────────
@@ -3856,7 +3954,7 @@ const openAcl = async (doc) => {
   showAcl.value  = true
   loadingAcl.value = true
   try {
-    const res = await fetch(`/api/documents/${doc.id}/acl`, { headers: authHeader() })
+    const res = await fetch(`/api/documents/${doc.id}/acl`, { headers: jsonHeaders() })
     if (res.ok) aclEntries.value = await res.json()
   } finally { loadingAcl.value = false }
 }
@@ -3872,7 +3970,7 @@ const grantAccess = async () => {
       expiresAt:  grantPermanent.value ? null : (grantExpiry.value ? new Date(grantExpiry.value).toISOString() : null)
     }
     const res = await fetch(`/api/documents/${aclDoc.value.id}/acl`, {
-      method: 'POST', headers: authHeader(), body: JSON.stringify(body)
+      method: 'POST', headers: jsonHeaders(), body: JSON.stringify(body)
     })
     if (res.ok) {
       const u = users.value.find(u => u.id === grantUserId.value)
@@ -3888,7 +3986,7 @@ const grantAccess = async () => {
 const revokeAccess = async (entry) => {
   if (!confirm(`Révoquer l'accès de ${entry.fullName || entry.username} ?`)) return
   const res = await fetch(`/api/documents/${aclDoc.value.id}/acl/${entry.id}`, {
-    method: 'DELETE', headers: authHeader()
+    method: 'DELETE', headers: jsonHeaders()
   })
   if (res.ok) {
     aclSuccess.value = 'Accès révoqué.'
@@ -3982,7 +4080,7 @@ const fetchStats = async () => {
   try {
     // Use wildcard search (searchType: 3) to get all documents
     const res = await fetch('/api/search/query', {
-      method: 'POST', headers: authHeader(),
+      method: 'POST', headers: jsonHeaders(),
       body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 100 })
     })
     if (res.ok) {
@@ -4002,12 +4100,68 @@ const fetchStats = async () => {
   } finally { statsLoading.value = false }
 }
 
+const exportStatsCsv = async () => {
+  ui.info('Récupération des données...')
+  
+  try {
+    // Fetch fresh data from API
+    const res = await fetch('/api/search/query', {
+      method: 'POST', headers: jsonHeaders(),
+      body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 10000 })
+    })
+    
+    if (!res.ok) throw new Error('API error')
+    
+    const data = await res.json()
+    const docs = data.documents || []
+    
+    if (!docs.length) {
+      ui.error('Aucune donnée à exporter.')
+      return
+    }
+    
+    if (docs.length >= 10000) {
+      ui.warning('Export limité à 10 000 documents.')
+      docs.length = 10000
+    }
+    
+    const headers = ['Titre', 'Nom du fichier', 'Catégorie', 'Type MIME', 'Taille (o)', 'Date création', 'Statut', 'Service']
+    const rows = docs.map(d => [
+      (d.title || '').replace(/"/g, '""'),
+      (d.fileName || '').replace(/"/g, '""'),
+      d.category || '',
+      d.contentType || '',
+      d.fileSize || 0,
+      d.createdDate ? new Date(d.createdDate).toISOString().split('T')[0] : '',
+      d.status || '',
+      d.service || ''
+    ])
+    
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(r => r.map(v => `"${v}"`).join(','))
+    ].join('\n')
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `ged-statistiques-${new Date().toISOString().split('T')[0]}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+    
+    ui.success(`${docs.length} document(s) exporté(s).`)
+  } catch (e) {
+    ui.error('Erreur lors de l\'export.')
+  }
+}
+
 const fetchRecentDocs = async () => {
   recentDocsLoading.value = true
   try {
     // Use wildcard search (searchType: 3) with sort
     const res = await fetch('/api/search/query', {
-      method: 'POST', headers: authHeader(),
+      method: 'POST', headers: jsonHeaders(),
       body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 10, sortBy: 'CreatedDate', sortDescending: true })
     })
     if (res.ok) {
@@ -4024,10 +4178,14 @@ const triggerReindex = async () => {
   if (!confirm('Lancer une ré-indexation complète ? Cette opération peut prendre plusieurs minutes.')) return
   reindexing.value = true; reindexMsg.value = ''
   try {
-    const res = await fetch('/api/search/reindex', { method: 'POST', headers: authHeader() })
-    reindexMsg.value = res.ok ? '✅ Ré-indexation lancée avec succès.' : `❌ Erreur : ${res.status}`
-  } catch { reindexMsg.value = '❌ Erreur réseau.' }
-  finally { reindexing.value = false; setTimeout(() => reindexMsg.value = '', 5000) }
+    const res = await fetch('/api/search/reindex', { method: 'POST', headers: jsonHeaders() })
+    if (res.ok) {
+      ui.success('Ré-indexation lancée avec succès.')
+    } else {
+      ui.error(`Erreur : ${res.status}`)
+    }
+  } catch { ui.error('Erreur réseau.') }
+  finally { reindexing.value = false }
 }
 
 onMounted(async () => {
@@ -4078,6 +4236,7 @@ onUnmounted(() => {
 
 /* ── Page header ────────────────────────────────────────────────────────────── */
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: .5rem; }
+.stats-actions { display: flex; gap: .5rem; }
 .page-title { font-size: 1.5rem; font-weight: 700; color: #0f172a; }
 .page-subtitle { font-size: .875rem; color: #64748b; margin-top: .2rem; }
 
@@ -4185,6 +4344,12 @@ onUnmounted(() => {
 
 /* ── User/doc table (for Users tab) ─────────────────────────────────────────── */
 .table-card { background: white; border-radius: 14px; border: 1px solid #e2e8f0; overflow: hidden; }
+.users-search-bar { padding: 1rem; border-bottom: 1px solid #e2e8f0; }
+.users-search-bar .search-input-wrap { position: relative; max-width: 320px; }
+.users-search-bar .search-input-inline { width: 100%; padding: .5rem 2rem .5rem 2.5rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: .875rem; }
+.users-search-bar .search-input-inline:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }
+.users-search-bar .search-clear { position: absolute; right: .5rem; top: 50%; transform: translateY(-50%); background: none; border: none; color: #9ca3af; cursor: pointer; font-size: .875rem; padding: .25rem; }
+.users-search-bar .search-clear:hover { color: #6b7280; }
 .doc-table { width: 100%; border-collapse: collapse; font-size: .875rem; }
 .doc-table th { background: #f8fafc; padding: .75rem 1rem; text-align: left; font-size: .75rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid #e2e8f0; }
 .doc-table td { padding: .875rem 1rem; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }

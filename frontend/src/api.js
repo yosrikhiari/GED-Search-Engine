@@ -1,5 +1,6 @@
 /**
- * Centralized API client with auth header injection, logging, and error handling.
+ * Centralized API client with cookie-based authentication, logging, and error handling.
+ * Authentication is handled automatically via browser cookies (credentials: 'include').
  * Automatically redirects to /login on 401 responses.
  */
 
@@ -43,19 +44,14 @@ export class ApiError extends Error {
 }
 
 /**
- * Core fetch wrapper with auth header injection, logging, and error handling.
+ * Core fetch wrapper with cookie-based auth, logging, and error handling.
+ * Authentication is handled automatically via browser cookies (credentials: 'include').
  */
 async function apiFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) }
 
   if (!(options.body instanceof FormData) && options.body && typeof options.body === 'string') {
     headers['Content-Type'] = 'application/json'
-  }
-
-  // Fallback: Add Authorization header if cookie auth might fail (CORS scenarios)
-  const token = localStorage.getItem('ged_access_token')
-  if (token && !headers['Authorization']) {
-    headers['Authorization'] = `Bearer ${token}`
   }
 
   const method = options.method || 'GET'
@@ -164,7 +160,6 @@ export const auth = {
   logout: async () => {
     await apiFetch('/api/auth/logout', { method: 'POST' })
     localStorage.removeItem('ged_user')
-    localStorage.removeItem('ged_access_token')
     window.location.href = '/login'
   },
 
