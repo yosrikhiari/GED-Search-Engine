@@ -161,21 +161,29 @@ public class DocumentService : IDocumentService
             var storedFileName = $"{documentId}{fileExtension}";
             var filePath = Path.Combine(_basePath, storedFileName);
 
-            // ── 1. Save file & compute SHA-256 hash ─────────────────────────
+            // ── 1. Stream file to disk while computing SHA-256 hash ──────────────
+            // This is memory-efficient - uses 80KB buffer instead of loading entire file
+            fileStream.Position = 0;
+            var (savedPath, fileHash) = await fileStream.WriteToFileWithHashAsync(filePath, cancellationToken);
+            _logger.LogInformation("Document {DocumentId} saved to {Path}, hash: {Hash}", documentId, savedPath, fileHash);
+
+            var fileInfo = new FileInfo(savedPath);
+
+            // ── 2. Read file bytes for text extraction (needed by ingestion pipeline) ─
+            // For large files, we read in chunks, but for text extraction we need the full content
+            // TODO: Consider refactoring pipeline to support streaming for even better memory efficiency
             byte[] fileBytes;
-            using (var ms = new MemoryStream())
+            try
             {
-                await fileStream.CopyToAsync(ms, cancellationToken);
-                fileBytes = ms.ToArray();
+                fileBytes = await File.ReadAllBytesAsync(savedPath, cancellationToken);
             }
-            await File.WriteAllBytesAsync(filePath, fileBytes, cancellationToken);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to read file bytes for document {DocumentId}", documentId);
+                throw;
+            }
 
-            var fileInfo = new FileInfo(filePath);
-            var fileHash = Convert.ToHexString(SHA256.HashData(fileBytes)).ToLower();
-
-            // ── 2. RUN ALL ENRICHMENT STEPS VIA PIPELINE ─────────────────────
-            // This replaces lines 90-160+ of mixed concerns (text extraction,
-            // description generation, tags, date extraction)
+            // ── 3. RUN ALL ENRICHMENT STEPS VIA PIPELINE ─────────────────────
             var category = metadata?.GetValueOrDefault("category")?.ToString();
             var ingestion = await _ingestionPipeline.RunAsync(
                 fileBytes, fileName, contentType, category, cancellationToken);

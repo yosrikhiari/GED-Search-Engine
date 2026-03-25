@@ -72,17 +72,24 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
+var corsOrigins = builder.Configuration["Cors:Origins"] ?? "http://localhost:3000,http://localhost:5173";
+var corsOriginList = corsOrigins.Split(',', StringSplitOptions.RemoveEmptyEntries)
+    .Select(o => o.Trim())
+    .ToArray();
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.WithOrigins("http://localhost:3000", "http://localhost:5173")
+        policy.WithOrigins(corsOriginList)
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials()
               .SetPreflightMaxAge(TimeSpan.FromMinutes(10));
     });
 });
+
+Log.Information("CORS configured with origins: {Origins}", string.Join(", ", corsOriginList));
 
 // ── Routing ───────────────────────────────────────────────────────────────────
 builder.Services.Configure<RouteOptions>(options =>
@@ -103,8 +110,11 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 // ── SQL Server / EF Core ──────────────────────────────────────────────────────
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Server=localhost;Database=ged_db;User Id=ged_user;Password=ged_pass;TrustServerCertificate=True;";
+
+// Resolve environment variable placeholders like ${VAR_NAME}
+var connectionString = ResolveEnvironmentVariables(rawConnectionString);
 
 // Add connection pooling parameters to connection string
 if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
@@ -112,6 +122,8 @@ if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
     var separator = connectionString.Contains(';') ? ";" : "";
     connectionString += $"{separator}Pooling=true;Min Pool Size=5;Max Pool Size=100;Connection Timeout=30;";
 }
+
+Log.Information("Database connection string configured (password masked): {ConnStr}", MaskConnectionString(connectionString));
 
 builder.Services.AddDbContext<GedDbContext>(options =>
     options.UseSqlServer(connectionString, sqlServer =>
@@ -121,14 +133,17 @@ builder.Services.AddDbContext<GedDbContext>(options =>
 );
 
 // ── Cookie authentication ─────────────────────────────────────────────────────
+var isProduction = !builder.Environment.IsDevelopment();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
         options.Cookie.Name     = "ged_session";
         options.Cookie.HttpOnly = true;
-        // options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SameSite = SameSiteMode.Lax;
         options.Cookie.Path = "/";
         options.Cookie.Domain = null;
+        // Only set Secure flag in production (HTTPS)
+        options.Cookie.SecurePolicy = isProduction ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
         options.ExpireTimeSpan  = TimeSpan.FromHours(8);
         options.SlidingExpiration = true;
         options.Events.OnRedirectToLogin = ctx =>
@@ -143,13 +158,18 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         };
     });
 
+Log.Information("Cookie security: SameSite=Lax, SecurePolicy={SecurePolicy} (Production={IsProd})", 
+    isProduction ? "Always" : "SameAsRequest", isProduction);
+
 builder.Services.AddAuthorization();
 
 // ── OpenSearch ────────────────────────────────────────────────────────────────
-var opensearchUrl      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
-var opensearchUsername = builder.Configuration["OpenSearch:Username"] ?? "";
-var opensearchPassword = builder.Configuration["OpenSearch:Password"] ?? "";
-var opensearchSecurityEnabled = builder.Configuration.GetValue<bool>("OpenSearch:SecurityEnabled", false);
+var opensearchUrlRaw      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
+var opensearchUrl = ResolveEnvironmentVariables(opensearchUrlRaw);
+var opensearchUsername = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Username"] ?? "");
+var opensearchPassword = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Password"] ?? "");
+var opensearchSecurityEnabledRaw = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:SecurityEnabled"] ?? "false");
+var opensearchSecurityEnabled = bool.TryParse(opensearchSecurityEnabledRaw, out var osSec) && osSec;
 var isDevelopment = builder.Environment.IsDevelopment();
 
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
@@ -159,7 +179,7 @@ var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
 // Configure authentication if security is enabled
 if (opensearchSecurityEnabled && !string.IsNullOrEmpty(opensearchUsername))
 {
-    connectionSettings.BasicAuthentication(opensearchUsername, opensearchPassword);
+    connectionSettings.BasicAuthentication(opensearchUsername, "****"); // Don't log password
     Log.Information("OpenSearch security enabled with user: {Username}", opensearchUsername);
 }
 else
@@ -178,9 +198,11 @@ if (isDevelopment)
 builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connectionSettings));
 
 // ── RabbitMQ ──────────────────────────────────────────────────────────────────
-var rabbitMqHost = builder.Configuration["RabbitMQ:Host"]     ?? "localhost";
-var rabbitMqUser = builder.Configuration["RabbitMQ:Username"] ?? "admin";
-var rabbitMqPass = builder.Configuration["RabbitMQ:Password"] ?? "admin123";
+var rabbitMqHost = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Host"] ?? "localhost");
+var rabbitMqUser = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Username"] ?? "admin");
+var rabbitMqPass = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Password"] ?? "");
+
+Log.Information("RabbitMQ configured: Host={Host}, User={User}", rabbitMqHost, rabbitMqUser);
 
 builder.Services.AddSingleton<RabbitMqService>(sp =>
     new RabbitMqService(
@@ -191,8 +213,10 @@ builder.Services.AddSingleton<IMessageQueueService>(sp =>
     sp.GetRequiredService<RabbitMqService>());
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
-var redisEnabled       = builder.Configuration.GetValue<bool>("Redis:Enabled", true);
-var redisConnectionStr = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
+var redisEnabledRaw = ResolveEnvironmentVariables(builder.Configuration["Redis:Enabled"] ?? "true");
+var redisEnabled = bool.TryParse(redisEnabledRaw, out var rEn) && rEn;
+var redisConnectionStrRaw = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
+var redisConnectionStr = ResolveEnvironmentVariables(redisConnectionStrRaw);
 
 if (redisEnabled)
 {
@@ -252,7 +276,14 @@ builder.Services.AddScoped<IChunkRerankerService, ChunkRerankerService>();
 builder.Services.AddScoped<IQueryClassifierService, QueryClassifierService>();
 
 // ── Auth Service ──────────────────────────────────────────────────────────────
-builder.Services.AddSingleton<AuthService>();
+builder.Services.AddSingleton<AuthService>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<AuthService>>();
+    var config = sp.GetRequiredService<IConfiguration>();
+    var cache = sp.GetService<IDistributedCache>(); // Nullable - AuthService handles null
+    
+    return new AuthService(logger, config, cache);
+});
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
 
 // ── Audit Service ─────────────────────────────────────────────────────────────
@@ -597,5 +628,24 @@ public partial class Program
         {
             return "**** (masking failed)";
         }
+    }
+
+    /// <summary>
+    /// Resolves environment variable placeholders in the format ${VAR_NAME} or ${VAR_NAME:-default}.
+    /// </summary>
+    private static string ResolveEnvironmentVariables(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        return System.Text.RegularExpressions.Regex.Replace(
+            value,
+            @"\$\{([^}:]+)(?::-([^}]*))?\}",
+            match =>
+            {
+                var varName = match.Groups[1].Value;
+                var defaultValue = match.Groups[2].Success ? match.Groups[2].Value : "";
+                return Environment.GetEnvironmentVariable(varName) ?? defaultValue;
+            });
     }
 }

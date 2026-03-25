@@ -1,6 +1,7 @@
 using GED.Core.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Caching.Distributed;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -19,12 +20,16 @@ namespace GED.Infrastructure.Services;
 /// Users are persisted in a JSON file for simplicity (no extra DB migration needed).
 /// In production you'd swap this for a proper user table.
 ///
-/// This satisfies the "droits d'accès" and "sécurité" requirements.
+/// Sessions are stored in Redis (via IDistributedCache) for horizontal scalability,
+/// with in-memory fallback if Redis is unavailable.
 /// </summary>
 public class AuthService : IUserContext
 {
     private readonly ILogger<AuthService> _logger;
     private readonly string _usersFilePath;
+    private readonly IDistributedCache? _cache;
+    private readonly TimeSpan _sessionDuration;
+    private readonly bool _useRedis;
 
     /// <summary>
     /// In-memory user store, backed by JSON file for persistence.
@@ -39,6 +44,7 @@ public class AuthService : IUserContext
 
     /// <summary>
     /// Active user sessions keyed by session token.
+    /// Only used for in-memory fallback; Redis is primary storage when available.
     /// Sessions auto-expire after 8 hours and are lazily cleaned up.
     /// </summary>
     private readonly Dictionary<string, (AppUser User, DateTime Expires)> _sessions = new();
@@ -50,15 +56,31 @@ public class AuthService : IUserContext
     private Dictionary<string, AppUser> _usersByUsername = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Initializes a new instance of <see cref="AuthService"/>.
-    /// Loads existing users from disk and ensures default admin/manager/user accounts exist.
+    /// Initializes a new instance of <see cref="AuthService"/> with Redis session support.
     /// </summary>
     /// <param name="logger">Logger for authentication events.</param>
     /// <param name="configuration">Application configuration containing Auth:UsersFilePath setting.</param>
-    public AuthService(ILogger<AuthService> logger, IConfiguration configuration)
+    /// <param name="cache">Optional Redis cache for session storage. If null, uses in-memory sessions.</param>
+    public AuthService(
+        ILogger<AuthService> logger, 
+        IConfiguration configuration,
+        IDistributedCache? cache = null)
     {
         _logger         = logger;
         _usersFilePath  = configuration["Auth:UsersFilePath"] ?? "/var/lib/ged/users.json";
+        _cache          = cache;
+        _useRedis       = cache != null;
+        _sessionDuration = TimeSpan.FromHours(
+            configuration.GetValue<int>("Auth:SessionDurationHours", 8));
+
+        if (_useRedis)
+        {
+            _logger.LogInformation("Using Redis-backed session storage");
+        }
+        else
+        {
+            _logger.LogWarning("Redis not available - using in-memory session storage (not scalable)");
+        }
 
         LoadUsers();
         EnsureDefaultAdmin();
@@ -67,6 +89,11 @@ public class AuthService : IUserContext
     /// <inheritdoc />
     public AppUser? GetUserByToken(string token)
     {
+        if (_useRedis && _cache != null)
+        {
+            return GetUserByTokenRedis(token);
+        }
+
         lock (_lock)
         {
             if (_sessions.TryGetValue(token, out var entry))
@@ -81,18 +108,84 @@ public class AuthService : IUserContext
         }
     }
 
+    private AppUser? GetUserByTokenRedis(string token)
+    {
+        try
+        {
+            var cacheKey = $"ged:session:{token}";
+            var cached = _cache?.GetString(cacheKey);
+            if (string.IsNullOrEmpty(cached))
+                return null;
+
+            var session = JsonSerializer.Deserialize<SessionData>(cached);
+            if (session == null || session.Expires < DateTime.UtcNow)
+            {
+                // Expired - remove from cache
+                if (session != null)
+                {
+                    _cache?.Remove(cacheKey);
+                }
+                return null;
+            }
+
+            // Find user by ID
+            var user = _users.FirstOrDefault(u => u.Id == session.UserId);
+            return user;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error reading session from Redis - falling back to in-memory");
+            // Fall back to in-memory on error
+            lock (_lock)
+            {
+                if (_sessions.TryGetValue(token, out var entry))
+                {
+                    if (entry.Expires > DateTime.UtcNow)
+                        return entry.User;
+                    _sessions.Remove(token);
+                }
+                return null;
+            }
+        }
+    }
+
     /// <inheritdoc />
     public bool Logout(string token)
     {
+        if (_useRedis && _cache != null)
+        {
+            return LogoutRedis(token);
+        }
+
         lock (_lock)
         {
             return _sessions.Remove(token);
         }
     }
 
+    private bool LogoutRedis(string token)
+    {
+        try
+        {
+            var cacheKey = $"ged:session:{token}";
+            _cache?.Remove(cacheKey);
+            _logger.LogDebug("Session {Token} removed from Redis", token[..Math.Min(8, token.Length)]);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error removing session from Redis");
+            lock (_lock)
+            {
+                return _sessions.Remove(token);
+            }
+        }
+    }
+
     /// <summary>
     /// Purges all expired sessions from the in-memory session store.
     /// Called periodically and lazily on each login attempt.
+    /// Note: Redis handles expiration automatically via TTL.
     /// </summary>
     private void PurgeExpiredSessions()
     {
@@ -105,51 +198,105 @@ public class AuthService : IUserContext
             _sessions.Remove(key);
     }
 
+    /// <summary>
+    /// Session data stored in Redis.
+    /// </summary>
+    private class SessionData
+    {
+        public Guid UserId { get; set; }
+        public DateTime Expires { get; set; }
+        public DateTime CreatedAt { get; set; }
+    }
+
     /// <inheritdoc />
     public LoginResponse? Login(LoginRequest request)
     {
+        AppUser? user;
+        
+        // Find user (outside lock for Redis to minimize lock time)
         lock (_lock)
         {
             PurgeExpiredSessions();
-
-            // Find active user by username (case-insensitive)
-            var user = _users.FirstOrDefault(u =>
+            
+            user = _users.FirstOrDefault(u =>
                 u.Username.Equals(request.Username, StringComparison.OrdinalIgnoreCase)
                 && u.IsActive);
+        }
 
-            if (user == null)
-            {
-                _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
-                return null;
-            }
+        if (user == null)
+        {
+            _logger.LogWarning("Login failed: unknown user '{Username}'", request.Username);
+            return null;
+        }
 
-            // Verify password using constant-time comparison to prevent timing attacks
-            if (!VerifyPassword(request.Password, user.PasswordHash))
-            {
-                _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
-                return null;
-            }
+        // Verify password using constant-time comparison to prevent timing attacks
+        if (!VerifyPassword(request.Password, user.PasswordHash))
+        {
+            _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
+            return null;
+        }
 
+        // Update last login time
+        lock (_lock)
+        {
             user.LastLoginAt = DateTime.UtcNow;
             SaveUsers();
-
-            // Generate cryptographically secure session token (256 bits)
-            var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            var expires      = DateTime.UtcNow.AddHours(8);
-            _sessions[sessionToken] = (user, expires);
-
-            _logger.LogInformation("✅ User '{Username}' logged in (role={Role})", user.Username, user.Role);
-
-            return new LoginResponse
-            {
-                Token     = sessionToken,
-                UserId   = user.Id,
-                Username  = user.Username,
-                FullName  = user.FullName,
-                Role      = user.Role,
-                ExpiresAt = expires
-            };
         }
+
+        // Generate cryptographically secure session token (256 bits)
+        var sessionToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        var expires = DateTime.UtcNow.Add(_sessionDuration);
+
+        // Store session in Redis or in-memory
+        if (_useRedis && _cache != null)
+        {
+            try
+            {
+                var sessionData = new SessionData
+                {
+                    UserId = user.Id,
+                    Expires = expires,
+                    CreatedAt = DateTime.UtcNow
+                };
+                
+                var cacheKey = $"ged:session:{sessionToken}";
+                var options = new DistributedCacheEntryOptions
+                {
+                    AbsoluteExpiration = expires
+                };
+                
+                _cache.SetString(cacheKey, JsonSerializer.Serialize(sessionData), options);
+                _logger.LogInformation("Session stored in Redis for user '{Username}'", user.Username);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to store session in Redis - using in-memory fallback");
+                lock (_lock)
+                {
+                    _sessions[sessionToken] = (user, expires);
+                }
+            }
+        }
+        else
+        {
+            lock (_lock)
+            {
+                _sessions[sessionToken] = (user, expires);
+            }
+        }
+
+        _logger.LogInformation("User '{Username}' logged in (role={Role}, sessionStore={Store})", 
+            user.Username, user.Role, _useRedis ? "Redis" : "Memory");
+
+        return new LoginResponse
+        {
+            Token     = sessionToken,
+            UserId   = user.Id,
+            Username  = user.Username,
+            FullName  = user.FullName,
+            Role      = user.Role,
+            ExpiresAt = expires
+        };
     }
 
     /// <inheritdoc />
@@ -332,23 +479,37 @@ public class AuthService : IUserContext
 
     /// <summary>
     /// Ensures default system accounts exist (admin, manager, user).
-    /// Creates them with known default passwords if they don't exist.
+    /// Creates them with passwords from environment variables (or generated if not set).
+    /// Only creates default accounts in Development environment.
     /// </summary>
     private void EnsureDefaultAdmin()
     {
+        var isDevelopment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development";
+        var createDefaults = Environment.GetEnvironmentVariable("AUTH_CREATE_DEFAULTS")?.ToLower() == "true";
+
+        if (!isDevelopment && !createDefaults)
+        {
+            _logger.LogInformation("Skipping default user creation (not Development and AUTH_CREATE_DEFAULTS != true)");
+            return;
+        }
+
         lock (_lock)
         {
             var changed = false;
 
+            var defaultAdminPassword = Environment.GetEnvironmentVariable("AUTH_DEFAULT_ADMIN_PASSWORD") ?? GenerateSecurePassword();
+            var defaultManagerPassword = Environment.GetEnvironmentVariable("AUTH_DEFAULT_MANAGER_PASSWORD") ?? GenerateSecurePassword();
+            var defaultUserPassword = Environment.GetEnvironmentVariable("AUTH_DEFAULT_USER_PASSWORD") ?? GenerateSecurePassword();
+
             // Create admin account if no admin exists
             if (!_users.Any(u => u.Role == UserRole.Admin))
             {
-                _logger.LogWarning("⚠️  No admin user found — creating default admin (username: admin, password: Admin@1234)");
+                _logger.LogWarning("No admin user found — creating default admin (username: admin)");
                 _users.Add(new AppUser
                 {
                     Id           = Guid.NewGuid(),
                     Username     = "admin",
-                    PasswordHash = HashPassword("Admin@1234"),
+                    PasswordHash = HashPassword(defaultAdminPassword),
                     FullName     = "System Administrator",
                     Role         = UserRole.Admin,
                     IsActive     = true,
@@ -360,11 +521,12 @@ public class AuthService : IUserContext
             // Create manager account for testing
             if (!_users.Any(u => u.Username == "manager"))
             {
+                _logger.LogWarning("Creating default manager account (username: manager)");
                 _users.Add(new AppUser
                 {
                     Id           = Guid.NewGuid(),
                     Username     = "manager",
-                    PasswordHash = HashPassword("Manager@1234"),
+                    PasswordHash = HashPassword(defaultManagerPassword),
                     FullName     = "Test Manager",
                     Role         = UserRole.Manager,
                     IsActive     = true,
@@ -376,11 +538,12 @@ public class AuthService : IUserContext
             // Create regular user account for testing
             if (!_users.Any(u => u.Username == "user"))
             {
+                _logger.LogWarning("Creating default user account (username: user)");
                 _users.Add(new AppUser
                 {
                     Id           = Guid.NewGuid(),
                     Username     = "user",
-                    PasswordHash = HashPassword("User@1234"),
+                    PasswordHash = HashPassword(defaultUserPassword),
                     FullName     = "Test User",
                     Role         = UserRole.User,
                     IsActive     = true,
@@ -391,6 +554,14 @@ public class AuthService : IUserContext
 
             if (changed) SaveUsers();
         }
+    }
+
+    /// <summary>
+    /// Generates a secure random password.
+    /// </summary>
+    private static string GenerateSecurePassword()
+    {
+        return Convert.ToBase64String(RandomNumberGenerator.GetBytes(12));
     }
 
     /// <summary>

@@ -226,6 +226,13 @@ services:
       # Auth
       - Auth__UsersFilePath=${AUTH_USERS_FILE_PATH:-/var/lib/ged/users.json}
       - Auth__SessionDurationHours=${AUTH_SESSION_DURATION_HOURS:-8}
+      # Auth - Default Users (for testing)
+      - AUTH_CREATE_DEFAULTS=${AUTH_CREATE_DEFAULTS:-true}
+      - AUTH_DEFAULT_ADMIN_PASSWORD=${AUTH_DEFAULT_ADMIN_PASSWORD:-Admin@1234}
+      - AUTH_DEFAULT_MANAGER_PASSWORD=${AUTH_DEFAULT_MANAGER_PASSWORD:-Manager@1234}
+      - AUTH_DEFAULT_USER_PASSWORD=${AUTH_DEFAULT_USER_PASSWORD:-User@1234}
+      # CORS
+      - Cors__Origins=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       # Document
       - Document__MaxUploadSizeMB=${DOCUMENT_MAX_UPLOAD_SIZE_MB:-100}
     depends_on:
