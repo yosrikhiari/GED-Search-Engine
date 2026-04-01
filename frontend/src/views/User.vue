@@ -658,6 +658,12 @@
           <div class="summary-card">
             <span class="summary-count">{{ searchResults.totalResults }}</span>
             <span class="summary-text"> résultat(s)</span>
+            <span
+              v-if="searchResults.pendingCount > 0"
+              class="summary-pending"
+            >
+              · {{ searchResults.pendingCount }} en cours
+            </span>
             <span class="summary-divider">·</span>
             <span class="summary-time">{{ searchResults.searchTimeMs }}ms</span>
           </div>
@@ -838,6 +844,113 @@
               </div>
             </div>
           </article>
+        </div>
+
+        <!-- Pending Documents Section (documents not yet indexed) -->
+        <div
+          v-if="searchResults && searchResults.pendingDocuments?.length > 0"
+          class="pending-section"
+        >
+          <div class="pending-header">
+            <div class="pending-title-row">
+              <svg
+                class="pending-icon"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <h3 class="pending-title">
+                En cours de traitement
+              </h3>
+              <span class="pending-badge">{{ searchResults.pendingCount || searchResults.pendingDocuments.length }}</span>
+            </div>
+            <p class="pending-subtitle">
+              Ces documents sont en cours de traitement et seront disponibles dans les résultats dès que possible
+            </p>
+          </div>
+          <div class="documents-grid">
+            <article
+              v-for="doc in searchResults.pendingDocuments"
+              :key="doc.id"
+              class="document-card pending-card"
+            >
+              <div class="card-content">
+                <div class="doc-info">
+                  <div class="doc-header">
+                    <div class="file-icon-box">
+                      <span class="icon-emoji">{{ getFileIcon(doc.contentType) }}</span>
+                    </div>
+                    <div class="doc-details">
+                      <h3 class="doc-title">
+                        {{ doc.title }}
+                      </h3>
+                      <p
+                        v-if="doc.description"
+                        class="doc-description"
+                      >
+                        {{ doc.description }}
+                      </p>
+                      <div class="metadata-row">
+                        <span class="meta-item">{{ doc.fileName }}</span>
+                        <span
+                          v-if="doc.documentDate"
+                          class="meta-item meta-highlight"
+                        >📅 {{ formatDate(doc.documentDate) }}</span>
+                        <span class="meta-item">{{ formatFileSize(doc.fileSize) }}</span>
+                        <span
+                          v-if="doc.category"
+                          class="category-badge"
+                        >{{ doc.category }}</span>
+                        <!-- Processing Stage Badge -->
+                        <span
+                          v-if="doc.processingStage || doc.documentStatus"
+                          class="processing-badge"
+                          :title="doc.isQueued ? 'Dans la file d\'attente' : 'En attente'"
+                        >
+                          <span
+                            v-if="doc.isQueued"
+                            class="processing-dot processing-dot-queued"
+                          />
+                          <span
+                            v-else
+                            class="processing-dot processing-dot-waiting"
+                          />
+                          {{ doc.processingStage || doc.documentStatus }}
+                          <span
+                            v-if="doc.queuePosition"
+                            class="queue-position"
+                          >#{{ doc.queuePosition }}</span>
+                        </span>
+                      </div>
+                      <!-- Queue Position Indicator -->
+                      <div
+                        v-if="doc.queuePosition"
+                        class="pipeline-status-indicator pipeline-status-pending"
+                      >
+                        <span class="pipeline-status-dot" />
+                        <span class="pipeline-status-text">Position dans la file: {{ doc.queuePosition }}</span>
+                      </div>
+                      <!-- OCR Stage Label -->
+                      <div
+                        v-if="doc.ocrStageLabel"
+                        class="pipeline-status-indicator pipeline-status-pending"
+                      >
+                        <span class="pipeline-status-dot" />
+                        <span class="pipeline-status-text">{{ doc.ocrStageLabel }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
         </div>
 
         <!-- Pagination -->
@@ -1439,7 +1552,18 @@
     >
       <div class="modal-content modal-large">
         <div class="modal-header">
-          <h2>Importer des documents (Batch)</h2>
+          <h2 v-if="batchImportState === 'processing'">
+            Traitement en cours...
+          </h2>
+          <h2 v-else-if="batchImportState === 'completed'">
+            Import terminé
+          </h2>
+          <h2 v-else-if="batchImportState === 'error'">
+            Échec de l'import
+          </h2>
+          <h2 v-else>
+            Importer des documents (Batch)
+          </h2>
           <button
             class="modal-close"
             @click="closeUploadModal"
@@ -1447,7 +1571,129 @@
             ✕
           </button>
         </div>
-        <div class="modal-body-upload">
+        
+        <!-- Error State - Show failed files with retry option -->
+        <div
+          v-if="batchImportState === 'error'"
+          class="modal-body-upload"
+        >
+          <div class="batch-error-summary">
+            <p>{{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s) n'ont pas pu être importé(s)</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              class="batch-doc-item error"
+            >
+              <span class="batch-doc-icon">⚠️</span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-error">
+                  {{ doc.error }}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button
+              class="cancel-btn"
+              @click="closeUploadModal"
+            >
+              Fermer
+            </button>
+            <button
+              class="upload-submit"
+              @click="retryFailedFiles"
+            >
+              Réessayer {{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s)
+            </button>
+          </div>
+        </div>
+        
+        <!-- Processing State - Show real-time status -->
+        <div
+          v-else-if="batchImportState === 'processing'"
+          class="modal-body-upload"
+        >
+          <div class="batch-progress-info">
+            <p>{{ batchDocuments.filter(d => d.status === 'indexed').length }} / {{ batchDocuments.length }} document(s) traité(s)</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              :class="['batch-doc-item', doc.status]"
+            >
+              <span class="batch-doc-icon">
+                <span v-if="doc.status === 'indexed'">✅</span>
+                <span v-else-if="doc.status === 'queued'">⏳</span>
+                <span v-else>🔄</span>
+              </span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-stage">
+                  <span v-if="doc.status === 'indexed'">Terminé</span>
+                  <span v-else-if="doc.queuePosition">Position: {{ doc.queuePosition }}</span>
+                  <span v-else>{{ doc.stageLabel }}</span>
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <p class="batch-hint">
+              Les documents seront disponibles dans les résultats de recherche une fois traités.
+            </p>
+          </div>
+        </div>
+        
+        <!-- Completed State -->
+        <div
+          v-else-if="batchImportState === 'completed'"
+          class="modal-body-upload"
+        >
+          <div class="batch-success-summary">
+            <p class="success-icon">
+              🎉
+            </p>
+            <p>{{ batchDocuments.length }} document(s) importé(s) et traité(s) avec succès !</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              class="batch-doc-item indexed"
+            >
+              <span class="batch-doc-icon">✅</span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-stage">
+                  Terminé
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button
+              class="upload-submit"
+              @click="closeUploadModal"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+        
+        <!-- Upload State - File Selection -->
+        <div
+          v-else
+          class="modal-body-upload"
+        >
           <div
             class="upload-area batch-upload-area"
             @click="$refs.fileInput.click()"
@@ -1488,13 +1734,67 @@
               v-else
               class="files-preview-list"
             >
+              <div class="batch-list-header">
+                <label class="batch-select-all">
+                  <input
+                    type="checkbox"
+                    :checked="batchSelectedFiles.length === selectedFiles.length"
+                    @change="selectAllBatchFiles"
+                  >
+                  Tout sélectionner
+                </label>
+                <div class="batch-assign">
+                  <span>Attribuer à la sélection:</span>
+                  <select
+                    class="filter-select mini"
+                    @change="assignCategoryToSelected($event.target.value); $event.target.value = ''"
+                  >
+                    <option value="">
+                      Choisir...
+                    </option>
+                    <option value="Invoice">
+                      📄 Facture
+                    </option>
+                    <option value="Contract">
+                      📜 Contrat
+                    </option>
+                    <option value="Report">
+                      📊 Rapport
+                    </option>
+                    <option value="Letter">
+                      ✉️ Courrier
+                    </option>
+                    <option value="Memo">
+                      📝 Mémo
+                    </option>
+                    <option value="Presentation">
+                      📽️ Présentation
+                    </option>
+                    <option value="Spreadsheet">
+                      📈 Tableur
+                    </option>
+                    <option value="Image">
+                      🖼️ Image
+                    </option>
+                    <option value="Other">
+                      📎 Autre
+                    </option>
+                  </select>
+                </div>
+              </div>
               <div
                 v-for="(file, index) in selectedFiles"
                 :key="index"
                 class="file-preview-item"
+                :class="{ selected: batchSelectedFiles.includes(index) }"
               >
+                <input
+                  type="checkbox"
+                  :checked="batchSelectedFiles.includes(index)"
+                  @change="toggleBatchFile(index)"
+                >
                 <span class="file-icon">{{ getFileIcon(file.type) }}</span>
-                <div class="file-info">
+                <div class="file-details">
                   <p class="file-name">
                     {{ file.name }}
                   </p>
@@ -1502,6 +1802,42 @@
                     {{ formatFileSize(file.size) }}
                   </p>
                 </div>
+                <select
+                  :value="getFileCategory(index)"
+                  class="filter-select file-category-select"
+                  @change="(e) => setFileCategory(index, e.target.value)"
+                >
+                  <option value="">
+                    — Catégorie —
+                  </option>
+                  <option value="Invoice">
+                    📄 Facture
+                  </option>
+                  <option value="Contract">
+                    📜 Contrat
+                  </option>
+                  <option value="Report">
+                    📊 Rapport
+                  </option>
+                  <option value="Letter">
+                    ✉️ Courrier
+                  </option>
+                  <option value="Memo">
+                    📝 Mémo
+                  </option>
+                  <option value="Presentation">
+                    📽️ Présentation
+                  </option>
+                  <option value="Spreadsheet">
+                    📈 Tableur
+                  </option>
+                  <option value="Image">
+                    🖼️ Image
+                  </option>
+                  <option value="Other">
+                    📎 Autre
+                  </option>
+                </select>
                 <button
                   class="file-remove-btn"
                   @click.stop="removeFile(index)"
@@ -1516,82 +1852,22 @@
             v-if="selectedFiles.length > 0"
             class="batch-category-section"
           >
-            <p class="batch-info">
-              Tous les fichiers utiliseront les mêmes paramètres ci-dessous :
-            </p>
-            <div class="form-group">
-              <label class="form-label">Catégorie <span style="color:#ef4444">*</span></label>
-              <select
-                v-model="uploadData.category"
-                class="filter-select"
-                :class="{ 'input-error': !uploadData.category }"
-              >
-                <option value="">
-                  — Sélectionner —
-                </option>
-                <option value="Invoice">
-                  📄 Facture
-                </option>
-                <option value="Contract">
-                  📜 Contrat
-                </option>
-                <option value="Report">
-                  📊 Rapport
-                </option>
-                <option value="Letter">
-                  ✉️ Courrier
-                </option>
-                <option value="Memo">
-                  📝 Mémo
-                </option>
-                <option value="Presentation">
-                  📽️ Présentation
-                </option>
-                <option value="Spreadsheet">
-                  📈 Tableur
-                </option>
-                <option value="Image">
-                  🖼️ Image
-                </option>
-                <option value="Other">
-                  📎 Autre
-                </option>
-              </select>
+            <div
+              v-if="!allFilesHaveCategory"
+              class="batch-warning"
+            >
+              Veuillez attribuer une catégorie à chaque fichier avant d'importer.
             </div>
           </div>
 
           <div class="modal-actions">
             <button
-              :disabled="selectedFiles.length === 0 || uploading || !uploadData.category"
+              :disabled="selectedFiles.length === 0 || batchImportState === 'uploading' || !allFilesHaveCategory"
               class="upload-submit"
               @click="uploadDocuments"
             >
-              <span v-if="!uploading">Importer {{ selectedFiles.length }} fichier(s)</span>
-              <span
-                v-else
-                class="loading-text"
-              >
-                <svg
-                  class="spinner"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    class="spinner-bg"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    stroke-width="4"
-                  />
-                  <path
-                    class="spinner-path"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  />
-                </svg>
-                Envoi en cours... {{ uploadProgress }}/{{ selectedFiles.length }}
-              </span>
+              <span v-if="batchImportState === 'uploading'">Transfert... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
+              <span v-else>Importer {{ selectedFiles.length }} fichier(s)</span>
             </button>
             <button
               class="cancel-btn"
@@ -1638,6 +1914,10 @@ const logout = () => { localStorage.clear(); router.push('/login') }
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
+  // Start pending polling if there are pending documents
+  if (searchResults.value?.pendingDocuments?.length > 0) {
+    startPendingPoll()
+  }
 })
 
 // ── Role permissions ───────────────────────────────────────────────────────────
@@ -1678,6 +1958,54 @@ const filteredPickerDocs = computed(() =>
     ? pickerDocs.value.filter(d => d.title.toLowerCase().includes(pickerSearch.value.toLowerCase()))
     : pickerDocs.value
 )
+
+// Computed: total documents in system (indexed + pending)
+const totalDocumentsInSystem = computed(() => {
+  const indexed = searchResults.value?.documents?.length || 0
+  const pending = searchResults.value?.pendingDocuments?.length || 0
+  return indexed + pending
+})
+
+// Continuous polling for pending documents - runs whenever pending docs exist
+const pendingPollInterval = ref(null)
+
+const startPendingPoll = () => {
+  if (pendingPollInterval.value) return
+  pendingPollInterval.value = setInterval(async () => {
+    // Refresh search results to get updated pending count
+    await refreshSearchResults()
+    
+    // If no more pending documents, stop polling
+    if (!searchResults.value?.pendingDocuments?.length) {
+      stopPendingPoll()
+    }
+  }, 5000) // Poll every 5 seconds
+}
+
+const stopPendingPoll = () => {
+  if (pendingPollInterval.value) {
+    clearInterval(pendingPollInterval.value)
+    pendingPollInterval.value = null
+  }
+}
+
+// Refresh search results for batch processing view (matching Admin.vue)
+const refreshSearchResults = async () => {
+  if (!searchResults.value) return
+  try {
+    const res = await fetch('/api/search/query', {
+      method:  'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ query: '', page: 1, pageSize: 50 })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      searchResults.value = data
+    }
+  } catch (err) {
+    console.warn('[Batch] Failed to refresh search results:', err)
+  }
+}
 
 // ── Contextual RAG detection (Multilingual: Arabic, French, English) ────────────────
 const ragTriggerReason = ref(null)
@@ -1779,11 +2107,11 @@ const handleKeydown = (e) => {
 const fetchPickerDocs = async () => {
   pickerLoading.value = true
   try {
-    // Use wildcard search to get all documents
+    // Use Natural search type - backend handles "show all" queries via NLP detection
     const res = await fetch('/api/search/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ query: '*', searchType: 3, page: 1, pageSize: 500 })
+      body: JSON.stringify({ query: '*', searchType: 0, page: 1, pageSize: 500 })
     })
     if (res.ok) {
       const data = await res.json()
@@ -1868,6 +2196,55 @@ const selectedFiles    = ref([])
 const uploading       = ref(false)
 const uploadProgress  = ref(0)
 const uploadData      = reactive({ title:'', category:'' })
+
+// Batch import processing view state (matching Admin.vue)
+const batchImportState = ref(null) // 'uploading' | 'processing' | 'completed' | 'error'
+const batchDocuments = ref([]) // Array of { id, name, status, stage, error }
+const batchUploadComplete = ref(false) // All files transferred
+const batchCheckInterval = ref(null)
+const batchRetryFiles = ref([]) // Files that failed to upload
+const pollingStarted = ref(false)
+
+// Per-file categories - array matching selectedFiles
+const fileCategories = ref([])
+
+// Check if all files have categories assigned
+const allFilesHaveCategory = computed(() => {
+  return selectedFiles.value.length > 0 && 
+    selectedFiles.value.every((_, idx) => fileCategories.value[idx] && fileCategories.value[idx].length > 0)
+})
+
+const getFileCategory = (index) => fileCategories.value[index] || ''
+const setFileCategory = (index, category) => {
+  fileCategories.value[index] = category
+}
+
+// Select all files for bulk category assignment
+const selectAllBatchFiles = () => {
+  if (batchSelectedFiles.value.length === selectedFiles.value.length) {
+    batchSelectedFiles.value = []
+  } else {
+    batchSelectedFiles.value = selectedFiles.value.map((_, i) => i)
+  }
+}
+
+// Assign category to all selected files
+const assignCategoryToSelected = (category) => {
+  batchSelectedFiles.value.forEach(idx => {
+    fileCategories.value[idx] = category
+  })
+}
+
+const batchSelectedFiles = ref([])
+
+const toggleBatchFile = (index) => {
+  const idx = batchSelectedFiles.value.indexOf(index)
+  if (idx === -1) {
+    batchSelectedFiles.value.push(index)
+  } else {
+    batchSelectedFiles.value.splice(idx, 1)
+  }
+}
 
 // ── Computed ───────────────────────────────────────────────────────────────────
 const paginationPages = computed(() => {
@@ -2159,68 +2536,246 @@ const handleFileSelectMultiple = (e) => {
   const files = Array.from(e.target.files)
   if (files.length > 0) {
     selectedFiles.value = files
+    fileCategories.value = new Array(files.length).fill('')
+    batchSelectedFiles.value = []
   }
 }
 const onDropMultiple = (e) => {
   const files = Array.from(e.dataTransfer.files)
   if (files.length > 0) {
     selectedFiles.value = files
+    fileCategories.value = new Array(files.length).fill('')
+    batchSelectedFiles.value = []
   }
 }
 const removeFile = (index) => {
   selectedFiles.value.splice(index, 1)
+  fileCategories.value.splice(index, 1)
+  batchSelectedFiles.value = batchSelectedFiles.value.filter(i => i !== index).map(i => i > index ? i - 1 : i)
   const inp = document.querySelector('.file-input'); if (inp) inp.value = ''
 }
 const clearFiles = () => {
   selectedFiles.value = []
   uploadData.title = ''
   uploadData.category = ''
-  const inp = document.querySelector('.file-input'); if (inp) inp.value = ''
+  fileCategories.value = []
+  batchSelectedFiles.value = []
+  batchImportState.value = null
+  batchDocuments.value = []
+  batchRetryFiles.value = []
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
+  }
 }
-const closeUploadModal = () => { showUploadModal.value = false; clearFiles() }
+const closeUploadModal = () => { 
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
+  }
+  showUploadModal.value = false
+  clearFiles()
+}
 
+// Refresh search results for batch processing view (matching Admin.vue)
 const uploadDocuments = async () => {
-  if (selectedFiles.value.length === 0 || !uploadData.category) return
-  uploading.value = true
-  uploadProgress.value = 0
-  let successCount = 0
-  let errorCount = 0
+  if (selectedFiles.value.length === 0 || !allFilesHaveCategory.value) return
   
-  try {
-    for (let i = 0; i < selectedFiles.value.length; i++) {
-      const file = selectedFiles.value[i]
-      const form = new FormData()
-      form.append('file', file)
-      form.append('title', file.name.replace(/\.[^/.]+$/, ''))
-      form.append('category', uploadData.category)
-      
+  // Initialize batch tracking
+  batchImportState.value = 'uploading'
+  batchDocuments.value = []
+  batchUploadComplete.value = false
+  batchRetryFiles.value = []
+  uploadProgress.value = 0
+  pollingStarted.value = false
+  
+  // Upload each file sequentially (matching Admin.vue logic)
+  for (let i = 0; i < selectedFiles.value.length; i++) {
+    const file = selectedFiles.value[i]
+    const form = new FormData()
+    form.append('file', file)
+    form.append('title', file.name.replace(/\.[^/.]+$/, ''))
+    form.append('category', fileCategories.value[i])
+    
+    try {
       const r = await fetch('/api/documents/upload', { 
         method: 'POST', 
-        headers: { Authorization: `Bearer ${localStorage.getItem('ged_token')}` }, 
+        headers: authHeaders(), 
         body: form 
       })
       
       if (r.ok) {
-        successCount++
+        const doc = await r.json()
+        batchDocuments.value.push({
+          id: doc.id,
+          name: file.name,
+          status: 'queued', // Initial status after upload
+          stage: 'queued',
+          stageLabel: 'En attente',
+          queuePosition: null,
+          error: null,
+          category: fileCategories.value[i]
+        })
+        uploadProgress.value = i + 1
+        
+        // Start polling immediately after first successful upload
+        if (!pollingStarted.value) {
+          pollingStarted.value = true
+          startBatchProcessingPolling()
+          startPendingPoll() // Also start continuous pending polling
+        }
       } else {
-        errorCount++
+        const errorData = await r.json().catch(() => ({ error: 'Upload failed' }))
+        batchDocuments.value.push({
+          id: null,
+          name: file.name,
+          status: 'failed',
+          stage: 'failed',
+          stageLabel: 'Échec',
+          queuePosition: null,
+          error: errorData.error || 'Upload failed'
+        })
       }
-      uploadProgress.value = i + 1
+    } catch (err) {
+      batchDocuments.value.push({
+        id: null,
+        name: file.name,
+        status: 'failed',
+        stage: 'failed',
+        stageLabel: 'Échec',
+        queuePosition: null,
+        error: err.message || 'Network error'
+      })
+    }
+    await nextTick()
+  }
+  
+  // Mark upload phase complete
+  batchUploadComplete.value = true
+  const failedCount = batchDocuments.value.filter(d => d.status === 'failed').length
+  
+  if (failedCount > 0) {
+    // Some files failed - show error state with retry option
+    batchImportState.value = 'error'
+    return
+  }
+  
+  // All files uploaded successfully - transition to processing view
+  // Note: polling already started after first successful upload
+  batchImportState.value = 'processing'
+}
+
+const startBatchProcessingPolling = () => {
+  // Poll every 3 seconds for batch document status
+  batchCheckInterval.value = setInterval(async () => {
+    // Fetch latest search results to get pending documents
+    await refreshSearchResults()
+    
+    const pendingDocs = searchResults.value?.pendingDocuments || []
+    const indexedDocIds = new Set((searchResults.value?.documents || []).map(d => d.id))
+    
+    let allComplete = true
+    
+    for (const batchDoc of batchDocuments.value) {
+      if (!batchDoc.id) continue // Skip failed docs
+      
+      // Check if document is now indexed
+      if (indexedDocIds.has(batchDoc.id)) {
+        batchDoc.status = 'indexed'
+        batchDoc.stage = 'completed'
+        batchDoc.stageLabel = 'Terminé'
+        batchDoc.queuePosition = null
+      } else {
+        // Check pending documents for current status
+        const pendingDoc = pendingDocs.find(p => p.id === batchDoc.id)
+        if (pendingDoc) {
+          allComplete = false
+          // Get stage from pending doc status
+          const stage = pendingDoc.status || 'En cours'
+          batchDoc.stage = pendingDoc.status?.toLowerCase() || 'processing'
+          batchDoc.stageLabel = stage
+          // Queue position would come from pending docs
+          batchDoc.queuePosition = pendingDocs.indexOf(pendingDoc) + 1
+        } else {
+          // Document not in pending list - might be being processed or just indexed
+          allComplete = false
+          batchDoc.stage = 'processing'
+          batchDoc.stageLabel = 'En cours...'
+        }
+      }
     }
     
-    if (successCount > 0) {
-      closeUploadModal()
-      alert(`${successCount} document(s) importé(s) avec succès !${errorCount > 0 ? `\n${errorCount} échecs.` : ''}`)
-      if (searchResults.value) handleSearch()
-    } else {
-      alert('Échec de l\'import de tous les fichiers.')
+    // Check if any documents are still processing
+    const processingDocs = batchDocuments.value.filter(d => 
+      d.status !== 'indexed' && d.status !== 'failed'
+    )
+    
+    if (processingDocs.length === 0) {
+      // All documents are complete
+      clearInterval(batchCheckInterval.value)
+      batchCheckInterval.value = null
+      batchImportState.value = 'completed'
     }
-  } catch { 
-    alert("Erreur réseau lors de l'import.") 
+  }, 3000)
+}
+
+const retryFailedFiles = async () => {
+  // Get the failed documents
+  const failedDocs = batchDocuments.value.filter(d => d.status === 'failed')
+  batchRetryFiles.value = failedDocs.map(d => d.name)
+  
+  // Re-upload only the failed files
+  for (let i = 0; i < failedDocs.length; i++) {
+    const failedDoc = failedDocs[i]
+    const originalFile = selectedFiles.value.find(f => f.name === failedDoc.name)
+    if (!originalFile) continue
+    
+    // Get category from fileCategories based on original file index
+    const fileIdx = selectedFiles.value.indexOf(originalFile)
+    const category = fileCategories.value[fileIdx] || ''
+    
+    const form = new FormData()
+    form.append('file', originalFile)
+    form.append('title', originalFile.name.replace(/\.[^/.]+$/, ''))
+    form.append('category', category)
+    
+    try {
+      const r = await fetch('/api/documents/upload', { 
+        method: 'POST', 
+        headers: authHeaders(), 
+        body: form 
+      })
+      
+      if (r.ok) {
+        const doc = await r.json()
+        // Update the failed document with new info
+        const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
+        if (idx !== -1) {
+          batchDocuments.value[idx] = {
+            id: doc.id,
+            name: failedDoc.name,
+            status: 'queued',
+            stage: 'queued',
+            stageLabel: 'En attente',
+            queuePosition: null,
+            error: null,
+            category: category
+          }
+        }
+      }
+    } catch (err) {
+      // Keep failed status
+    }
+    uploadProgress.value = i + 1
+    await nextTick()
   }
-  finally { 
-    uploading.value = false 
-    uploadProgress.value = 0
+  
+  // Check if any still failed
+  const stillFailed = batchDocuments.value.filter(d => d.status === 'failed')
+  if (stillFailed.length === 0) {
+    // All retried successfully - start processing
+    batchImportState.value = 'processing'
+    startBatchProcessingPolling()
   }
 }
 </script>
@@ -2568,6 +3123,7 @@ const uploadDocuments = async () => {
 }
 .summary-count { font-weight: 700; color: var(--color-text-primary); }
 .summary-text  { color: var(--color-text-secondary); }
+.summary-pending { color: var(--color-primary); font-weight: 600; }
 .summary-divider { color: var(--color-border); margin: 0 0.25rem; }
 .summary-time  { font-weight: 600; color: var(--color-primary); }
 .summary-page  { font-size: 0.85rem; color: var(--color-text-muted); }
@@ -3449,6 +4005,146 @@ const uploadDocuments = async () => {
 .picker-modal-confirm-btn { padding: .45rem 1.1rem; border: none; border-radius: 7px; background: linear-gradient(135deg,#4f46e5,#2563eb); color: white; font-size: .85rem; font-weight: 600; cursor: pointer; }
 .picker-modal-confirm-btn:hover { opacity: .9; }
 
+/* ── Pending Documents Section ────────────────────────────────────────────── */
+.pending-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 2px dashed #fbbf24;
+}
+
+.pending-header {
+  margin-bottom: 1rem;
+}
+
+.pending-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.pending-icon {
+  width: 24px;
+  height: 24px;
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.pending-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #92400e;
+  margin: 0;
+}
+
+.pending-badge {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: white;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+}
+
+.pending-subtitle {
+  font-size: 0.85rem;
+  color: #92400e;
+  margin: 0;
+  opacity: 0.8;
+}
+
+.pending-card {
+  border-left: 4px solid #f59e0b !important;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%) !important;
+}
+
+.pending-card .doc-title {
+  color: #92400e;
+}
+
+.processing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.processing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.processing-dot-queued {
+  background: #f59e0b;
+  animation: pulse-amber 1.5s infinite;
+}
+
+.processing-dot-waiting {
+  background: #fbbf24;
+}
+
+.queue-position {
+  font-weight: 700;
+  color: #b45309;
+}
+
+.pipeline-status-pending {
+  background: #fef3c7 !important;
+}
+
+.pipeline-status-pending .pipeline-status-text {
+  color: #92400e !important;
+}
+
+.pipeline-status-pending .pipeline-status-dot {
+  background: #f59e0b !important;
+}
+
+@keyframes pulse-amber {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.2); }
+}
+
+/* Batch Import Processing View (matching Admin.vue) */
+.batch-progress-info { text-align: center; padding: 1rem; background: #eff6ff; border-radius: 8px; margin-bottom: 1rem; }
+.batch-progress-info p { color: #1d4ed8; font-weight: 600; }
+.batch-success-summary { text-align: center; padding: 2rem; }
+.batch-success-summary .success-icon { font-size: 3rem; margin-bottom: 1rem; }
+.batch-success-summary p { font-size: 1.1rem; font-weight: 600; color: #059669; }
+.batch-error-summary { text-align: center; padding: 1rem; background: #fef2f2; border-radius: 8px; margin-bottom: 1rem; }
+.batch-error-summary p { color: #dc2626; font-weight: 600; }
+.batch-doc-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 300px; overflow-y: auto; }
+.batch-doc-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
+.batch-doc-item.indexed { border-color: #86efac; background: #f0fdf4; }
+.batch-doc-item.processing { border-color: #bfdbfe; background: #eff6ff; }
+.batch-doc-item.error { border-color: #fca5a5; background: #fef2f2; }
+.batch-doc-icon { font-size: 1.25rem; }
+.batch-doc-info { flex: 1; }
+.batch-doc-name { font-weight: 500; color: #1f2937; font-size: 0.875rem; }
+.batch-doc-stage { font-size: 0.75rem; color: #6b7280; }
+.batch-doc-error { font-size: 0.75rem; color: #dc2626; }
+.batch-hint { text-align: center; font-size: 0.8rem; color: #6b7280; font-style: italic; }
+
+.batch-list-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: #f3f4f6; border-radius: 8px 8px 0 0; border-bottom: 1px solid #e5e7eb; }
+.batch-select-all { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; color: #374151; cursor: pointer; }
+.batch-select-all input { cursor: pointer; }
+.batch-assign { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
+.batch-assign span { color: #6b7280; }
+.filter-select.mini { padding: 0.25rem 0.5rem; font-size: 0.75rem; min-width: 120px; }
+.file-preview-item.selected { background: #eff6ff; border-color: #3b82f6; }
+.file-preview-item input[type="checkbox"] { margin-right: 0.5rem; cursor: pointer; }
+.file-details { flex: 1; min-width: 0; }
+.file-details .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-category-select { width: 130px; font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+.batch-warning { padding: 0.75rem; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; font-size: 0.875rem; color: #92400e; text-align: center; }
 
 </style>
 

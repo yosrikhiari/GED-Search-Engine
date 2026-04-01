@@ -32,6 +32,9 @@ public class OutboxMessage
     /// <summary>Set by relay after successful publish. Null = not yet published.</summary>
     public DateTime? ProcessedAt { get; set; }
 
+    /// <summary>Set by worker after successful processing (ack). Null = not yet acknowledged.</summary>
+    public DateTime? AcknowledgedAt { get; set; }
+
     /// <summary>Last error message if publish failed.</summary>
     public string?   Error       { get; set; }
 

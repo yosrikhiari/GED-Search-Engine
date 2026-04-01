@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
@@ -27,12 +28,15 @@ public class DocumentsController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly AuthService _authService;
     private readonly IAuditService _auditService;
+    private readonly IServiceScopeFactory _scopeFactory;
 
     private static readonly string[] AllowedCategories =
     {
         "Invoice", "Contract", "Report", "Letter",
         "Memo", "Presentation", "Spreadsheet", "Image", "Other"
     };
+
+    private bool _resourceSaverEnabled;
 
     public DocumentsController(
         IDocumentService documentService,
@@ -44,7 +48,8 @@ public class DocumentsController : ControllerBase
         IConfiguration configuration,
         IDistributedCache cache,
         AuthService authService,
-        IAuditService auditService)
+        IAuditService auditService,
+        IServiceScopeFactory scopeFactory)
     {
         _documentService = documentService;
         _searchService   = searchService;
@@ -56,6 +61,8 @@ public class DocumentsController : ControllerBase
         _cache           = cache;
         _authService     = authService;
         _auditService    = auditService;
+        _scopeFactory    = scopeFactory;
+        _resourceSaverEnabled = configuration.GetValue<bool>("ResourceSaver:Enabled", false);
     }
 
 [HttpPost("upload")]
@@ -185,25 +192,33 @@ public async Task<ActionResult<Document>> UploadDocument(
 
             _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
 
-            var indexed = await _searchService.IndexDocumentAsync(document);
-            if (!indexed)
-                _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
-            else
-                _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
-
-            if (!string.IsNullOrWhiteSpace(document.ExtractedText))
+            if (_resourceSaverEnabled)
             {
-                var chunks = _chunkingService.ChunkText(document.Id, document.ExtractedText);
-                if (chunks.Any())
+                await QueueIndexingJobAsync(document.Id, document.ExtractedText);
+                _logger.LogInformation("Document {DocumentId} queued for async indexing", document.Id);
+            }
+            else
+            {
+                var indexed = await _searchService.IndexDocumentAsync(document);
+                if (!indexed)
+                    _logger.LogWarning("Failed to index document {DocumentId}", document.Id);
+                else
+                    _logger.LogInformation("Document {DocumentId} indexed successfully", document.Id);
+
+                if (!string.IsNullOrWhiteSpace(document.ExtractedText))
                 {
-                    try
+                    var chunks = _chunkingService.ChunkText(document.Id, document.ExtractedText);
+                    if (chunks.Any())
                     {
-                        await _searchService.IndexChunksAsync(document, chunks);
-                        _logger.LogInformation("Document {DocumentId} chunked into {Count} chunks for RAG", document.Id, chunks.Count);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to index chunks for document {DocumentId}", document.Id);
+                        try
+                        {
+                            await _searchService.IndexChunksAsync(document, chunks);
+                            _logger.LogInformation("Document {DocumentId} chunked into {Count} chunks for RAG", document.Id, chunks.Count);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to index chunks for document {DocumentId}", document.Id);
+                        }
                     }
                 }
             }
@@ -234,6 +249,10 @@ public async Task<ActionResult<Document>> UploadDocument(
     /// <summary>
     /// Batch upload multiple files with real-time SSE progress.
     /// Streams per-file status updates as Server-Sent Events.
+    /// 
+    /// IMPROVEMENT: Now processes up to 5 files concurrently using SemaphoreSlim
+    /// for better throughput during batch uploads.
+    /// Each file includes its index in SSE events for correct frontend reconciliation.
     /// </summary>
     [HttpPost("upload/batch")]
     public async Task UploadBatchSse(CancellationToken cancellationToken)
@@ -246,6 +265,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         Response.Headers["Content-Type"]      = "text/event-stream";
         Response.Headers["Cache-Control"]      = "no-cache";
         Response.Headers["X-Accel-Buffering"] = "no";
+
+        const int MaxConcurrentUploads = 5;
+        using var uploadSemaphore = new SemaphoreSlim(MaxConcurrentUploads, MaxConcurrentUploads);
 
         async Task SendProgress(string eventType, object data)
         {
@@ -278,108 +300,182 @@ public async Task<ActionResult<Document>> UploadDocument(
             }
 
             var totalFiles = files.Count;
-            await SendProgress("start", new { total = totalFiles });
+            var startTime = DateTime.UtcNow;
+            await SendProgress("start", new { total = totalFiles, parallel = MaxConcurrentUploads });
 
-            for (int i = 0; i < files.Count; i++)
+            _logger.LogInformation(
+                "📦 Batch upload: {Count} files, parallelLimit={Parallel}",
+                totalFiles, MaxConcurrentUploads);
+
+            async Task ProcessSingleFileAsync(IFormFile file, int fileIndex, CancellationToken ct)
             {
-                var file = files[i];
-                var fileIndex = i;
-
-                await SendProgress("file_start", new
-                {
-                    fileIndex,
-                    fileName = file.FileName,
-                    fileSize = file.Length,
-                    progress = 0
-                });
-
+                await uploadSemaphore.WaitAsync(ct);
                 try
                 {
-                    // Stage 1: Category ACL check
-                    await SendProgress("file_progress", new { fileIndex, stage = "validating", progress = 10 });
+                    var fileStartTime = DateTime.UtcNow;
+                    _logger.LogDebug(
+                        "🔓 [{FileIndex}] Acquired semaphore slot, starting upload",
+                        fileIndex);
 
-                    if (!string.IsNullOrWhiteSpace(category))
+                    await SendProgress("file_start", new
                     {
-                        if (!AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
-                        {
-                            await SendProgress("file_error", new
-                            {
-                                fileIndex,
-                                fileName = file.FileName,
-                                error = $"Invalid category '{category}'"
-                            });
-                            continue;
-                        }
+                        fileIndex,
+                        fileName = file.FileName,
+                        fileSize = file.Length,
+                        progress = 0,
+                        queuedAt = startTime
+                    });
 
-                        if (role != "Admin" && !string.IsNullOrEmpty(username))
+                    try
+                    {
+                        using var scope = _scopeFactory.CreateScope();
+                        var scopedDocumentService = scope.ServiceProvider.GetRequiredService<IDocumentService>();
+                        var scopedSearchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+                        var scopedChunkingService = scope.ServiceProvider.GetRequiredService<DocumentChunkingService>();
+
+                        if (!string.IsNullOrWhiteSpace(category))
                         {
-                            var user = _authService.GetUserByUsername(username);
-                            if (user?.AllowedCategories?.Count > 0 &&
-                                !user.AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
+                            if (!AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
                             {
                                 await SendProgress("file_error", new
                                 {
                                     fileIndex,
                                     fileName = file.FileName,
-                                    error = $"Access denied to category '{category}'"
+                                    error = $"Invalid category '{category}'"
                                 });
-                                continue;
+                                return;
+                            }
+
+                            if (role != "Admin" && !string.IsNullOrEmpty(username))
+                            {
+                                var user = _authService.GetUserByUsername(username);
+                                if (user?.AllowedCategories?.Count > 0 &&
+                                    !user.AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
+                                {
+                                    await SendProgress("file_error", new
+                                    {
+                                        fileIndex,
+                                        fileName = file.FileName,
+                                        error = $"Access denied to category '{category}'"
+                                    });
+                                    return;
+                                }
                             }
                         }
+
+                        await SendProgress("file_progress", new { fileIndex, stage = "uploading", progress = 30 });
+
+                        var sanitizedFileName = SanitizeFileName(file.FileName);
+                        var title = titles?.GetValueOrDefault(file.FileName) ?? sanitizedFileName;
+
+                        using var stream = file.OpenReadStream();
+                        var metadata = new Dictionary<string, object> { ["category"] = category ?? "Other" };
+
+                        await SendProgress("file_progress", new { fileIndex, stage = "processing", progress = 60 });
+
+                        var document = await scopedDocumentService.UploadDocumentAsync(
+                            stream, sanitizedFileName, file.ContentType, title, metadata, ct);
+
+                        var processingTime = DateTime.UtcNow - fileStartTime;
+                        await SendProgress("file_complete", new
+                        {
+                            fileIndex,
+                            fileName = file.FileName,
+                            documentId = document.Id,
+                            title = document.Title,
+                            category = document.Category,
+                            fileSize = document.FileSize,
+                            indexed = false,
+                            progress = 100,
+                            processingTimeMs = processingTime.TotalMilliseconds,
+                            queuedAt = startTime,
+                            completedAt = DateTime.UtcNow
+                        });
+
+                        _logger.LogInformation(
+                            "✅ [{FileIndex}/{Total}] Completed (DB save): {FileName} -> {DocId} ({Duration}ms)",
+                            fileIndex + 1, totalFiles, file.FileName, document.Id, processingTime.TotalMilliseconds);
+
+                        var documentId = document.Id;
+                        var extractedText = document.ExtractedText;
+
+                        if (_resourceSaverEnabled)
+                        {
+                            await QueueIndexingJobAsync(documentId, extractedText);
+                            _logger.LogInformation("Document {DocumentId} queued for async indexing", documentId);
+                        }
+                        else
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    using var bgScope = _scopeFactory.CreateScope();
+                                    var bgSearchService = bgScope.ServiceProvider.GetRequiredService<ISearchService>();
+                                    var bgChunkingService = bgScope.ServiceProvider.GetRequiredService<DocumentChunkingService>();
+
+                                    var indexed = await bgSearchService.IndexDocumentAsync(document);
+                                    if (!string.IsNullOrWhiteSpace(extractedText))
+                                    {
+                                        var chunks = bgChunkingService.ChunkText(documentId, extractedText);
+                                        if (chunks.Any())
+                                            await bgSearchService.IndexChunksAsync(document, chunks, CancellationToken.None);
+                                    }
+
+                                    _logger.LogInformation(
+                                        "🔍 Background indexing complete for document {DocumentId} (indexed={Indexed})",
+                                        documentId, indexed);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "Background indexing failed for document {DocumentId}", documentId);
+                                }
+                            });
+                        }
                     }
-
-                    await SendProgress("file_progress", new { fileIndex, stage = "uploading", progress = 30 });
-
-                    var sanitizedFileName = SanitizeFileName(file.FileName);
-                    var title = titles?.GetValueOrDefault(file.FileName) ?? sanitizedFileName;
-
-                    using var stream = file.OpenReadStream();
-                    var metadata = new Dictionary<string, object> { ["category"] = category ?? "Other" };
-
-                    await SendProgress("file_progress", new { fileIndex, stage = "processing", progress = 60 });
-
-                    var document = await _documentService.UploadDocumentAsync(
-                        stream, sanitizedFileName, file.ContentType, title, metadata, cancellationToken);
-
-                    await SendProgress("file_progress", new { fileIndex, stage = "indexing", progress = 80 });
-
-                    var indexed = await _searchService.IndexDocumentAsync(document);
-                    if (!string.IsNullOrWhiteSpace(document.ExtractedText))
+                    catch (Exception ex)
                     {
-                        var chunks = _chunkingService.ChunkText(document.Id, document.ExtractedText);
-                        if (chunks.Any())
-                            await _searchService.IndexChunksAsync(document, chunks, cancellationToken);
+                        _logger.LogError(ex, "Batch upload failed for file {FileName}", file.FileName);
+                        await SendProgress("file_error", new
+                        {
+                            fileIndex,
+                            fileName = file.FileName,
+                            error = ex.Message
+                        });
                     }
-
-                    await SendProgress("file_complete", new
-                    {
-                        fileIndex,
-                        fileName = file.FileName,
-                        documentId = document.Id,
-                        title = document.Title,
-                        category = document.Category,
-                        fileSize = document.FileSize,
-                        indexed,
-                        progress = 100
-                    });
-
-                    _logger.LogInformation(
-                        "Batch upload file {Index}/{Total}: {FileName} -> {DocId}",
-                        i + 1, totalFiles, file.FileName, document.Id);
                 }
-                catch (Exception ex)
+                finally
                 {
-                    _logger.LogError(ex, "Batch upload failed for file {FileName}", file.FileName);
-                    await SendProgress("file_error", new
-                    {
-                        fileIndex,
-                        fileName = file.FileName,
-                        error = ex.Message
-                    });
+                    uploadSemaphore.Release();
+                    _logger.LogDebug("🔒 [{FileIndex}] Released semaphore slot", fileIndex);
                 }
             }
 
-            await SendProgress("done", new { total = totalFiles });
+            var tasks = new List<Task>();
+            for (int i = 0; i < files.Count; i++)
+            {
+                var file = files[i];
+                var fileIndex = i;
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    await ProcessSingleFileAsync(file, fileIndex, cancellationToken);
+                }, cancellationToken));
+            }
+
+            await Task.WhenAll(tasks);
+
+            var totalTime = DateTime.UtcNow - startTime;
+            _logger.LogInformation(
+                "🏁 Batch upload completed: {Count} files in {Duration}ms (avg {AvgMs}ms per file)",
+                totalFiles, totalTime.TotalMilliseconds, totalTime.TotalMilliseconds / totalFiles);
+
+            await SendProgress("done", new
+            {
+                total = totalFiles,
+                totalTimeMs = totalTime.TotalMilliseconds,
+                completedAt = DateTime.UtcNow
+            });
         }
         catch (OperationCanceledException)
         {
@@ -978,4 +1074,22 @@ public async Task<ActionResult<Document>> UploadDocument(
         Category         = e.Category,
         Version          = e.Version
     };
+
+    private async Task QueueIndexingJobAsync(Guid documentId, string? extractedText)
+    {
+        var outboxMessage = new OutboxMessage
+        {
+            Id        = Guid.NewGuid(),
+            Type      = "IndexingJob",
+            Payload   = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                DocumentId   = documentId,
+                HasExtractedText = !string.IsNullOrWhiteSpace(extractedText)
+            }),
+            CreatedAt  = DateTime.UtcNow,
+            RetryCount = 0
+        };
+        _db.OutboxMessages.Add(outboxMessage);
+        await _db.SaveChangesAsync();
+    }
 }

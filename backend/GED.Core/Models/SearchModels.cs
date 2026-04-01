@@ -74,6 +74,16 @@ public class SearchResult
 
     /// <summary>Which search modes contributed to this result set.</summary>
     public SearchMode SearchMode { get; set; } = SearchMode.BM25;
+
+    // ── Pending documents (not yet indexed) ───────────────────────────────────
+    /// <summary>
+    /// Documents that exist in the database but are not yet indexed in OpenSearch.
+    /// These are shown in a separate "En cours de traitement" section on the frontend.
+    /// </summary>
+    public List<DocumentSearchHit> PendingDocuments { get; set; } = new();
+
+    /// <summary>Count of documents waiting in the queue (for UI badge).</summary>
+    public int PendingCount { get; set; }
 }
 
 /// <summary>Which scoring strategy was used for this result set.</summary>
@@ -105,6 +115,35 @@ public class DocumentSearchHit
     public string Status { get; set; } = "Indexed";
     public bool IsOcrProcessed { get; set; }
     public bool IsFullyProcessed { get; set; }
+
+    // ── Pending document fields ────────────────────────────────────────────────
+    /// <summary>
+    /// Human-readable processing stage for pending documents.
+    /// Examples: "En attente de traitement", "OCR en cours", "Indexation en attente"
+    /// </summary>
+    public string? ProcessingStage { get; set; }
+
+    /// <summary>
+    /// Position in the processing queue (1-indexed).
+    /// Null for indexed documents or when queue position is not applicable.
+    /// </summary>
+    public int? QueuePosition { get; set; }
+
+    /// <summary>
+    /// The actual DocumentStatus enum value for internal use.
+    /// Maps to ProcessingStage for display.
+    /// </summary>
+    public string? DocumentStatus { get; set; }
+
+    /// <summary>
+    /// OCR status stage label from the pipeline.
+    /// </summary>
+    public string? OcrStageLabel { get; set; }
+
+    /// <summary>
+    /// Whether an outbox message has been published to RabbitMQ.
+    /// </summary>
+    public bool IsQueued { get; set; }
 }
 
 public class FacetValue

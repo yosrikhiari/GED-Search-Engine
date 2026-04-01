@@ -109,18 +109,26 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_document_metadata_doc_
 IF OBJECT_ID('dbo.outbox_messages', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.outbox_messages (
-        id            UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
-        type          NVARCHAR(100)     NOT NULL,
-        payload       NVARCHAR(MAX)     NOT NULL,
-        created_at    DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
-        processed_at  DATETIME2,
-        error         NVARCHAR(MAX),
-        retry_count   INT               NOT NULL DEFAULT 0
+        id              UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        type            NVARCHAR(100)     NOT NULL,
+        payload         NVARCHAR(MAX)     NOT NULL,
+        created_at      DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        processed_at    DATETIME2,
+        acknowledged_at DATETIME2,
+        error           NVARCHAR(MAX),
+        retry_count     INT               NOT NULL DEFAULT 0
     );
 END
 
+-- Add acknowledged_at column if it doesn't exist (for existing databases)
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.outbox_messages') AND name = 'acknowledged_at')
+    ALTER TABLE dbo.outbox_messages ADD acknowledged_at DATETIME2;
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_unprocessed' AND object_id = OBJECT_ID('dbo.outbox_messages'))
     CREATE INDEX ix_outbox_unprocessed ON dbo.outbox_messages (processed_at);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_acknowledged' AND object_id = OBJECT_ID('dbo.outbox_messages'))
+    CREATE INDEX ix_outbox_acknowledged ON dbo.outbox_messages (processed_at, acknowledged_at);
 
 
 -- ─── document_groups ─────────────────────────────────────────────────────────

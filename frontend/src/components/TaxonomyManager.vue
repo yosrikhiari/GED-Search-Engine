@@ -63,19 +63,19 @@
             </div>
           </div>
           <div class="cat-footer">
-              <span class="cat-meta">
-                <span
-                  :title="cat.isSystem ? 'Catégorie système : gérée par le système, ne peut pas être supprimée' : 'Catégorie personnalisée : créée par un administrateur'"
-                >{{ cat.isSystem ? '🔒 Système' : 'Personnalisé' }}</span>
-                <span
-                  v-if="categoryTagCounts[cat.name]"
-                  class="tag-count-badge"
-                >#️⃣ {{ categoryTagCounts[cat.name] }}</span>
-                <span
-                  v-if="!cat.isActive"
-                  class="inactive-badge"
-                >Désactivé</span>
-              </span>
+            <span class="cat-meta">
+              <span
+                :title="cat.isSystem ? 'Catégorie système : gérée par le système, ne peut pas être supprimée' : 'Catégorie personnalisée : créée par un administrateur'"
+              >{{ cat.isSystem ? '🔒 Système' : 'Personnalisé' }}</span>
+              <span
+                v-if="categoryTagCounts[cat.name]"
+                class="tag-count-badge"
+              >#️⃣ {{ categoryTagCounts[cat.name] }}</span>
+              <span
+                v-if="!cat.isActive"
+                class="inactive-badge"
+              >Désactivé</span>
+            </span>
             <div class="cat-actions">
               <button
                 class="btn-icon-sm"

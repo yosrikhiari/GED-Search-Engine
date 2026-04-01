@@ -363,6 +363,10 @@ namespace GED.Infrastructure.Migrations
                         .HasColumnType("uniqueidentifier")
                         .HasColumnName("id");
 
+                    b.Property<DateTime?>("AcknowledgedAt")
+                        .HasColumnType("datetime2")
+                        .HasColumnName("acknowledged_at");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2")
                         .HasColumnName("created_at");
@@ -394,6 +398,9 @@ namespace GED.Infrastructure.Migrations
 
                     b.HasIndex("ProcessedAt")
                         .HasDatabaseName("ix_outbox_unprocessed");
+
+                    b.HasIndex("ProcessedAt", "AcknowledgedAt")
+                        .HasDatabaseName("ix_outbox_acknowledged");
 
                     b.ToTable("outbox_messages", (string)null);
                 });

@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System.Text;
@@ -63,6 +64,7 @@ public class IndexingWorkerService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<IndexingWorkerService> _logger;
+    private readonly IConfiguration _configuration;
 
     private readonly string _rabbitHost;
     private readonly string _rabbitUser;
@@ -71,6 +73,8 @@ public class IndexingWorkerService : BackgroundService
     private readonly int _batchSize;
 
     private const string QueueName = "indexing-queue";
+    private const string DlxName = "indexing-dlx";
+    private const string DeadLetterQueueName = "indexing-dead-letter";
     private const int MaxConnectRetries = 5;
     private const int RetryDelayMs = 5000;
 
@@ -79,6 +83,7 @@ public class IndexingWorkerService : BackgroundService
     public IndexingWorkerService(
         IServiceProvider serviceProvider,
         ILogger<IndexingWorkerService> logger,
+        IConfiguration configuration,
         string rabbitHost = "localhost",
         string rabbitUser = "admin",
         string rabbitPass = "admin123",
@@ -87,6 +92,7 @@ public class IndexingWorkerService : BackgroundService
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _configuration = configuration;
         _rabbitHost = rabbitHost;
         _rabbitUser = rabbitUser;
         _rabbitPass = rabbitPass;
@@ -156,7 +162,31 @@ public class IndexingWorkerService : BackgroundService
                     var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
                     await using (channel)
                     {
-                        // Declare the indexing queue
+                        // Declare the dead-letter exchange
+                        await channel.ExchangeDeclareAsync(
+                            exchange: DlxName,
+                            type: ExchangeType.Direct,
+                            durable: true,
+                            autoDelete: false,
+                            cancellationToken: stoppingToken);
+
+                        // Declare the dead-letter queue
+                        await channel.QueueDeclareAsync(
+                            queue: DeadLetterQueueName,
+                            durable: true,
+                            exclusive: false,
+                            autoDelete: false,
+                            arguments: null,
+                            cancellationToken: stoppingToken);
+
+                        // Bind dead-letter queue to exchange
+                        await channel.QueueBindAsync(
+                            queue: DeadLetterQueueName,
+                            exchange: DlxName,
+                            routingKey: QueueName,
+                            cancellationToken: stoppingToken);
+
+                        // Declare the indexing queue with DLX configuration
                         await channel.QueueDeclareAsync(
                             queue: QueueName,
                             durable: true,
@@ -164,6 +194,8 @@ public class IndexingWorkerService : BackgroundService
                             autoDelete: false,
                             arguments: new Dictionary<string, object?>
                             {
+                                ["x-dead-letter-exchange"]    = DlxName,
+                                ["x-dead-letter-routing-key"] = QueueName,
                                 ["x-max-length"] = 10000,
                                 ["x-message-ttl"] = 3600000
                             },
@@ -182,28 +214,59 @@ public class IndexingWorkerService : BackgroundService
                         consumer.ReceivedAsync += async (_, ea) =>
                         {
                             var deliveryTag = ea.DeliveryTag;
+                            IndexingJobMessage? message = null;
+                            Guid documentId = Guid.Empty;
 
                             try
                             {
                                 var json = Encoding.UTF8.GetString(ea.Body.ToArray());
-                                var message = JsonSerializer.Deserialize<IndexingJobMessage>(json,
+
+                                // Try to deserialize as new simple format first
+                                var simpleMsg = JsonSerializer.Deserialize<IndexingJobSimpleMessage>(json,
                                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
-                                if (message == null)
+                                if (simpleMsg != null && simpleMsg.DocumentId != Guid.Empty)
                                 {
-                                    _logger.LogWarning("Received null indexing message — discarding");
-                                    await SafeAckAsync(channel, deliveryTag);
-                                    return;
+                                    // New simple format from DocumentsController via outbox
+                                    documentId = simpleMsg.DocumentId;
+                                    message = new IndexingJobMessage
+                                    {
+                                        JobId = Guid.NewGuid(),
+                                        DocumentId = documentId,
+                                        Action = IndexingAction.Index,
+                                        CreatedAt = DateTime.UtcNow
+                                    };
+                                    _logger.LogInformation(
+                                        "📄 Indexing job received (simple format): documentId={DocId}",
+                                        documentId);
+                                }
+                                else
+                                {
+                                    // Legacy format with JobId/Action
+                                    message = JsonSerializer.Deserialize<IndexingJobMessage>(json,
+                                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                                    if (message == null)
+                                    {
+                                        _logger.LogWarning("Received null indexing message — discarding");
+                                        await SafeAckAsync(channel, deliveryTag);
+                                        return;
+                                    }
+
+                                    documentId = message.DocumentId;
+                                    _logger.LogInformation(
+                                        "📄 Indexing job received: jobId={JobId}, documentId={DocId}, action={Action}",
+                                        message.JobId, message.DocumentId, message.Action);
                                 }
 
-                                _logger.LogInformation(
-                                    "📄 Indexing job received: jobId={JobId}, documentId={DocId}, action={Action}",
-                                    message.JobId, message.DocumentId, message.Action);
-
                                 await ProcessIndexingJobAsync(message, stoppingToken);
+
+                                // Update AcknowledgedAt on the OutboxMessage for ResourceSaver mutual exclusion
+                                await UpdateOutboxAcknowledgedAsync(documentId, stoppingToken);
+
                                 await SafeAckAsync(channel, deliveryTag);
 
-                                _logger.LogInformation("✅ Indexing job {JobId} completed and acked", message.JobId);
+                                _logger.LogInformation("✅ Indexing job completed and acked for document {DocId}", documentId);
                             }
                             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                             {
@@ -212,7 +275,7 @@ public class IndexingWorkerService : BackgroundService
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogError(ex, "❌ Indexing job failed");
+                                _logger.LogError(ex, "❌ Indexing job failed for document {DocId}", documentId);
                                 await SafeNackAsync(channel, deliveryTag, requeue: false);
 
                                 try { await connection.CloseAsync(); } catch { }
@@ -254,13 +317,14 @@ public class IndexingWorkerService : BackgroundService
     {
         using var scope = _serviceProvider.CreateScope();
         var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
+        var chunkingService = scope.ServiceProvider.GetRequiredService<DocumentChunkingService>();
         var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
 
         switch (message.Action)
         {
             case IndexingAction.Index:
             case IndexingAction.Reindex:
-                await HandleIndexOrReindexAsync(message, searchService, db, ct);
+                await HandleIndexOrReindexAsync(message, searchService, chunkingService, db, ct);
                 break;
 
             case IndexingAction.Delete:
@@ -280,6 +344,7 @@ public class IndexingWorkerService : BackgroundService
     private async Task HandleIndexOrReindexAsync(
         IndexingJobMessage message,
         ISearchService searchService,
+        DocumentChunkingService chunkingService,
         GedDbContext db,
         CancellationToken ct)
     {
@@ -338,6 +403,26 @@ public class IndexingWorkerService : BackgroundService
         else
         {
             _logger.LogWarning("⚠️ Document {DocId} indexing returned false", message.DocumentId);
+        }
+
+        // Index document chunks for RAG if extracted text is available
+        var textToChunk = !string.IsNullOrWhiteSpace(entity.ExtractedText) ? entity.ExtractedText : entity.OcrText;
+        if (!string.IsNullOrWhiteSpace(textToChunk))
+        {
+            var chunks = chunkingService.ChunkText(document.Id, textToChunk);
+            if (chunks.Any())
+            {
+                try
+                {
+                    await searchService.IndexChunksAsync(document, chunks, ct);
+                    _logger.LogInformation("✅ Document {DocId} chunked into {Count} chunks for RAG", 
+                        message.DocumentId, chunks.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to index chunks for document {DocId}", message.DocumentId);
+                }
+            }
         }
     }
 
@@ -432,6 +517,41 @@ public class IndexingWorkerService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Updates the AcknowledgedAt field on the OutboxMessage for the indexing job.
+    /// This is used by the relay to determine in-flight status for mutual exclusion.
+    /// </summary>
+    private async Task UpdateOutboxAcknowledgedAsync(Guid documentId, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
+
+            var outboxMessage = await db.OutboxMessages
+                .Where(m => m.Type == "IndexingJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
+                .Where(m => m.Payload.Contains(documentId.ToString()))
+                .OrderBy(m => m.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+
+            if (outboxMessage != null)
+            {
+                outboxMessage.AcknowledgedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
+                _logger.LogDebug("Updated AcknowledgedAt for outbox message {Id} (document {DocId})",
+                    outboxMessage.Id, documentId);
+            }
+            else
+            {
+                _logger.LogDebug("No pending outbox message found for document {DocId} — may have been already acknowledged", documentId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update AcknowledgedAt for document {DocId}", documentId);
+        }
+    }
+
     public override void Dispose()
     {
         _concurrencySemaphore?.Dispose();
@@ -460,6 +580,15 @@ public enum IndexingAction
     Reindex,
     Delete,
     UpdateAcl
+}
+
+/// <summary>
+/// Simplified message format for indexing jobs queued from DocumentsController via outbox.
+/// </summary>
+public class IndexingJobSimpleMessage
+{
+    public Guid DocumentId { get; set; }
+    public bool HasExtractedText { get; set; }
 }
 
 /// <summary>

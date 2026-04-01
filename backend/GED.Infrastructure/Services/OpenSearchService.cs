@@ -208,6 +208,17 @@ public class OpenSearchService : ISearchService
                 }
             }
 
+            // Handle wildcard search type - return all documents for "*" query
+            if (request.SearchType == GED.Core.Models.SearchType.Wildcard)
+            {
+                var lowerQuery = request.Query?.ToLower().Trim() ?? "";
+                if (lowerQuery == "*" || string.IsNullOrWhiteSpace(request.Query))
+                {
+                    _logger.LogInformation("Wildcard search detected — returning all documents");
+                    return await GetAllDocumentsAsync(request, cancellationToken);
+                }
+            }
+
             // Generate query embedding for semantic search (parallel with BM25)
             var embeddingText = string.IsNullOrWhiteSpace(processedQuery)
                 ? request.Query : processedQuery;
@@ -284,13 +295,19 @@ public class OpenSearchService : ISearchService
                 }
             }
 
+            // Fetch pending documents from database
+            var indexedDocIds = documents.Select(d => d.Id).ToList();
+            var (pendingDocs, pendingCount) = await FetchPendingDocumentsAsync(indexedDocIds, request, cancellationToken);
+
             var result = new SearchResult
             {
-                TotalResults     = Math.Max(totalBm25, documents.Count),
+                TotalResults     = Math.Max(totalBm25, documents.Count) + pendingCount,
                 Page             = request.Page,
                 PageSize         = request.PageSize,
-                TotalPages       = (int)Math.Ceiling((double)Math.Max(totalBm25, documents.Count) / request.PageSize),
+                TotalPages       = (int)Math.Ceiling((double)(Math.Max(totalBm25, documents.Count) + pendingCount) / request.PageSize),
                 Documents        = documents,
+                PendingDocuments = pendingDocs,
+                PendingCount     = pendingCount,
                 Facets           = bm25Response != null ? ExtractFacets(bm25Response.Aggregations) : null,
                 SearchTimeMs     = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
                 ProcessedQuery   = processedQuery,
@@ -306,8 +323,8 @@ public class OpenSearchService : ISearchService
                     result.Documents.First().Id, 5, cancellationToken);
 
             _logger.LogInformation(
-                "Search complete: {Mode}, {Count} docs, {Ms}ms, understood={OK}",
-                searchMode, documents.Count, result.SearchTimeMs, isUnderstood);
+                "Search complete: {Mode}, {Count} indexed + {Pending} pending docs, {Ms}ms, understood={OK}",
+                searchMode, documents.Count, pendingDocs.Count, result.SearchTimeMs, isUnderstood);
 
             return result;
         }
@@ -356,23 +373,29 @@ public class OpenSearchService : ISearchService
                 .Select(h => MapToSearchHit(h))
                 .ToList();
 
-            // Fetch real-time status from database
+            // Fetch real-time status from database for indexed documents
             if (documents.Any())
             {
                 await EnrichWithRealTimeStatusAsync(documents, cancellationToken);
             }
 
+            // Fetch pending documents from database
+            var indexedDocIds = documents.Select(d => d.Id).ToList();
+            var (pendingDocs, pendingCount) = await FetchPendingDocumentsAsync(indexedDocIds, request, cancellationToken);
+
             _logger.LogInformation(
-                "Show all query: returned {Count}/{Total} documents, {Ms}ms",
-                documents.Count, response.Total, (long)(DateTime.UtcNow - startTime).TotalMilliseconds);
+                "Show all query: returned {Count}/{Total} indexed + {Pending} pending documents, {Ms}ms",
+                documents.Count, response.Total, pendingDocs.Count, (long)(DateTime.UtcNow - startTime).TotalMilliseconds);
 
             return new SearchResult
             {
-                TotalResults     = (int)(response.Total),
+                TotalResults     = (int)(response.Total) + pendingCount,
                 Page             = request.Page,
                 PageSize         = request.PageSize,
-                TotalPages       = (int)Math.Ceiling((double)response.Total / request.PageSize),
+                TotalPages       = (int)Math.Ceiling((double)(response.Total + pendingCount) / request.PageSize),
                 Documents        = documents,
+                PendingDocuments = pendingDocs,
+                PendingCount     = pendingCount,
                 Facets           = ExtractFacets(response.Aggregations),
                 SearchTimeMs     = (long)(DateTime.UtcNow - startTime).TotalMilliseconds,
                 ProcessedQuery   = request.Query,
@@ -430,6 +453,187 @@ public class OpenSearchService : ISearchService
         {
             _logger.LogWarning(ex, "Failed to enrich search results with real-time status");
         }
+    }
+
+    /// <summary>
+    /// Fetches documents from the database that are not yet indexed in OpenSearch.
+    /// These are shown in a separate "En cours de traitement" section.
+    /// </summary>
+    private async Task<(List<DocumentSearchHit> PendingDocuments, int PendingCount)> FetchPendingDocumentsAsync(
+        List<Guid> indexedDocIds,
+        CoreSearchRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Get pending documents (Status != Indexed and not already in search results)
+            var pendingQuery = _db.Documents
+                .Where(d => d.Status != DocumentStatus.Indexed && d.Status != DocumentStatus.Deleted);
+
+            // Exclude documents already in the indexed results
+            if (indexedDocIds.Any())
+            {
+                pendingQuery = pendingQuery.Where(d => !indexedDocIds.Contains(d.Id));
+            }
+
+            // Get pending documents ordered by CreatedAt
+            var pendingEntities = await pendingQuery
+                .OrderByDescending(d => d.CreatedAt)
+                .Take(100) // Limit to prevent overwhelming the UI
+                .ToListAsync(cancellationToken);
+
+            if (!pendingEntities.Any())
+            {
+                return (new List<DocumentSearchHit>(), 0);
+            }
+
+            // Get total count of pending documents for UI badge
+            var totalPendingCount = await _db.Documents
+                .Where(d => d.Status != DocumentStatus.Indexed && d.Status != DocumentStatus.Deleted)
+                .CountAsync(cancellationToken);
+
+            // Get all outbox messages for queue position calculation
+            var pendingDocIds = pendingEntities.Select(e => e.Id).ToList();
+            var outboxMessages = await _db.OutboxMessages
+                .Where(m => pendingDocIds.Contains(m.Id) ||
+                           m.Payload.Contains("DocumentId") && m.ProcessedAt == null)
+                .OrderBy(m => m.CreatedAt)
+                .ToListAsync(cancellationToken);
+
+            // Build queue position map from outbox messages
+            var queuePositionMap = new Dictionary<Guid, int>();
+            int position = 1;
+            foreach (var msg in outboxMessages.OrderBy(m => m.CreatedAt))
+            {
+                // Try to extract document ID from payload
+                if (msg.Payload.Contains("DocumentId"))
+                {
+                    try
+                    {
+                        var docIdMatch = System.Text.RegularExpressions.Regex.Match(
+                            msg.Payload, @"""DocumentId"":?\s*""?([0-9a-fA-F-]+)""?");
+                        if (docIdMatch.Success && Guid.TryParse(docIdMatch.Groups[1].Value, out var docId))
+                        {
+                            if (!queuePositionMap.ContainsKey(docId))
+                            {
+                                queuePositionMap[docId] = position++;
+                            }
+                        }
+                    }
+                    catch { /* ignore parse errors */ }
+                }
+            }
+
+            var pendingDocuments = new List<DocumentSearchHit>();
+            foreach (var entity in pendingEntities)
+            {
+                // Determine processing stage
+                var (stage, isQueued) = DetermineProcessingStage(entity, outboxMessages);
+
+                // Get queue position
+                queuePositionMap.TryGetValue(entity.Id, out int queuePosition);
+
+                var hit = new DocumentSearchHit
+                {
+                    Id = entity.Id,
+                    Title = entity.Title,
+                    Description = entity.Description,
+                    FileName = entity.FileName,
+                    ContentType = entity.ContentType,
+                    FileSize = entity.FileSize,
+                    CreatedAt = entity.CreatedAt,
+                    DocumentDate = entity.DocumentDate,
+                    ModifiedAt = entity.ModifiedAt,
+                    Category = entity.Category,
+                    Tags = entity.Tags,
+                    Status = entity.Status.ToString(),
+                    DocumentStatus = entity.Status.ToString(),
+                    IsOcrProcessed = entity.IsOcrProcessed,
+                    IsFullyProcessed = false, // Not indexed yet
+                    ProcessingStage = stage,
+                    QueuePosition = queuePosition > 0 ? queuePosition : null,
+                    IsQueued = isQueued,
+                    Score = 0, // No relevance score for pending documents
+                    OcrStageLabel = entity.Metadata?.GetValueOrDefault("ocr_stage")?.ToString()
+                };
+
+                pendingDocuments.Add(hit);
+            }
+
+            _logger.LogInformation(
+                "Fetched {Count} pending documents (total pending: {Total})",
+                pendingDocuments.Count, totalPendingCount);
+
+            return (pendingDocuments, totalPendingCount);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch pending documents from database");
+            return (new List<DocumentSearchHit>(), 0);
+        }
+    }
+
+    /// <summary>
+    /// Determines the processing stage for a pending document.
+    /// </summary>
+    private (string Stage, bool IsQueued) DetermineProcessingStage(
+        DocumentEntity entity,
+        List<OutboxMessage> outboxMessages)
+    {
+        var docOutboxMessages = outboxMessages
+            .Where(m => m.Payload.Contains(entity.Id.ToString()))
+            .OrderBy(m => m.CreatedAt)
+            .ToList();
+
+        var ocrJob = docOutboxMessages.FirstOrDefault(m => m.Type == "OcrJob");
+        var indexingJob = docOutboxMessages.FirstOrDefault(m => m.Type == "IndexingJob");
+
+        bool isOcrJobQueued = ocrJob != null;
+        bool isOcrJobProcessed = ocrJob?.ProcessedAt != null;
+        bool isOcrJobAcknowledged = ocrJob?.AcknowledgedAt != null;
+
+        bool isIndexingJobQueued = indexingJob != null;
+        bool isIndexingJobProcessed = indexingJob?.ProcessedAt != null;
+        bool isIndexingJobAcknowledged = indexingJob?.AcknowledgedAt != null;
+
+        // Stage 1: Waiting for OCR
+        if (entity.Status == DocumentStatus.Pending && !isOcrJobQueued)
+        {
+            return ("En attente de traitement", false);
+        }
+
+        // Stage 2: OCR in queue (waiting for worker)
+        if (!isOcrJobProcessed)
+        {
+            return ("File d'attente OCR", true);
+        }
+
+        // Stage 3: OCR processing
+        if (!isOcrJobAcknowledged)
+        {
+            return ("OCR en cours", true);
+        }
+
+        // Stage 4: Waiting for indexing
+        if (!isIndexingJobQueued)
+        {
+            return ("Indexation en attente", false);
+        }
+
+        // Stage 5: Indexing in queue
+        if (!isIndexingJobProcessed)
+        {
+            return ("File d'attente indexation", true);
+        }
+
+        // Stage 6: Indexing in progress
+        if (!isIndexingJobAcknowledged)
+        {
+            return ("Indexation en cours", true);
+        }
+
+        // Fallback: generic waiting
+        return ($"Statut: {entity.Status}", isOcrJobQueued || isIndexingJobQueued);
     }
 
     /// <summary>
@@ -1402,11 +1606,11 @@ public class OpenSearchService : ISearchService
             });
         }
 
+        // Empty query - return all indexed documents (no must clause, just apply filters)
         return q.Bool(b =>
         {
             var bq = b;
             if (filterQueries.Any()) bq = bq.Filter(filterQueries.ToArray());
-            bq = bq.Must(m => m.MatchNone());
             return bq;
         });
     }

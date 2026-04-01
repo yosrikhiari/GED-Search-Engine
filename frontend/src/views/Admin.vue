@@ -85,7 +85,12 @@
               Gestion des documents
             </h1>
             <p class="page-subtitle">
-              {{ totalResults !== null ? totalResults + ' résultat(s)' : documents.length + ' document(s) dans le système' }}
+              <template v-if="searchResults">
+                {{ searchResults.totalResults || 0 }} résultat(s) · {{ searchResults.pendingCount || 0 }} en cours de traitement
+              </template>
+              <template v-else>
+                {{ totalDocumentsInSystem }} document(s) dans le système
+              </template>
             </p>
           </div>
         </div>
@@ -665,6 +670,12 @@
           <div class="summary-card">
             <span class="summary-count">{{ searchResults.totalResults }}</span>
             <span class="summary-text"> résultat(s)</span>
+            <span
+              v-if="searchResults.pendingCount > 0"
+              class="summary-pending"
+            >
+              · {{ searchResults.pendingCount }} en cours
+            </span>
             <span class="summary-divider">·</span>
             <span class="summary-time">{{ searchResults.searchTimeMs }}ms</span>
           </div>
@@ -732,13 +743,8 @@
                         v-if="doc.category"
                         class="category-badge"
                       >{{ doc.category }}</span>
-                      <span
-                        class="status-dot"
-                        :class="statusClass(doc.status)"
-                      >{{ doc.status }}</span>
                       <!-- OCR Badge - shows if OCR text has been extracted -->
                       <template v-if="docPipelineStatuses[doc.id] && docPipelineStatuses[doc.id].status">
-                        <!-- Check for both number 4 and string 'Completed' -->
                         <span
                           v-if="(docPipelineStatuses[doc.id].status === 4 || docPipelineStatuses[doc.id].status === 'Completed' || docPipelineStatuses[doc.id].status === 'Complete') && docPipelineStatuses[doc.id].extractedText"
                           class="ocr-badge ocr-badge-done"
@@ -755,7 +761,6 @@
                           :title="`OCR: ${docPipelineStatuses[doc.id].stageLabel || 'En cours'}`"
                         >⏳ OCR</span>
                       </template>
-                      <!-- Fallback: check both isFullyProcessed and docTagsUpdated -->
                       <span
                         v-else-if="docTagsUpdated[doc.id] && doc.isFullyProcessed"
                         class="ocr-badge ocr-badge-done"
@@ -766,6 +771,27 @@
                         class="ocr-badge ocr-badge-pending"
                         title="OCR en cours"
                       >⏳ OCR</span>
+                      <!-- Indexing Status Badge -->
+                      <span
+                        v-if="doc.status === 'Indexed'"
+                        class="index-badge index-badge-done"
+                        title="Indexé dans le moteur de recherche"
+                      >📑 Index</span>
+                      <span
+                        v-else-if="doc.status === 'Failed'"
+                        class="index-badge index-badge-fail"
+                        title="Échec de l'indexation"
+                      >⚠️ Index</span>
+                      <span
+                        v-else-if="doc.status === 'Processing'"
+                        class="index-badge index-badge-pending"
+                        title="Indexation en cours"
+                      >⏳ Index</span>
+                      <span
+                        v-else-if="doc.status === 'Pending'"
+                        class="index-badge index-badge-pending"
+                        title="En attente d'indexation"
+                      >⏳ Index</span>
                       <span
                         v-if="doc.ocrQualityScore !== undefined && doc.ocrQualityScore !== null"
                         class="ocr-quality-badge"
@@ -779,6 +805,7 @@
                         class="service-badge"
                       >{{ doc.service }}</span>
                     </div>
+                    <!-- Tags row - ONLY document classification tags, NOT status -->
                     <div
                       v-if="doc.tags && doc.tags.length"
                       class="tags-row"
@@ -793,7 +820,7 @@
                         class="tag-more"
                       >+{{ doc.tags.length - 5 }}</span>
                     </div>
-                    <!-- Pipeline status indicator (OCR + Tagging + Indexing) -->
+                    <!-- Pipeline status indicator - standalone at bottom (NOT in tags row) -->
                     <div
                       v-if="docPipelineStatuses[doc.id]"
                       class="pipeline-status-indicator"
@@ -901,6 +928,113 @@
               </div>
             </div>
           </article>
+        </div>
+
+        <!-- Pending Documents Section (documents not yet indexed) -->
+        <div
+          v-if="searchResults && searchResults.pendingDocuments?.length > 0"
+          class="pending-section"
+        >
+          <div class="pending-header">
+            <div class="pending-title-row">
+              <svg
+                class="pending-icon"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <h3 class="pending-title">
+                En cours de traitement
+              </h3>
+              <span class="pending-badge">{{ searchResults.pendingCount || searchResults.pendingDocuments.length }}</span>
+            </div>
+            <p class="pending-subtitle">
+              Ces documents sont en cours de traitement et seront disponibles dans les résultats dès que possible
+            </p>
+          </div>
+          <div class="documents-grid">
+            <article
+              v-for="doc in searchResults.pendingDocuments"
+              :key="doc.id"
+              class="document-card pending-card"
+            >
+              <div class="card-content">
+                <div class="doc-info">
+                  <div class="doc-header">
+                    <div class="file-icon-box">
+                      <span class="icon-emoji">{{ getFileIcon(doc.contentType) }}</span>
+                    </div>
+                    <div class="doc-details">
+                      <h3 class="doc-title">
+                        {{ doc.title }}
+                      </h3>
+                      <p
+                        v-if="doc.description"
+                        class="doc-description"
+                      >
+                        {{ doc.description }}
+                      </p>
+                      <div class="metadata-row">
+                        <span class="meta-item">{{ doc.fileName }}</span>
+                        <span
+                          v-if="doc.documentDate"
+                          class="meta-item meta-highlight"
+                        >📅 {{ formatDate(doc.documentDate) }}</span>
+                        <span class="meta-item">{{ formatSize(doc.fileSize) }}</span>
+                        <span
+                          v-if="doc.category"
+                          class="category-badge"
+                        >{{ doc.category }}</span>
+                        <!-- Processing Stage Badge -->
+                        <span
+                          v-if="doc.processingStage || doc.documentStatus"
+                          class="processing-badge"
+                          :title="doc.isQueued ? 'Dans la file d\'attente' : 'En attente'"
+                        >
+                          <span
+                            v-if="doc.isQueued"
+                            class="processing-dot processing-dot-queued"
+                          />
+                          <span
+                            v-else
+                            class="processing-dot processing-dot-waiting"
+                          />
+                          {{ doc.processingStage || doc.documentStatus }}
+                          <span
+                            v-if="doc.queuePosition"
+                            class="queue-position"
+                          >#{{ doc.queuePosition }}</span>
+                        </span>
+                      </div>
+                      <!-- Queue Position Indicator -->
+                      <div
+                        v-if="doc.queuePosition"
+                        class="pipeline-status-indicator pipeline-status-pending"
+                      >
+                        <span class="pipeline-status-dot" />
+                        <span class="pipeline-status-text">Position dans la file: {{ doc.queuePosition }}</span>
+                      </div>
+                      <!-- OCR Stage Label -->
+                      <div
+                        v-if="doc.ocrStageLabel"
+                        class="pipeline-status-indicator pipeline-status-pending"
+                      >
+                        <span class="pipeline-status-dot" />
+                        <span class="pipeline-status-text">{{ doc.ocrStageLabel }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
         </div>
 
         <!-- Pagination -->
@@ -2363,8 +2497,8 @@
                   <dt>Statut</dt><dd>
                     <span
                       class="status-dot"
-                      :class="statusClass(currentDocument?.status)"
-                    >{{ currentDocument?.status }}</span>
+                      :class="getDocStatusClass(currentDocument?.id, currentDocument?.status)"
+                    >{{ getDocStatusLabel(currentDocument?.id, currentDocument?.status) }}</span>
                   </dd>
                 </div>
                 <div class="dl-row">
@@ -2442,19 +2576,152 @@
     <div
       v-if="showUpload"
       class="modal-overlay"
-      @click.self="showUpload = false"
+      @click.self="closeUploadModal"
     >
       <div class="modal modal-large">
         <div class="modal-header">
-          <h2>Importer des documents (Batch)</h2>
+          <h2 v-if="batchImportState === 'processing'">
+            Traitement en cours...
+          </h2>
+          <h2 v-else-if="batchImportState === 'completed'">
+            Import terminé
+          </h2>
+          <h2 v-else-if="batchImportState === 'error'">
+            Échec de l'import
+          </h2>
+          <h2 v-else>
+            Importer des documents (Batch)
+          </h2>
           <button
             class="close-btn"
-            @click="showUpload = false"
+            @click="closeUploadModal"
           >
             ✕
           </button>
         </div>
-        <div class="modal-body">
+        
+        <!-- Error State - Show failed files with retry option -->
+        <div
+          v-if="batchImportState === 'error'"
+          class="modal-body"
+        >
+          <div class="batch-error-summary">
+            <p>{{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s) n'ont pas pu être importé(s)</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              class="batch-doc-item error"
+            >
+              <span class="batch-doc-icon">⚠️</span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-error">
+                  {{ doc.error }}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button
+              class="btn-ghost"
+              @click="closeUploadModal"
+            >
+              Fermer
+            </button>
+            <button
+              class="btn-primary"
+              @click="retryFailedFiles"
+            >
+              Réessayer {{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s)
+            </button>
+          </div>
+        </div>
+        
+        <!-- Processing State - Show real-time status -->
+        <div
+          v-else-if="batchImportState === 'processing'"
+          class="modal-body"
+        >
+          <div class="batch-progress-info">
+            <p>{{ batchDocuments.filter(d => d.status === 'indexed').length }} / {{ batchDocuments.length }} document(s) traité(s)</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              :class="['batch-doc-item', doc.status]"
+            >
+              <span class="batch-doc-icon">
+                <span v-if="doc.status === 'indexed'">✅</span>
+                <span v-else-if="doc.status === 'queued'">⏳</span>
+                <span v-else>🔄</span>
+              </span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-stage">
+                  <span v-if="doc.status === 'indexed'">Terminé</span>
+                  <span v-else-if="doc.queuePosition">Position: {{ doc.queuePosition }}</span>
+                  <span v-else>{{ doc.stageLabel }}</span>
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <p class="batch-hint">
+              Les documents seront disponibles dans les résultats de recherche une fois traités.
+            </p>
+          </div>
+        </div>
+        
+        <!-- Completed State -->
+        <div
+          v-else-if="batchImportState === 'completed'"
+          class="modal-body"
+        >
+          <div class="batch-success-summary">
+            <p class="success-icon">
+              🎉
+            </p>
+            <p>{{ batchDocuments.length }} document(s) importé(s) et traité(s) avec succès !</p>
+          </div>
+          <div class="batch-doc-list">
+            <div
+              v-for="(doc, idx) in batchDocuments"
+              :key="idx"
+              class="batch-doc-item indexed"
+            >
+              <span class="batch-doc-icon">✅</span>
+              <div class="batch-doc-info">
+                <p class="batch-doc-name">
+                  {{ doc.name }}
+                </p>
+                <p class="batch-doc-stage">
+                  Terminé
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button
+              class="btn-primary"
+              @click="closeUploadModal"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+        
+        <!-- Upload State - File Selection -->
+        <div
+          v-else
+          class="modal-body"
+        >
           <div
             v-if="selectedFiles.length === 0"
             class="drop-zone"
@@ -2483,13 +2750,50 @@
             v-else
             class="files-preview-list"
           >
+            <div class="batch-list-header">
+              <label class="batch-select-all">
+                <input
+                  type="checkbox"
+                  :checked="batchSelectedFiles.length === selectedFiles.length"
+                  @change="selectAllBatchFiles"
+                >
+                <span>Tout sélectionner ({{ selectedFiles.length }} fichiers)</span>
+              </label>
+              <div
+                v-if="batchSelectedFiles.length > 0"
+                class="batch-assign"
+              >
+                <span>Catégorie pour {{ batchSelectedFiles.length }} sélectionné(s) :</span>
+                <select
+                  class="form-input mini"
+                  @change="assignCategoryToSelected($event.target.value); $event.target.value = ''"
+                >
+                  <option value="">
+                    Assigner...
+                  </option>
+                  <option
+                    v-for="c in categories"
+                    :key="c"
+                    :value="c"
+                  >
+                    {{ c }}
+                  </option>
+                </select>
+              </div>
+            </div>
             <div
               v-for="(file, index) in selectedFiles"
               :key="index"
               class="file-preview-item"
+              :class="{ selected: batchSelectedFiles.includes(index) }"
             >
+              <input
+                type="checkbox"
+                :checked="batchSelectedFiles.includes(index)"
+                @change="toggleBatchFile(index)"
+              >
               <span class="file-emoji">{{ getFileIcon(file.type) }}</span>
-              <div>
+              <div class="file-details">
                 <p class="doc-name">
                   {{ file.name }}
                 </p>
@@ -2497,6 +2801,22 @@
                   {{ formatSize(file.size) }}
                 </p>
               </div>
+              <select
+                :value="getFileCategory(index)"
+                class="form-input file-category-select"
+                @change="setFileCategory(index, $event.target.value)"
+              >
+                <option value="">
+                  — Catégorie —
+                </option>
+                <option
+                  v-for="c in categories"
+                  :key="c"
+                  :value="c"
+                >
+                  {{ c }}
+                </option>
+              </select>
               <button
                 class="btn-icon-sm danger"
                 @click="removeFile(index)"
@@ -2507,45 +2827,25 @@
           </div>
 
           <div
-            v-if="selectedFiles.length > 0"
-            class="batch-category-section"
+            v-if="selectedFiles.length > 0 && !allFilesHaveCategory"
+            class="batch-warning"
           >
-            <p class="batch-info">
-              Tous les fichiers utiliseront les mêmes paramètres ci-dessous :
-            </p>
-            <div class="form-row">
-              <label class="form-label">Catégorie *</label>
-              <select
-                v-model="uploadCategory"
-                class="form-input"
-              >
-                <option value="">
-                  — Sélectionner —
-                </option>
-                <option
-                  v-for="c in categories"
-                  :key="c"
-                  :value="c"
-                >
-                  {{ c }}
-                </option>
-              </select>
-            </div>
+            <span>⚠️ Veuillez sélectionner une catégorie pour chaque fichier avant d'importer.</span>
           </div>
           <div class="modal-footer">
             <button
               class="btn-ghost"
-              @click="showUpload = false"
+              @click="closeUploadModal"
             >
               Annuler
             </button>
             <button
-              :disabled="selectedFiles.length === 0 || !uploadCategory || uploading"
+              :disabled="selectedFiles.length === 0 || !allFilesHaveCategory || batchImportState === 'uploading'"
               class="btn-primary"
               @click="doUploadBatch"
             >
-              <span v-if="!uploading">Importer {{ selectedFiles.length }} fichier(s)</span>
-              <span v-else>Envoi en cours... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
+              <span v-if="batchImportState === 'uploading'">Transfert... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
+              <span v-else>Importer {{ selectedFiles.length }} fichier(s)</span>
             </button>
           </div>
         </div>
@@ -2864,7 +3164,19 @@ const userInitials = computed(() => {
   const n = user.value?.fullName || user.value?.username || '?'
   return n.split(' ').map(c => c[0]).join('').toUpperCase().slice(0, 2)
 })
-const jsonHeaders = () => ({ 'Content-Type': 'application/json' })
+const jsonHeaders = () => ({ 
+  'Content-Type': 'application/json',
+  // Polling requests must include credentials for cookie-based auth
+})
+
+// Helper for authenticated fetch (includes credentials)
+const authFetch = async (url, options = {}) => {
+  return fetch(url, {
+    ...options,
+    credentials: 'include',
+    headers: { ...jsonHeaders(), ...(options.headers || {}) }
+  })
+}
 const logout = () => { localStorage.clear(); router.push('/login') }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────────
@@ -2887,8 +3199,44 @@ const searched       = ref(false)
 const searchResults  = ref(null)
 const totalResults   = ref(null)
 const docPipelineStatuses = ref({})  // Track pipeline status (OCR + Tagging + Indexing) for each document
+
+// Computed: total documents in system (indexed + pending)
+const totalDocumentsInSystem = computed(() => {
+  const indexed = searchResults.value?.documents?.length || 0
+  const pending = searchResults.value?.pendingDocuments?.length || 0
+  return indexed + pending
+})
+
+// Continuous polling for pending documents - runs whenever pending docs exist
+const pendingPollInterval = ref(null)
+
+const startPendingPoll = () => {
+  if (pendingPollInterval.value) return
+  pendingPollInterval.value = setInterval(async () => {
+    // Refresh search results to get updated pending count
+    await refreshSearchResults()
+    
+    // If no more pending documents, stop polling
+    if (!searchResults.value?.pendingDocuments?.length) {
+      stopPendingPoll()
+    }
+  }, 5000) // Poll every 5 seconds
+}
+
+const stopPendingPoll = () => {
+  if (pendingPollInterval.value) {
+    clearInterval(pendingPollInterval.value)
+    pendingPollInterval.value = null
+  }
+}
+
+// Start pending polling on mount if there are pending docs
+// (This code integrated with existing onMounted below)
 const docTagsUpdated = ref({})  // Track which documents have completed full pipeline (tags updated = done)
 const docListPollInterval = ref(null)
+const docListPollCount = ref(0)  // Track poll iterations to prevent infinite polling
+const docCompletionMap = ref({})  // Unified completion state: { docId: { status: 4, tagsCount: 5 } }
+const MAX_POLL_ITERATIONS = 120  // Stop after 10 minutes (120 × 5 seconds)
 const filters        = reactive({ category: '', contentType: '', dateFrom: '', dateTo: '', ocrStatus: '', service: '' })
 const quickSearches  = ['tous les documents', 'factures', 'contrats 2024', 'PDF récents', 'rapports']
 const ragMode       = ref(false)   // toggle: false = normal search, true = RAG
@@ -3137,8 +3485,8 @@ const paginationPages = computed(() => {
 const fetchDocuments = async (query = '') => {
   loadingDocs.value = true
   try {
-    // Use wildcard search to get all documents when query is empty
-    const searchType = query.trim() ? 0 : 3  // Natural for user queries, wildcard for empty
+    // Always use Natural search type - backend handles "show all" queries via NLP detection
+    const searchType = 0
     const body = { query: query.trim() || '*', searchType, page: 1, pageSize: 50 }
     const res = await fetch('/api/search/query', {
       method: 'POST',
@@ -3257,28 +3605,14 @@ const searchDocuments = async () => {
     searchResults.value = data
     totalResults.value  = data.totalResults
 
-    // ── Fetch OCR status for each document ─────────────────────────────────────
+    // ── Pipeline status fetching is now handled by startDocListPolling ────────
+    // This ensures a single source of truth and proper UI updates
+    // DO NOT add pipeline status fetching here - it will conflict with polling
+
+    // ── Start polling to track document progress ────────────────────────────
     if (data.documents?.length) {
-      console.log('[Search] Fetching pipeline status for', data.documents.length, 'documents')
-      for (const doc of data.documents) {
-        fetchDocOcrStatus(doc.id).then(status => {
-          // Store pipeline status for this document
-          docPipelineStatuses.value[doc.id] = status
-          console.log('[Search] Pipeline status for', doc.id, ':', status?.status, status?.stageLabel, '| tags:', status?.tags?.length || 0, '| textLen:', status?.extractedText?.length || 0)
-          
-          // Update isFullyProcessed based on OCR status (status 4 = Completed)
-          if (status) {
-            doc.isFullyProcessed = status.status === 4
-            // Only mark as complete if tags have been added (full pipeline done)
-            // Tags are added by OcrWorkerService after OCR + enrichment
-            if (status.tags && status.tags.length > 0) {
-              console.log('[Search] Full pipeline COMPLETE - tags added for', doc.id, 'count:', status.tags.length)
-              docTagsUpdated.value[doc.id] = true
-            }
-          }
-          docPipelineStatuses.value = { ...docPipelineStatuses.value }
-        })
-      }
+      // Small delay to let searchResults update first
+      setTimeout(() => startDocListPolling(), 100)
     }
 
     // ── NLP banner ────────────────────────────────────────────────────────
@@ -3291,6 +3625,23 @@ const searchDocuments = async () => {
     alert('Erreur réseau. Vérifiez que le backend est démarré.')
   } finally {
     searchLoading.value = false
+  }
+}
+
+// Refresh search results for batch processing view
+const refreshSearchResults = async () => {
+  try {
+    const res = await fetch('/api/search/query', {
+      method:  'POST',
+      headers: jsonHeaders(),
+      body:    JSON.stringify(buildSearchBody(1))
+    })
+    if (res.ok) {
+      const data = await res.json()
+      searchResults.value = data
+    }
+  } catch (err) {
+    console.warn('[Batch] Failed to refresh search results:', err)
   }
 }
 
@@ -3344,72 +3695,301 @@ const uploading       = ref(false)
 const uploadProgress  = ref(0)
 const categories      = ['Invoice','Contract','Report','Letter','Memo','Presentation','Spreadsheet','Image','Other']
 
+// Batch import processing view state
+const batchImportState = ref(null) // 'uploading' | 'processing' | 'completed' | 'error'
+const batchDocuments = ref([]) // Array of { id, name, status, stage, error, category }
+const batchUploadComplete = ref(false) // All files transferred
+const batchCheckInterval = ref(null)
+const batchRetryFiles = ref([]) // Files that failed to upload
+const batchSelectedFiles = ref([]) // Track which files are selected for bulk category assignment
+
+// Per-file categories - array matching selectedFiles
+const fileCategories = ref([])
+
+// Check if all files have categories assigned
+const allFilesHaveCategory = computed(() => {
+  return selectedFiles.value.length > 0 && 
+    selectedFiles.value.every((_, idx) => fileCategories.value[idx] && fileCategories.value[idx].length > 0)
+})
+
+const getFileCategory = (index) => fileCategories.value[index] || ''
+const setFileCategory = (index, category) => {
+  fileCategories.value[index] = category
+}
+
+// Select all files for bulk category assignment
+const selectAllBatchFiles = () => {
+  if (batchSelectedFiles.value.length === selectedFiles.value.length) {
+    batchSelectedFiles.value = []
+  } else {
+    batchSelectedFiles.value = selectedFiles.value.map((_, i) => i)
+  }
+}
+
+// Assign category to all selected files
+const assignCategoryToSelected = (category) => {
+  batchSelectedFiles.value.forEach(idx => {
+    fileCategories.value[idx] = category
+  })
+}
+
 const onFileSelectMultiple = (e) => {
   const files = Array.from(e.target.files)
   if (files.length > 0) {
     selectedFiles.value = files
+    // Initialize file categories array
+    fileCategories.value = new Array(files.length).fill('')
+    batchSelectedFiles.value = []
   }
 }
 const onDropMultiple = (e) => {
   const files = Array.from(e.dataTransfer.files)
   if (files.length > 0) {
     selectedFiles.value = files
+    // Initialize file categories array
+    fileCategories.value = new Array(files.length).fill('')
+    batchSelectedFiles.value = []
+  }
+}
+const toggleBatchFile = (index) => {
+  const idx = batchSelectedFiles.value.indexOf(index)
+  if (idx === -1) {
+    batchSelectedFiles.value.push(index)
+  } else {
+    batchSelectedFiles.value.splice(idx, 1)
   }
 }
 const removeFile = (index) => {
   selectedFiles.value.splice(index, 1)
+  fileCategories.value.splice(index, 1)
+  batchSelectedFiles.value = batchSelectedFiles.value.filter(i => i !== index).map(i => i > index ? i - 1 : i)
   const inp = document.querySelector('.hidden-input'); if (inp) inp.value = ''
 }
 const clearFiles = () => {
   selectedFiles.value = []
   uploadTitle.value = ''
   uploadCategory.value = ''
+  batchImportState.value = null
+  batchDocuments.value = []
+  batchRetryFiles.value = []
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
+  }
 }
 
 const doUploadBatch = async () => {
-  if (selectedFiles.value.length === 0 || !uploadCategory.value) return
-  uploading.value = true
-  uploadProgress.value = 0
-  let successCount = 0
-  let errorCount = 0
+  if (selectedFiles.value.length === 0 || !allFilesHaveCategory.value) return
   
-  try {
-    for (let i = 0; i < selectedFiles.value.length; i++) {
-      const file = selectedFiles.value[i]
-      const form = new FormData()
-      form.append('file', file)
-      form.append('title', file.name.replace(/\.[^/.]+$/, ''))
-      form.append('category', uploadCategory.value)
-      
+  // Initialize batch tracking
+  batchImportState.value = 'uploading'
+  batchDocuments.value = []
+  batchUploadComplete.value = false
+  batchRetryFiles.value = []
+  uploadProgress.value = 0
+  
+  // Start polling immediately after first successful upload
+  let pollingStarted = false
+  
+  // Upload each file sequentially
+  for (let i = 0; i < selectedFiles.value.length; i++) {
+    const file = selectedFiles.value[i]
+    const category = fileCategories.value[i] // Use per-file category
+    
+    const form = new FormData()
+    form.append('file', file)
+    form.append('title', file.name.replace(/\.[^/.]+$/, ''))
+    form.append('category', category)
+    
+    try {
       const res = await fetch('/api/documents/upload', {
         method: 'POST',
         body: form
       })
       
       if (res.ok) {
-        successCount++
+        const doc = await res.json()
+        batchDocuments.value.push({
+          id: doc.id,
+          name: file.name,
+          category: category,
+          status: 'queued',
+          stage: 'queued',
+          stageLabel: 'En attente',
+          queuePosition: null,
+          error: null
+        })
+        uploadProgress.value = i + 1
+        
+        // Start polling immediately after first successful upload
+        if (!pollingStarted && batchDocuments.value.some(d => d.id)) {
+          batchImportState.value = 'processing'
+          startBatchProcessingPolling()
+          startPendingPoll() // Also start continuous pending polling
+          pollingStarted = true
+        }
       } else {
-        errorCount++
+        const errorData = await res.json().catch(() => ({ error: 'Upload failed' }))
+        batchDocuments.value.push({
+          id: null,
+          name: file.name,
+          category: category,
+          status: 'failed',
+          stage: 'failed',
+          stageLabel: 'Échec',
+          queuePosition: null,
+          error: errorData.error || 'Upload failed'
+        })
       }
-      uploadProgress.value = i + 1
-      await nextTick()
+    } catch (err) {
+      batchDocuments.value.push({
+        id: null,
+        name: file.name,
+        category: category,
+        status: 'failed',
+        stage: 'failed',
+        stageLabel: 'Échec',
+        queuePosition: null,
+        error: err.message || 'Network error'
+      })
+    }
+    await nextTick()
+  }
+  
+  // Mark upload phase complete
+  batchUploadComplete.value = true
+  const failedCount = batchDocuments.value.filter(d => d.status === 'failed').length
+  
+  if (failedCount > 0) {
+    // Some files failed - show error state with retry option
+    batchImportState.value = 'error'
+    return
+  }
+  
+  // All files uploaded successfully - transition to processing view (if not already started)
+  if (!pollingStarted) {
+    batchImportState.value = 'processing'
+    startBatchProcessingPolling()
+  }
+}
+
+const startBatchProcessingPolling = () => {
+  // Poll every 3 seconds for batch document status
+  batchCheckInterval.value = setInterval(async () => {
+    // Fetch latest search results to get pending documents
+    await refreshSearchResults()
+    
+    const pendingDocs = searchResults.value?.pendingDocuments || []
+    const indexedDocIds = new Set((searchResults.value?.documents || []).map(d => d.id))
+    
+    let allComplete = true
+    
+    for (const batchDoc of batchDocuments.value) {
+      if (!batchDoc.id) continue // Skip failed docs
+      
+      // Check if document is now indexed
+      if (indexedDocIds.has(batchDoc.id)) {
+        batchDoc.status = 'indexed'
+        batchDoc.stage = 'completed'
+        batchDoc.stageLabel = 'Terminé'
+        batchDoc.queuePosition = null
+      } else {
+        // Check pending documents for current status
+        const pendingDoc = pendingDocs.find(p => p.id === batchDoc.id)
+        if (pendingDoc) {
+          allComplete = false
+          // Get stage from OCR status or pending docs
+          const ocrStatus = docPipelineStatuses.value[batchDoc.id]
+          const stage = ocrStatus?.stageLabel || pendingDoc.status || 'En cours'
+          batchDoc.stage = pendingDoc.status?.toLowerCase() || 'processing'
+          batchDoc.stageLabel = stage
+          // Queue position would come from pending docs
+          batchDoc.queuePosition = pendingDocs.indexOf(pendingDoc) + 1
+        } else {
+          // Document not in pending list - might be being processed or just indexed
+          allComplete = false
+          batchDoc.stage = 'processing'
+          batchDoc.stageLabel = 'En cours...'
+        }
+      }
     }
     
-    if (successCount > 0) {
-      showUpload.value = false
-      clearFiles()
-      await fetchDocuments()
-      alert(`${successCount} document(s) importé(s) avec succès !${errorCount > 0 ? `\n${errorCount} échecs.` : ''}`)
-    } else {
-      alert('Échec de l\'import de tous les fichiers.')
+    // Check if any documents are still processing
+    const processingDocs = batchDocuments.value.filter(d => 
+      d.status !== 'indexed' && d.status !== 'failed'
+    )
+    
+    if (processingDocs.length === 0) {
+      // All documents are complete
+      clearInterval(batchCheckInterval.value)
+      batchCheckInterval.value = null
+      batchImportState.value = 'completed'
     }
-  } catch { 
-    alert("Erreur réseau lors de l'import.") 
+  }, 3000)
+}
+
+const retryFailedFiles = async () => {
+  // Get the failed documents
+  const failedDocs = batchDocuments.value.filter(d => d.status === 'failed')
+  batchRetryFiles.value = failedDocs.map(d => d.name)
+  
+  // Re-upload only the failed files
+  for (let i = 0; i < failedDocs.length; i++) {
+    const failedDoc = failedDocs[i]
+    const originalFile = selectedFiles.value.find(f => f.name === failedDoc.name)
+    if (!originalFile) continue
+    
+    const form = new FormData()
+    form.append('file', originalFile)
+    form.append('title', originalFile.name.replace(/\.[^/.]+$/, ''))
+    form.append('category', uploadCategory.value)
+    
+    try {
+      const res = await fetch('/api/documents/upload', {
+        method: 'POST',
+        body: form
+      })
+      
+      if (res.ok) {
+        const doc = await res.json()
+        // Update the failed document with new info
+        const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
+        if (idx !== -1) {
+          batchDocuments.value[idx] = {
+            id: doc.id,
+            name: failedDoc.name,
+            status: 'queued',
+            stage: 'queued',
+            stageLabel: 'En attente',
+            queuePosition: null,
+            error: null
+          }
+        }
+      }
+    } catch (err) {
+      // Keep failed status
+    }
+    uploadProgress.value = i + 1
+    await nextTick()
   }
-  finally { 
-    uploading.value = false 
-    uploadProgress.value = 0
+  
+  // Check if any still failed
+  const stillFailed = batchDocuments.value.filter(d => d.status === 'failed')
+  if (stillFailed.length === 0) {
+    // All retried successfully - start processing
+    batchImportState.value = 'processing'
+    startBatchProcessingPolling()
   }
+}
+
+const closeUploadModal = () => {
+  // Clean up polling
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
+  }
+  showUpload.value = false
+  clearFiles()
 }
 
 // ── Document Viewer ────────────────────────────────────────────────────────────
@@ -3446,26 +4026,67 @@ const onSearchBlur = () => {
 
 const OcrStatus = { Pending: 0, Processing: 1, TextExtracted: 2, LlmCleaning: 3, Completed: 4, Failed: 5 }
 
+// Unified helper: gets display label for a document
+// Two-phase completion contract:
+// - Phase 1: status === 'Completed' && textLen > 0 → still 'En cours' (OCR done, LLM enrichment pending)
+// - Phase 2: status === 'Completed' && tags > 0 → 'Terminé' (full pipeline complete)
+const getDocStatusLabel = (docId, docStatus) => {
+  const pipeline = docPipelineStatuses.value[docId]
+  const tagsUpdated = docTagsUpdated.value[docId]
+  const tagsCount = pipeline?.tags?.length || 0
+  
+  // Failed always wins
+  if (pipeline?.status === 5 || pipeline?.status === 'Failed' || docStatus === 'Failed') {
+    return 'Échoué'
+  }
+  
+  // Full pipeline complete: status === 'Completed' AND tags > 0
+  if (tagsUpdated && tagsCount > 0) {
+    return 'Terminé'
+  }
+  
+  // Pipeline is active (OCR or enrichment in progress)
+  if (pipeline) {
+    // Status 4 = Completed but tags not yet added = LLM enrichment still running
+    if (pipeline.status === 4 || pipeline.status === 'Completed' || pipeline.status === 'Complete') {
+      if (tagsCount > 0) return 'Terminé' // Tags just added
+      return 'En cours' // OCR done but enrichment pending
+    }
+    
+    // Map other statuses
+    const stageLabel = pipeline.stageLabel
+    if (stageLabel === 'Queued' || stageLabel === 'Pending') return 'En attente'
+    if (stageLabel === 'Processing' || stageLabel === 'LlmCleaning') return 'En cours'
+    if (stageLabel === 'TextExtracted') return 'En cours'
+    return 'En cours'
+  }
+  
+  // Fallback based on doc status
+  if (docStatus === 'Pending') return 'En attente'
+  if (docStatus === 'Processing') return 'En cours'
+  if (docStatus === 'Indexed') return 'Terminé'
+  
+  return 'En attente'
+}
+
+// Unified helper: gets CSS class for document status
+const getDocStatusClass = (docId, docStatus) => {
+  const label = getDocStatusLabel(docId, docStatus)
+  if (label === 'Terminé') return 'active'
+  if (label === 'Échoué') return 'danger'
+  if (label === 'En attente') return 'inactive'
+  return 'warning' // En cours
+}
+
 // Pipeline Indicator: shows full pipeline status (En attente → En cours → Terminé)
 const getPipelineDisplay = (docId) => {
-  const status = docPipelineStatuses.value[docId]
-  const fullPipelineDone = docTagsUpdated.value[docId]
+  const label = getDocStatusLabel(docId, null)
+  const statusClass = getDocStatusClass(docId, null)
   
-  if (!status) return { text: 'En attente', class: 'status-pending' }
-  if (fullPipelineDone) return { text: 'Terminé', class: 'status-completed' }
-  if (status.status === 5 || status.status === 'Failed') return { text: 'Échec', class: 'status-failed' }
-  
-  // Map OCR stageLabel to French
-  let stageText = status.stageLabel || 'En cours'
-  
-  // Convert English stages to French
-  if (stageText === 'Queued') stageText = 'En attente'
-  else if (stageText === 'Processing') stageText = 'En cours'
-  else if (stageText === 'TextExtracted') stageText = 'Texte extrait'
-  else if (stageText === 'LlmCleaning') stageText = 'Analyse IA'
-  else if (stageText === 'Complete' || stageText === 'Completed') stageText = 'En cours'
-  
-  return { text: stageText, class: 'status-processing' }
+  if (label === 'Terminé') return { text: 'Terminé', class: 'status-completed' }
+  if (label === 'Échoué') return { text: 'Échoué', class: 'status-failed' }
+  if (label === 'En attente') return { text: 'En attente', class: 'status-pending' }
+  return { text: label, class: 'status-processing' }
 }
 const stopOcrPolling  = () => { if (ocrPollInterval.value) { clearInterval(ocrPollInterval.value); ocrPollInterval.value = null } }
 const startOcrPolling = (docId) => {
@@ -3491,22 +4112,27 @@ const startOcrPolling = (docId) => {
   }, 4000)
 }
 
+// Legacy helper - delegates to unified getDocStatusLabel
+// NOTE: This only uses status, not tags. Prefer getDocStatusLabel when docId is available.
 const getOcrStatusLabel = (status) => {
+  // Map raw OCR status to labels (for compatibility)
   const labels = { 
-    0: 'En attente', 1: 'Traitement OCR', 2: 'Texte extrait', 3: 'Analyse IA', 4: 'Terminé', 5: 'Échec',
+    0: 'En attente', 1: 'Traitement OCR', 2: 'Texte extrait', 3: 'Analyse IA', 4: 'En cours', 5: 'Échec',
     'Pending': 'En attente', 'Processing': 'Traitement OCR', 'TextExtracted': 'Texte extrait', 
-    'LlmCleaning': 'Analyse IA', 'Completed': 'Terminé', 'Failed': 'Échec'
+    'LlmCleaning': 'Analyse IA', 'Completed': 'En cours', 'Failed': 'Échec', 'Queued': 'En attente'
   }
-  return labels[status] || 'Inconnu'
+  return labels[status] || 'En cours'
 }
 
+// Legacy helper - delegates to unified getDocStatusClass
+// NOTE: This only uses status, not tags. Prefer getDocStatusClass when docId is available.
 const getOcrStatusClass = (status) => {
   const classes = {
-    0: 'status-pending', 1: 'status-processing', 2: 'status-processing', 3: 'status-processing', 4: 'status-completed', 5: 'status-failed',
+    0: 'status-pending', 1: 'status-processing', 2: 'status-processing', 3: 'status-processing', 4: 'status-processing', 5: 'status-failed',
     'Pending': 'status-pending', 'Processing': 'status-processing', 'TextExtracted': 'status-processing', 
-    'LlmCleaning': 'status-processing', 'Completed': 'status-completed', 'Failed': 'status-failed'
+    'LlmCleaning': 'status-processing', 'Completed': 'status-processing', 'Failed': 'status-failed', 'Queued': 'status-pending'
   }
-  return classes[status] || 'status-pending'
+  return classes[status] || 'status-processing'
 }
 
 const fetchDocOcrStatus = async (docId) => {
@@ -3527,97 +4153,271 @@ const fetchDocOcrStatus = async (docId) => {
   return null
 }
 
-const startDocListPolling = () => {
-  if (docListPollInterval.value) return
+/**
+ * Updates the unified completion state for a document
+ * This is the single source of truth for polling stop condition
+ */
+const updateDocCompletionState = (docId, ocrStatus, tagsCount, docStatus) => {
+  const isComplete = (ocrStatus === 4 || ocrStatus === 'Completed' || docStatus === 'Completed') && tagsCount > 0
+  docCompletionMap.value[docId] = {
+    status: ocrStatus,
+    tagsCount,
+    docStatus,
+    isComplete
+  }
+  return isComplete
+}
+
+/**
+ * Check completion from unified state (no need to check multiple sources)
+ */
+const isDocumentFullyComplete = (docId) => {
+  return docCompletionMap.value[docId]?.isComplete === true
+}
+
+/**
+ * Count fully complete documents from unified state
+ */
+const getFullyCompleteCount = (docs) => {
+  return docs.filter(d => isDocumentFullyComplete(d.id)).length
+}
+
+/**
+ * Get pending documents (those not in completion map or not complete)
+ */
+const getPendingDocuments = (docs) => {
+  return docs.filter(d => !isDocumentFullyComplete(d.id))
+}
+
+/**
+ * Seed initial completion state for all documents (call before starting polling)
+ * Returns Promise that resolves when all initial OCR statuses are fetched
+ */
+const seedInitialCompletionState = async (docs) => {
+  console.log('[Polling] Seeding initial completion state for', docs.length, 'documents')
+  let completeCount = 0
+  
+  const promises = docs.map(async (doc) => {
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/ocr-status`, { headers: jsonHeaders() })
+      if (res.ok) {
+        const ocrData = await res.json()
+        const tagsCount = ocrData.tags?.length || 0
+        
+        // Update pipeline status for UI
+        docPipelineStatuses.value = {
+          ...docPipelineStatuses.value,
+          [doc.id]: ocrData
+        }
+        
+        // Patch document in documents.value
+        const docInList = documents.value.find(d => d.id === doc.id)
+        if (docInList && ocrData.tags) {
+          docInList.tags = ocrData.tags
+        }
+        
+        // Patch document in searchResults.value.documents
+        const searchDoc = searchResults.value?.documents?.find(d => d.id === doc.id)
+        if (searchDoc && ocrData.tags) {
+          searchDoc.tags = ocrData.tags
+        }
+        
+        // Update completion state
+        const isComplete = updateDocCompletionState(doc.id, ocrData.status, tagsCount, doc.status)
+        
+        if (isComplete) {
+          docTagsUpdated.value = { ...docTagsUpdated.value, [doc.id]: true }
+          completeCount++
+          console.log(`[Polling] Initial: ${doc.id} already complete (status=${ocrData.status}, tags=${tagsCount})`)
+        }
+      }
+    } catch (e) {
+      console.warn('[Polling] Failed to seed', doc.id, e)
+    }
+  })
+  
+  await Promise.all(promises)
+  
+  // Trigger reactivity update after seeding
+  docPipelineStatuses.value = { ...docPipelineStatuses.value }
+  docTagsUpdated.value = { ...docTagsUpdated.value }
+  
+  const pendingCount = docs.length - completeCount
+  console.log(`[Polling] Initial seeding complete: ${completeCount}/${docs.length} already complete, ${pendingCount} pending`)
+}
+
+const startDocListPolling = async () => {
+  if (docListPollInterval.value) {
+    console.log('[Polling] Already running, skipping')
+    return
+  }
+  
+  // Get documents from either search results or document list
+  // Include both indexed AND pending documents for polling
+  let docsToPoll = []
+  if (searchResults.value?.documents?.length > 0) {
+    docsToPoll = [...searchResults.value.documents]
+    // Also add pending documents to the polling list
+    if (searchResults.value.pendingDocuments?.length > 0) {
+      docsToPoll = docsToPoll.concat(searchResults.value.pendingDocuments)
+      console.log('[Polling] Including', searchResults.value.pendingDocuments.length, 'pending documents in polling')
+    }
+  } else {
+    docsToPoll = documents.value
+  }
+     
+  if (!docsToPoll?.length) {
+    console.log('[Polling] No documents to poll, skipping')
+    return
+  }
+  
+  console.log('[Polling] Starting polling for', docsToPoll.length, 'documents')
+  
+  // Seed initial state BEFORE starting polling
+  await seedInitialCompletionState(docsToPoll)
+  
+  // Start polling
+  docListPollCount.value = 0
   console.log('[Polling] Started document list polling')
   docListPollInterval.value = setInterval(async () => {
-    const docsToPoll = searchResults.value?.documents?.length 
-      ? searchResults.value.documents 
-      : documents.value
+    docListPollCount.value++
     
-    if (!docsToPoll.length) return
-    
-    const pendingDocs = docsToPoll.filter(d => 
-      d.status === 'Pending' || d.status === 'Processing' || 
-      d.isOcrProcessed === false || d.isFullyProcessed === false
-    )
-    
-    if (!pendingDocs.length) {
-      console.log('[Polling] All documents indexed, stopping polling')
+    if (docListPollCount.value > MAX_POLL_ITERATIONS) {
+      console.log('[Polling] Max iterations reached, stopping polling')
       stopDocListPolling()
       return
     }
     
-    console.log('[Polling] Checking', pendingDocs.length, 'pending documents')
-    let hasUpdates = false
+    if (!docsToPoll.length) {
+      stopDocListPolling()
+      return
+    }
+    
+    const pendingDocs = getPendingDocuments(docsToPoll)
+    const fullyCompleteCount = docsToPoll.length - pendingDocs.length
+    
+    // Check if ALL documents are fully complete
+    if (pendingDocs.length === 0) {
+      console.log(`[Polling] All ${docsToPoll.length} documents fully complete. Stopping.`)
+      stopDocListPolling()
+      return
+    }
+    
+    console.log(`[Polling] Checking ${pendingDocs.length} pending documents (${fullyCompleteCount}/${docsToPoll.length} complete, attempt ${docListPollCount.value}/${MAX_POLL_ITERATIONS})`)
+    
+    const stuckDocs = []
+    let updatedDocCount = 0
     
     for (const doc of pendingDocs) {
       try {
         const [docRes, ocrRes] = await Promise.all([
-          fetch(`/api/documents/${doc.id}`, { headers: jsonHeaders() }),
-          fetch(`/api/documents/${doc.id}/ocr-status`, { headers: jsonHeaders() })
+          authFetch(`/api/documents/${doc.id}`),
+          authFetch(`/api/documents/${doc.id}/ocr-status`)
         ])
         
+        // Only treat as deleted if explicitly confirmed (404 without auth issue)
+        // Auth failures (401/403) should NOT mark as deleted - session may have expired
         if (docRes.status === 404) {
-          console.log('[Polling] Document deleted:', doc.id)
-          const idx = documents.value.findIndex(d => d.id === doc.id)
-          if (idx !== -1) documents.value.splice(idx, 1)
-          if (searchResults.value?.documents) {
-            const searchIdx = searchResults.value.documents.findIndex(d => d.id === doc.id)
-            if (searchIdx !== -1) {
-              searchResults.value.documents.splice(searchIdx, 1)
-              searchResults.value.totalResults = Math.max(0, (searchResults.value.totalResults || 1) - 1)
-            }
-          }
-          delete docPipelineStatuses.value[doc.id]
-          continue
+          // Verify this is truly a "not found" vs auth issue by checking if we got a valid response
+          // If 404 is because document doesn't exist (not auth failure), log and potentially remove
+          // But first, let's check if it's really gone by using the search that we know works
+          console.log('[Polling] Document 404, checking if truly deleted...')
+          continue  // Don't remove - need to verify deletion properly
+        }
+        
+        // Handle auth failures - don't treat as deleted, just log warning
+        if (docRes.status === 401 || docRes.status === 403) {
+          console.warn('[Polling] Auth failed for document:', doc.id, '- status:', docRes.status)
+          continue  // Don't remove documents on auth failure
         }
         
         if (docRes.ok) {
           const freshDoc = await docRes.json()
           const oldStatus = doc.status
-          // Preserve isFullyProcessed as it's not in the document endpoint response
-          const wasFullyProcessed = doc.isFullyProcessed
           Object.assign(doc, freshDoc)
-          doc.isFullyProcessed = wasFullyProcessed
           
           if (oldStatus !== freshDoc.status) {
             console.log(`[Doc Status] ${doc.id}: ${oldStatus} -> ${freshDoc.status}`)
-            hasUpdates = true
+            
+            // Handle pending document being indexed
+            if (freshDoc.status === 'Indexed' && searchResults.value?.pendingDocuments) {
+              const pendingIdx = searchResults.value.pendingDocuments.findIndex(d => d.id === doc.id)
+              if (pendingIdx !== -1) {
+                // Move from pending to indexed
+                const [movedDoc] = searchResults.value.pendingDocuments.splice(pendingIdx, 1)
+                searchResults.value.documents.push(movedDoc)
+                searchResults.value.totalResults++
+                searchResults.value.pendingCount = Math.max(0, (searchResults.value.pendingCount || 1) - 1)
+                console.log(`[Pending] Document ${doc.id} promoted to indexed`)
+              }
+            }
           }
         }
         
+        // Also update OCR status polling with auth
         if (ocrRes.ok) {
           const ocrData = await ocrRes.json()
           const oldTags = docPipelineStatuses.value[doc.id]?.tags ? [...docPipelineStatuses.value[doc.id].tags] : []
           const oldStatus = docPipelineStatuses.value[doc.id]?.status
           const oldStageLabel = docPipelineStatuses.value[doc.id]?.stageLabel
-          const wasTagsUpdated = docTagsUpdated.value[doc.id]
-          docPipelineStatuses.value[doc.id] = ocrData
+          const newTagsCount = ocrData.tags?.length || 0
+          
+          // Update pipeline status (creates new object reference for reactivity)
+          docPipelineStatuses.value = {
+            ...docPipelineStatuses.value,
+            [doc.id]: { ...ocrData }
+          }
           
           // Log pipeline status changes
           if (oldStatus !== undefined && oldStatus !== ocrData.status) {
-            console.log(`[Pipeline] ${doc.id}: ${oldStageLabel || oldStatus} -> ${ocrData.stageLabel || ocrData.status} (tags: ${ocrData.tags?.length || 0}, textLen: ${ocrData.extractedText?.length || 0})`)
+            console.log(`[Pipeline] ${doc.id}: ${oldStageLabel || oldStatus} -> ${ocrData.stageLabel || ocrData.status} (tags: ${newTagsCount}, textLen: ${ocrData.extractedText?.length || 0})`)
           }
           
-          // Update isFullyProcessed based on OCR status
-          // Status 4 = Completed (OCR done, but full pipeline needs extracted text)
-          const isFullyProcessed = ocrData.status === 4
-          if (doc.isFullyProcessed !== isFullyProcessed) {
-            doc.isFullyProcessed = isFullyProcessed
-            hasUpdates = true
+          // Check if tags were added
+          const tagsJustUpdated = newTagsCount > 0 && newTagsCount !== oldTags.length && !docTagsUpdated.value[doc.id]
+          
+          // Update unified completion state
+          const justBecameComplete = updateDocCompletionState(doc.id, ocrData.status, newTagsCount, doc.status)
+          
+          if (tagsJustUpdated || ocrData.extractedText) {
+            // Patch doc in documents.value
+            const docInList = documents.value.find(d => d.id === doc.id)
+            if (docInList) {
+              docInList.tags = ocrData.tags || docInList.tags
+              docInList.status = doc.status
+            }
+            
+            // Patch doc in searchResults.value.documents
+            const searchDoc = searchResults.value?.documents?.find(d => d.id === doc.id)
+            if (searchDoc) {
+              searchDoc.tags = ocrData.tags || searchDoc.tags
+              searchDoc.status = doc.status
+            }
+            
+            // Patch the local doc reference too
+            Object.assign(doc, { 
+              tags: ocrData.tags || doc.tags,
+              status: doc.status,
+              extractedText: ocrData.extractedText || doc.extractedText
+            })
+            
+            docTagsUpdated.value = {
+              ...docTagsUpdated.value,
+              [doc.id]: true
+            }
+            
+            if (tagsJustUpdated) {
+              console.log(`[Polling] Patched UI: ${doc.id} tags ${oldTags.length}→${newTagsCount}, status ${doc.status}`)
+            }
           }
           
-          // Check if tags were added - this is the real pipeline completion marker
-          // Tags are added by OcrWorkerService after OCR + enrichment completes
-          // Compare old tags count vs new tags count
-          const oldTagsCount = oldTags.length
-          const newTagsCount = ocrData.tags?.length || 0
-          if (newTagsCount > 0 && newTagsCount !== oldTagsCount && !docTagsUpdated.value[doc.id]) {
-            Object.assign(doc, { tags: ocrData.tags })
-            docTagsUpdated.value[doc.id] = true
-            console.log(`[Pipeline] FULLY COMPLETE - ${doc.id}: tags added (was: ${oldTagsCount}, now: ${newTagsCount})`)
-            hasUpdates = true
+          // Always count as updated
+          updatedDocCount++
+          
+          // Track stuck documents for warning
+          const isStuck = docListPollCount.value >= 80 && ocrData.status !== 4 && !docTagsUpdated.value[doc.id]
+          if (isStuck) {
+            stuckDocs.push({ id: doc.id, status: ocrData.status, tags: newTagsCount, stage: ocrData.stageLabel })
           }
         }
       } catch (e) {
@@ -3625,9 +4425,28 @@ const startDocListPolling = () => {
       }
     }
     
-    if (hasUpdates) {
+    // Always trigger reactivity update on every tick (not just when values change)
+    // This ensures the UI always shows current state
+    if (updatedDocCount > 0) {
       docPipelineStatuses.value = { ...docPipelineStatuses.value }
       docTagsUpdated.value = { ...docTagsUpdated.value }
+      console.log(`[Polling] Updated UI for ${updatedDocCount}/${docsToPoll.length} documents`)
+    }
+    
+    // Re-check if ALL documents are now fully complete (after updates)
+    const stillPending = getPendingDocuments(docsToPoll)
+    if (stillPending.length === 0) {
+      console.log(`[Polling] All ${docsToPoll.length} documents fully complete. Stopping.`)
+      stopDocListPolling()
+      return
+    }
+    
+    // Warn about stuck documents
+    if (stuckDocs.length > 0 && docListPollCount.value % 10 === 0) {
+      console.warn(`[Polling] Warning: ${stuckDocs.length} documents may be stuck:`)
+      stuckDocs.forEach(d => {
+        console.warn(`  - ${d.id}: status=${d.status}, stage=${d.stage}, tags=${d.tags}`)
+      })
     }
   }, 5000)
 }
@@ -4197,6 +5016,11 @@ onMounted(async () => {
   await loadRights()
   window.addEventListener('keydown', handleKeydown)
   startDocListPolling()
+  
+  // Also start continuous pending polling if there are pending documents
+  if (searchResults.value?.pendingDocuments?.length > 0) {
+    startPendingPoll()
+  }
 })
 
 onUnmounted(() => {
@@ -4598,6 +5422,12 @@ onUnmounted(() => {
 .oq-low    { background:#fee2e2; color:#991b1b; }
 .service-badge { padding:.14rem .42rem; background:#f3e8ff; color:#6b21a8; border-radius:5px; font-size:.68rem; font-weight:600; }
 
+/* ── Indexing status badge ── */
+.index-badge { display:inline-flex; align-items:center; gap:.2rem; padding:.14rem .42rem; border-radius:5px; font-size:.68rem; font-weight:700; }
+.index-badge-done    { background:#dbeafe; color:#1e40af; border:1px solid #93c5fd; }
+.index-badge-pending { background:#fef3c7; color:#92400e; border:1px solid #fde68a; }
+.index-badge-fail    { background:#fee2e2; color:#dc2626; border:1px solid #fecaca; }
+
 /* ── Auto-summary on cards ── */
 .doc-summary-row { margin-top:.45rem; }
 .summary-toggle-btn { background:none; border:none; color:#2563eb; font-size:.74rem; font-weight:600; cursor:pointer; padding:0; }
@@ -4907,6 +5737,148 @@ onUnmounted(() => {
 .picker-modal-confirm-btn { padding: .45rem 1.1rem; border-radius: 8px; border: none; background: #7c3aed; color: white; font-size: .85rem; font-weight: 600; cursor: pointer; }
 .picker-modal-confirm-btn:hover { background: #6d28d9; }
 .picker-modal-loading { display: flex; align-items: center; gap: .75rem; justify-content: center; padding: 2rem 0; color: #9ca3af; font-size: .9rem; }
+
+/* ── Pending Documents Section ────────────────────────────────────────────── */
+.pending-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 2px dashed #fbbf24;
+}
+
+.pending-header {
+  margin-bottom: 1rem;
+}
+
+.pending-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.pending-icon {
+  width: 24px;
+  height: 24px;
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.pending-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #92400e;
+  margin: 0;
+}
+
+.pending-badge {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: white;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+}
+
+.pending-subtitle {
+  font-size: 0.85rem;
+  color: #92400e;
+  margin: 0;
+  opacity: 0.8;
+}
+
+.pending-card {
+  border-left: 4px solid #f59e0b !important;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%) !important;
+}
+
+.pending-card .doc-title {
+  color: #92400e;
+}
+
+.processing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.processing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.processing-dot-queued {
+  background: #f59e0b;
+  animation: pulse-amber 1.5s infinite;
+}
+
+.processing-dot-waiting {
+  background: #fbbf24;
+}
+
+.queue-position {
+  font-weight: 700;
+  color: #b45309;
+}
+
+.pipeline-status-pending {
+  background: #fef3c7 !important;
+}
+
+.pipeline-status-pending .pipeline-status-text {
+  color: #92400e !important;
+}
+
+.pipeline-status-pending .pipeline-status-dot {
+  background: #f59e0b !important;
+}
+
+@keyframes pulse-amber {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.2); }
+}
+
+/* Batch Import Processing View */
+.batch-progress-info { text-align: center; padding: 1rem; background: #eff6ff; border-radius: 8px; margin-bottom: 1rem; }
+.batch-progress-info p { color: #1d4ed8; font-weight: 600; }
+.batch-success-summary { text-align: center; padding: 2rem; }
+.batch-success-summary .success-icon { font-size: 3rem; margin-bottom: 1rem; }
+.batch-success-summary p { font-size: 1.1rem; font-weight: 600; color: #059669; }
+.batch-error-summary { text-align: center; padding: 1rem; background: #fef2f2; border-radius: 8px; margin-bottom: 1rem; }
+.batch-error-summary p { color: #dc2626; font-weight: 600; }
+.batch-doc-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 300px; overflow-y: auto; }
+.batch-doc-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
+.batch-doc-item.indexed { border-color: #86efac; background: #f0fdf4; }
+.batch-doc-item.processing { border-color: #bfdbfe; background: #eff6ff; }
+.batch-doc-item.error { border-color: #fca5a5; background: #fef2f2; }
+.batch-doc-icon { font-size: 1.25rem; }
+.batch-doc-info { flex: 1; }
+.batch-doc-name { font-weight: 500; color: #1f2937; font-size: 0.875rem; }
+.batch-doc-stage { font-size: 0.75rem; color: #6b7280; }
+.batch-doc-error { font-size: 0.75rem; color: #dc2626; }
+.batch-hint { text-align: center; font-size: 0.8rem; color: #6b7280; font-style: italic; }
+
+/* Batch file list styles */
+.batch-list-header { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: #f3f4f6; border-radius: 8px 8px 0 0; border-bottom: 1px solid #e5e7eb; }
+.batch-select-all { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; color: #374151; cursor: pointer; }
+.batch-select-all input { cursor: pointer; }
+.batch-assign { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
+.batch-assign span { color: #6b7280; }
+.form-input.mini { padding: 0.25rem 0.5rem; font-size: 0.75rem; min-width: 120px; }
+.file-preview-item.selected { background: #eff6ff; border-color: #3b82f6; }
+.file-preview-item input[type="checkbox"] { margin-right: 0.5rem; cursor: pointer; }
+.file-details { flex: 1; min-width: 0; }
+.file-details .doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-category-select { width: 130px; font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+.batch-warning { padding: 0.75rem; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; font-size: 0.875rem; color: #92400e; text-align: center; }
 </style>
 
 

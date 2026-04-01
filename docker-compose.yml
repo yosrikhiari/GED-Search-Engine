@@ -48,7 +48,7 @@ services:
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-admin123}
       - RABBITMQ_DEFAULT_VHOST=${RABBITMQ_VHOST:-/}
     ports:
-      - "${RABBITMQ_PORT:-5673}:5672"
+      - "${RABBITMQ_PORT:-5672}:5672"
       - "${RABBITMQ_MANAGEMENT_PORT:-15673}:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
@@ -147,6 +147,10 @@ services:
       - ollama-data:/root/.ollama
     networks:
       - ged-network
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 15s
@@ -166,7 +170,7 @@ services:
       - ged-network
     environment:
       - OLLAMA_HOST=ollama:11434
-    command: ["sh", "-c", "ollama pull mistral && ollama pull nomic-embed-text && echo 'Models ready.'"]
+    command: ["/bin/sh", "-c", "ollama pull mistral && ollama pull nomic-embed-text && echo 'Models ready.'"]
     restart: "no"
 
   # ── Backend (ASP.NET Core API) ────────────────────────────────────────────────
@@ -181,6 +185,8 @@ services:
       # Application
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ASPNETCORE_URLS=http://+:8080
+      # Force IPv4 for .NET
+      - DOTNET_SYSTEM_NET_HTTP_SOCKETSHTTPHANDLER_HTTP3ENABLED=0
       # Database
       - ConnectionStrings__DefaultConnection=Server=${DB_SERVER:-sqlserver};Database=${DB_NAME:-ged_db};User Id=${DB_USER:-sa};Password=${DB_PASSWORD:-GedPass_2024!};TrustServerCertificate=${DB_TRUST_CERTIFICATE:-True}
       # OpenSearch
@@ -235,6 +241,91 @@ services:
       - Cors__Origins=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       # Document
       - Document__MaxUploadSizeMB=${DOCUMENT_MAX_UPLOAD_SIZE_MB:-100}
+      # ResourceSaver - Enable to prevent Ollama resource exhaustion on dev hardware
+      - ResourceSaver__Enabled=${RESOURCE_SAVER_ENABLED:-true}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      tika:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - ged-network
+
+    volumes:
+      - ged-documents:/var/lib/ged/documents
+      - ged-users:/var/lib/ged
+      - backend-logs:/app/logs
+    restart: unless-stopped
+    mem_limit: 1.5g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── OCR Worker Service (scalable) ─────────────────────────────────────────────
+  # Run multiple instances with: docker-compose up --scale ocr-worker=3
+  # Each instance runs its own OcrWorkerService with prefetchCount=4
+  # Total concurrent OCR jobs = 3 instances × 4 prefetch = 12 parallel jobs
+  ocr-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ged-ocr-worker-1
+    environment:
+      # Application
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ASPNETCORE_URLS=http://+:8080
+      # Database
+      - ConnectionStrings__DefaultConnection=Server=${DB_SERVER:-sqlserver};Database=${DB_NAME:-ged_db};User Id=${DB_USER:-sa};Password=${DB_PASSWORD:-GedPass_2024!};TrustServerCertificate=${DB_TRUST_CERTIFICATE:-True}
+      # OpenSearch
+      - OpenSearch__Url=http://${OPENSEARCH_HOST:-opensearch}:${OPENSEARCH_PORT:-9200}
+      - OpenSearch__Username=${OPENSEARCH_USER:-admin}
+      - OpenSearch__Password=${OPENSEARCH_PASSWORD:-GedOpensearch2024!}
+      - OpenSearch__SecurityEnabled=${OPENSEARCH_SECURITY_ENABLED:-false}
+      # RabbitMQ
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Port=${RABBITMQ_PORT:-5672}
+      - RabbitMQ__Username=${RABBITMQ_USER:-admin}
+      - RabbitMQ__Password=${RABBITMQ_PASSWORD:-admin123}
+      # Redis
+      - Redis__Enabled=${REDIS_ENABLED:-true}
+      - Redis__ConnectionString=${REDIS_HOST:-redis}:${REDIS_PORT:-6379}${REDIS_PASSWORD:+,password=${REDIS_PASSWORD}}
+      - Redis__SearchCacheTtlSeconds=${CACHE_SEARCH_TTL_SECONDS:-120}
+      # NLP / LLM
+      - NLP__Enabled=${NLP_ENABLED:-true}
+      - NLP__LlmApiEndpoint=${NLP_LLM_API_ENDPOINT:-http://ollama:11434/api/generate}
+      - NLP__EmbedApiEndpoint=${NLP_EMBED_API_ENDPOINT:-http://ollama:11434/api/embed}
+      - NLP__Model=${NLP_MODEL:-mistral}
+      - NLP__EmbedModel=${NLP_EMBED_MODEL:-nomic-embed-text}
+      # Embeddings
+      - Embeddings__Enabled=true
+      - Embeddings__Model=${NLP_EMBED_MODEL:-nomic-embed-text}
+      - Embeddings__Dimensions=768
+      # Tika
+      - Tika__Enabled=${TIKA_ENABLED:-true}
+      - Tika__Url=${TIKA_URL:-http://tika:9998}
+      # OCR
+      - OCR__TessDataPath=${OCR_TESSDATA_PATH:-/usr/share/tesseract-ocr/5/tessdata}
+      - OCR__OcrmypdfPath=${OCR_OCRMYPDF_PATH:-ocrmypdf}
+      - OCR__TesseractPath=${OCR_TESSERACT_PATH:-tesseract}
+      # RAG
+      - RAG__TopK=${RAG_TOP_K:-5}
+      - RAG__MaxContextChars=${RAG_MAX_CONTEXT_CHARS:-6000}
+      # OCR Worker specific settings
+      - Worker__Type=ocr
+      # ResourceSaver - Enable to prevent Ollama resource exhaustion on dev hardware
+      - ResourceSaver__Enabled=${RESOURCE_SAVER_ENABLED:-true}
     depends_on:
       opensearch:
         condition: service_healthy
@@ -253,10 +344,141 @@ services:
     volumes:
       - ged-documents:/var/lib/ged/documents
       - ged-users:/var/lib/ged
-      - backend-logs:/app/logs
     restart: unless-stopped
     mem_limit: 1.5g
-    cpus: 1.0
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── OCR Worker 2 (additional instance) ────────────────────────────────────────
+  ocr-worker-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ged-ocr-worker-2
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Server=${DB_SERVER:-sqlserver};Database=${DB_NAME:-ged_db};User Id=${DB_USER:-sa};Password=${DB_PASSWORD:-GedPass_2024!};TrustServerCertificate=${DB_TRUST_CERTIFICATE:-True}
+      - OpenSearch__Url=http://${OPENSEARCH_HOST:-opensearch}:${OPENSEARCH_PORT:-9200}
+      - OpenSearch__Username=${OPENSEARCH_USER:-admin}
+      - OpenSearch__Password=${OPENSEARCH_PASSWORD:-GedOpensearch2024!}
+      - OpenSearch__SecurityEnabled=${OPENSEARCH_SECURITY_ENABLED:-false}
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Port=${RABBITMQ_PORT:-5672}
+      - RabbitMQ__Username=${RABBITMQ_USER:-admin}
+      - RabbitMQ__Password=${RABBITMQ_PASSWORD:-admin123}
+      - Redis__Enabled=${REDIS_ENABLED:-true}
+      - Redis__ConnectionString=${REDIS_HOST:-redis}:${REDIS_PORT:-6379}${REDIS_PASSWORD:+,password=${REDIS_PASSWORD}}
+      - NLP__Enabled=${NLP_ENABLED:-true}
+      - NLP__LlmApiEndpoint=${NLP_LLM_API_ENDPOINT:-http://ollama:11434/api/generate}
+      - NLP__EmbedApiEndpoint=${NLP_EMBED_API_ENDPOINT:-http://ollama:11434/api/embed}
+      - NLP__Model=${NLP_MODEL:-mistral}
+      - NLP__EmbedModel=${NLP_EMBED_MODEL:-nomic-embed-text}
+      - Embeddings__Enabled=true
+      - Embeddings__Model=${NLP_EMBED_MODEL:-nomic-embed-text}
+      - Embeddings__Dimensions=768
+      - Tika__Enabled=${TIKA_ENABLED:-true}
+      - Tika__Url=${TIKA_URL:-http://tika:9998}
+      - OCR__TessDataPath=${OCR_TESSDATA_PATH:-/usr/share/tesseract-ocr/5/tessdata}
+      - OCR__OcrmypdfPath=${OCR_OCRMYPDF_PATH:-ocrmypdf}
+      - OCR__TesseractPath=${OCR_TESSERACT_PATH:-tesseract}
+      - RAG__TopK=${RAG_TOP_K:-5}
+      - RAG__MaxContextChars=${RAG_MAX_CONTEXT_CHARS:-6000}
+      - Worker__Type=ocr
+      # ResourceSaver - Enable to prevent Ollama resource exhaustion on dev hardware
+      - ResourceSaver__Enabled=${RESOURCE_SAVER_ENABLED:-true}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      tika:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - ged-network
+    volumes:
+      - ged-documents:/var/lib/ged/documents
+      - ged-users:/var/lib/ged
+    restart: unless-stopped
+    mem_limit: 1.5g
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── OCR Worker 3 (additional instance) ────────────────────────────────────────
+  ocr-worker-3:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ged-ocr-worker-3
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ASPNETCORE_URLS=http://+:8080
+      - ConnectionStrings__DefaultConnection=Server=${DB_SERVER:-sqlserver};Database=${DB_NAME:-ged_db};User Id=${DB_USER:-sa};Password=${DB_PASSWORD:-GedPass_2024!};TrustServerCertificate=${DB_TRUST_CERTIFICATE:-True}
+      - OpenSearch__Url=http://${OPENSEARCH_HOST:-opensearch}:${OPENSEARCH_PORT:-9200}
+      - OpenSearch__Username=${OPENSEARCH_USER:-admin}
+      - OpenSearch__Password=${OPENSEARCH_PASSWORD:-GedOpensearch2024!}
+      - OpenSearch__SecurityEnabled=${OPENSEARCH_SECURITY_ENABLED:-false}
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Port=${RABBITMQ_PORT:-5672}
+      - RabbitMQ__Username=${RABBITMQ_USER:-admin}
+      - RabbitMQ__Password=${RABBITMQ_PASSWORD:-admin123}
+      - Redis__Enabled=${REDIS_ENABLED:-true}
+      - Redis__ConnectionString=${REDIS_HOST:-redis}:${REDIS_PORT:-6379}${REDIS_PASSWORD:+,password=${REDIS_PASSWORD}}
+      - NLP__Enabled=${NLP_ENABLED:-true}
+      - NLP__LlmApiEndpoint=${NLP_LLM_API_ENDPOINT:-http://ollama:11434/api/generate}
+      - NLP__EmbedApiEndpoint=${NLP_EMBED_API_ENDPOINT:-http://ollama:11434/api/embed}
+      - NLP__Model=${NLP_MODEL:-mistral}
+      - NLP__EmbedModel=${NLP_EMBED_MODEL:-nomic-embed-text}
+      - Embeddings__Enabled=true
+      - Embeddings__Model=${NLP_EMBED_MODEL:-nomic-embed-text}
+      - Embeddings__Dimensions=768
+      - Tika__Enabled=${TIKA_ENABLED:-true}
+      - Tika__Url=${TIKA_URL:-http://tika:9998}
+      - OCR__TessDataPath=${OCR_TESSDATA_PATH:-/usr/share/tesseract-ocr/5/tessdata}
+      - OCR__OcrmypdfPath=${OCR_OCRMYPDF_PATH:-ocrmypdf}
+      - OCR__TesseractPath=${OCR_TESSERACT_PATH:-tesseract}
+      - RAG__TopK=${RAG_TOP_K:-5}
+      - RAG__MaxContextChars=${RAG_MAX_CONTEXT_CHARS:-6000}
+      - Worker__Type=ocr
+      # ResourceSaver - Enable to prevent Ollama resource exhaustion on dev hardware
+      - ResourceSaver__Enabled=${RESOURCE_SAVER_ENABLED:-true}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      tika:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - ged-network
+    volumes:
+      - ged-documents:/var/lib/ged/documents
+      - ged-users:/var/lib/ged
+    restart: unless-stopped
+    mem_limit: 1.5g
+    cpus: 1.5
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
       interval: 30s

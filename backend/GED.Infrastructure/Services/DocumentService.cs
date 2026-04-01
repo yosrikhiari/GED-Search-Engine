@@ -232,6 +232,8 @@ public class DocumentService : IDocumentService
 
             // ── 5. Build & persist EF entity ────────────────────────────────
             var uploadTime = DateTime.UtcNow;
+            bool needsOcr = contentType.StartsWith("image/") || contentType == "application/pdf";
+            var initialStatus = needsOcr ? DocumentStatus.Pending : DocumentStatus.Indexed;
 
             var entity = new DocumentEntity
             {
@@ -248,7 +250,7 @@ public class DocumentService : IDocumentService
                 ModifiedAt    = uploadTime,
                 ModifiedBy    = "system",
                 DocumentDate  = documentDate,
-                Status        = DocumentStatus.Indexed,
+                Status        = initialStatus,
                 IsOcrProcessed = !string.IsNullOrWhiteSpace(ingestion.ExtractedText),
                 ExtractedText = ingestion.ExtractedText,
                 Metadata      = mergedMetadata,
@@ -263,7 +265,6 @@ public class DocumentService : IDocumentService
             // ── 6. Queue OCR job via outbox pattern ─────────────────────────
             // Images → TesseractDirectOcrService, scanned PDFs → OcrmyPdfOcrService
             // Both are routed inside OcrWorkerService.ProcessOcrJobAsync
-            bool needsOcr = contentType.StartsWith("image/") || contentType == "application/pdf";
             if (needsOcr)
             {
                 var outboxMessage = new OutboxMessage

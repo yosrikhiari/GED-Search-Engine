@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 using System.Text;
 using System.Text.Json;
 
@@ -13,7 +14,7 @@ namespace GED.Infrastructure.Services;
 /// 
 /// <para>
 /// This is the second half of the Outbox Pattern. It polls the outbox_messages
-/// table every 5 seconds and publishes any unprocessed messages to RabbitMQ.
+/// table every 1 second and publishes any unprocessed messages to RabbitMQ.
 /// </para>
 /// 
 /// <para>
@@ -38,9 +39,10 @@ namespace GED.Infrastructure.Services;
 ///     </description>
 ///   </item>
 ///   <item>
-///     <term>Thread safety</term>
+///     <term>Resource Saver Mode</term>
 ///     <description>
-///       Uses scoped DI to get fresh DbContext per cycle.
+///       When ResourceSaver:Enabled = true, enforces mutual exclusion between
+///       OCR jobs and indexing jobs to prevent Ollama resource exhaustion.
 ///     </description>
 ///   </item>
 /// </list>
@@ -56,11 +58,12 @@ public class OutboxRelayService : BackgroundService
 {
     private readonly IServiceProvider _sp;
     private readonly ILogger<OutboxRelayService> _logger;
+    private readonly IConfiguration _configuration;
 
     /// <summary>
     /// Polling interval between relay cycles.
     /// </summary>
-    private readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// Maximum retry attempts before giving up on a message.
@@ -73,20 +76,34 @@ public class OutboxRelayService : BackgroundService
     private const int BatchSize = 20;
 
     /// <summary>
+    /// Whether ResourceSaver mode is enabled.
+    /// </summary>
+    private readonly bool _resourceSaverEnabled;
+
+    /// <summary>
     /// Initializes a new instance of <see cref="OutboxRelayService"/>.
     /// </summary>
     /// <param name="sp">Service provider for creating scoped dependencies.</param>
     /// <param name="logger">Logger for relay events.</param>
-    public OutboxRelayService(IServiceProvider sp, ILogger<OutboxRelayService> logger)
+    /// <param name="configuration">Application configuration.</param>
+    public OutboxRelayService(IServiceProvider sp, ILogger<OutboxRelayService> logger, IConfiguration configuration)
     {
-        _sp     = sp;
+        _sp = sp;
         _logger = logger;
+        _configuration = configuration;
+        _resourceSaverEnabled = configuration.GetValue<bool>("ResourceSaver:Enabled", false);
+        
+        if (_resourceSaverEnabled)
+        {
+            _logger.LogInformation("ResourceSaver mode enabled - mutual exclusion between OCR and indexing jobs");
+        }
     }
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("📬 Outbox relay started (polling every {Interval}s)", _pollInterval.TotalSeconds);
+        _logger.LogInformation("📬 Outbox relay started (polling every {Interval}s, ResourceSaver={Enabled})", 
+            _pollInterval.TotalSeconds, _resourceSaverEnabled);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -100,7 +117,6 @@ public class OutboxRelayService : BackgroundService
             }
             catch (Exception ex)
             {
-                // Log but keep running — transient errors shouldn't kill the relay
                 _logger.LogError(ex, "Outbox relay cycle failed — will retry in {Interval}s", _pollInterval.TotalSeconds);
             }
 
@@ -128,13 +144,58 @@ public class OutboxRelayService : BackgroundService
 
         if (!pending.Any()) return;
 
-        _logger.LogInformation("📬 Outbox relay: processing {Count} messages", pending.Count);
+        // Check for in-flight jobs if ResourceSaver is enabled
+        // Include stale job detection - jobs in-flight for > 5 minutes are considered stuck
+        var staleThreshold = DateTime.UtcNow.AddMinutes(-5);
+        var ocrInFlight = 0;
+        var indexingInFlight = 0;
+        
+        if (_resourceSaverEnabled)
+        {
+            ocrInFlight = await db.OutboxMessages
+                .Where(m => m.Type == "OcrJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
+                .Where(m => m.ProcessedAt > staleThreshold) // Only count recent in-flight jobs
+                .CountAsync(ct);
+
+            indexingInFlight = await db.OutboxMessages
+                .Where(m => m.Type == "IndexingJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
+                .Where(m => m.ProcessedAt > staleThreshold) // Only count recent in-flight jobs
+                .CountAsync(ct);
+
+            if (ocrInFlight > 0)
+            {
+                _logger.LogInformation("⏸️ Holding back OCR jobs - {Count} indexing jobs in-flight", indexingInFlight);
+            }
+            if (indexingInFlight > 0)
+            {
+                _logger.LogInformation("⏸️ Holding back indexing jobs - {Count} OCR jobs in-flight", ocrInFlight);
+            }
+        }
+
+        _logger.LogInformation("📬 Outbox relay: processing {Count} messages (OCR:{OcrInFlight}, Indexing:{IdxInFlight})", 
+            pending.Count, ocrInFlight, indexingInFlight);
 
         foreach (var msg in pending)
         {
+            // ResourceSaver mutual exclusion check
+            if (_resourceSaverEnabled)
+            {
+                if (msg.Type == "OcrJob" && indexingInFlight > 0)
+                {
+                    _logger.LogInformation("⏸️ Skipping OcrJob {Id} - {Count} IndexingJob(s) in-flight", msg.Id, indexingInFlight);
+                    continue;
+                }
+                
+                if (msg.Type == "IndexingJob" && ocrInFlight > 0)
+                {
+                    _logger.LogInformation("⏸️ Skipping IndexingJob {Id} - {Count} OcrJob(s) in-flight", msg.Id, ocrInFlight);
+                    continue;
+                }
+            }
+
             try
             {
-                _logger.LogWarning("📤 About to publish outbox message {Id}, type={Type}, payload={Payload}", msg.Id, msg.Type, msg.Payload);
+                _logger.LogDebug("📤 About to publish outbox message {Id}, type={Type}", msg.Id, msg.Type);
                 await PublishMessageAsync(rabbitMq, msg, ct);
                 msg.ProcessedAt = DateTime.UtcNow;
                 _logger.LogInformation("✅ Outbox message {Id} ({Type}) published", msg.Id, msg.Type);
@@ -148,8 +209,8 @@ public class OutboxRelayService : BackgroundService
                 {
                     _logger.LogError(
                         ex,
-                        "❌ Outbox message {Id} ({Type}) failed after {MaxRetries} attempts — giving up. Payload: {Payload}",
-                        msg.Id, msg.Type, MaxRetries, msg.Payload);
+                        "❌ Outbox message {Id} ({Type}) failed after {MaxRetries} attempts — giving up",
+                        msg.Id, msg.Type, MaxRetries);
                 }
                 else
                 {
@@ -168,9 +229,6 @@ public class OutboxRelayService : BackgroundService
     /// <summary>
     /// Publishes an outbox message to the appropriate RabbitMQ queue.
     /// </summary>
-    /// <param name="rabbitMq">RabbitMQ service for publishing.</param>
-    /// <param name="msg">Outbox message to publish.</param>
-    /// <param name="ct">Cancellation token.</param>
     private async Task PublishMessageAsync(
         RabbitMqService rabbitMq, OutboxMessage msg, CancellationToken ct)
     {
@@ -178,15 +236,23 @@ public class OutboxRelayService : BackgroundService
         var queueName = msg.Type switch
         {
             "OcrJob" => "ocr-queue",
+            "IndexingJob" => "indexing-queue",
             _        => throw new InvalidOperationException($"Unknown outbox message type: {msg.Type}")
         };
 
-        // Deserialize payload to concrete type before publishing
-        // This prevents double-serialization when PublishAsync<T> serializes the object
-        var ocrJob = JsonSerializer.Deserialize<OcrJobMessage>(msg.Payload,
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-            ?? throw new InvalidOperationException("Failed to deserialize OcrJob payload");
-
-        await rabbitMq.PublishAsync(queueName, ocrJob, ct);
+        if (msg.Type == "OcrJob")
+        {
+            var ocrJob = JsonSerializer.Deserialize<OcrJobMessage>(msg.Payload,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidOperationException("Failed to deserialize OcrJob payload");
+            await rabbitMq.PublishAsync(queueName, ocrJob, ct);
+        }
+        else if (msg.Type == "IndexingJob")
+        {
+            var indexingJob = JsonSerializer.Deserialize<IndexingJobMessage>(msg.Payload,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? throw new InvalidOperationException("Failed to deserialize IndexingJob payload");
+            await rabbitMq.PublishAsync(queueName, indexingJob, ct);
+        }
     }
 }

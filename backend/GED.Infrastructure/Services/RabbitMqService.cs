@@ -87,28 +87,32 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
     /// <param name="hostname">RabbitMQ hostname.</param>
     /// <param name="username">RabbitMQ username.</param>
     /// <param name="password">RabbitMQ password.</param>
+    /// <param name="port">RabbitMQ port (defaults to 5672).</param>
     public RabbitMqService(
         ILogger<RabbitMqService> logger,
         string hostname,
         string username,
-        string password)
+        string password,
+        int port = 5672)
     {
         _logger = logger;
 
         _factory = new ConnectionFactory
         {
             HostName                   = hostname,
+            Port                       = port,
+            AutomaticRecoveryEnabled   = true,
             UserName                   = username,
             Password                   = password,
-            AutomaticRecoveryEnabled   = true,  // Let library handle basic recovery
             NetworkRecoveryInterval    = TimeSpan.FromSeconds(5),
             RequestedHeartbeat         = TimeSpan.FromSeconds(60),
             RequestedConnectionTimeout = TimeSpan.FromSeconds(10),
+            Ssl                       = { Enabled = false },
         };
 
         _logger.LogInformation(
-            "RabbitMqService created (lazy) — will connect to {Host} on first use",
-            hostname);
+            "RabbitMqService created (lazy) — will connect to {Host}:{Port} on first use",
+            hostname, port);
     }
 
     /// <inheritdoc />
@@ -230,7 +234,7 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
             {
                 try
                 {
-                    _connection = await _factory.CreateConnectionAsync(ct);
+                    _connection = await _factory.CreateConnectionAsync(new[] { new AmqpTcpEndpoint(_factory.HostName, _factory.Port) }, ct);
                     _logger.LogInformation("✅ RabbitMQ connection established");
                     return _connection;
                 }

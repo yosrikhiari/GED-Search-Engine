@@ -208,6 +208,7 @@ public class GedDbContext : DbContext
             e.Property(m => m.Payload).HasColumnName("payload").IsRequired();
             e.Property(m => m.CreatedAt).HasColumnName("created_at");
             e.Property(m => m.ProcessedAt).HasColumnName("processed_at");
+            e.Property(m => m.AcknowledgedAt).HasColumnName("acknowledged_at");
             e.Property(m => m.Error).HasColumnName("error");
             e.Property(m => m.RetryCount).HasColumnName("retry_count");
             e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");

@@ -240,13 +240,13 @@ builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connection
 var rabbitMqHost = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Host"] ?? "localhost");
 var rabbitMqUser = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Username"] ?? "admin");
 var rabbitMqPass = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Password"] ?? "");
-
-Log.Information("RabbitMQ configured: Host={Host}, User={User}", rabbitMqHost, rabbitMqUser);
+var rabbitMqPort = builder.Configuration.GetValue<int>("RabbitMQ:Port", 5672);
+Log.Information("RabbitMQ configured: Host={Host}, Port={Port}, User={User}", rabbitMqHost, rabbitMqPort, rabbitMqUser);
 
 builder.Services.AddSingleton<RabbitMqService>(sp =>
     new RabbitMqService(
         sp.GetRequiredService<ILogger<RabbitMqService>>(),
-        rabbitMqHost, rabbitMqUser, rabbitMqPass
+        rabbitMqHost, rabbitMqUser, rabbitMqPass, rabbitMqPort
     ));
 builder.Services.AddSingleton<IMessageQueueService>(sp =>
     sp.GetRequiredService<RabbitMqService>());
@@ -396,14 +396,36 @@ builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddScoped<IDocumentMapper, DocumentMapper>();
 
 // ── Background workers ────────────────────────────────────────────────────────
-builder.Services.AddHostedService(sp => new OcrWorkerService(
-    sp,
-    sp.GetRequiredService<ILogger<OcrWorkerService>>(),
-    rabbitMqHost, rabbitMqUser, rabbitMqPass
-));
-builder.Services.AddHostedService<AutoReindexService>();
-builder.Services.AddHostedService<OutboxRelayService>();
-builder.Services.AddHostedService<DocumentExpirationService>();
+// Determine if this is a dedicated worker instance or API server
+var workerType = builder.Configuration["Worker:Type"] ?? "api";
+
+if (workerType == "ocr")
+{
+    // Dedicated OCR worker instance - only run OCR worker (not OutboxRelay)
+    // This allows horizontal scaling of OCR processing
+    builder.Services.AddHostedService(sp => new OcrWorkerService(
+        sp,
+        sp.GetRequiredService<ILogger<OcrWorkerService>>(),
+        builder.Configuration,
+        rabbitMqHost, rabbitMqUser, rabbitMqPass
+    ));
+    Log.Information("🏭 Starting in OCR Worker mode (prefetchCount=4, scalable)");
+}
+else
+{
+    // API server - run all background services including OutboxRelay
+    // OCR workers are handled by dedicated ocr-worker services
+    builder.Services.AddHostedService<OutboxRelayService>();
+    builder.Services.AddHostedService(sp => new IndexingWorkerService(
+        sp.GetRequiredService<IServiceProvider>(),
+        sp.GetRequiredService<ILogger<IndexingWorkerService>>(),
+        sp.GetRequiredService<IConfiguration>(),
+        rabbitMqHost, rabbitMqUser, rabbitMqPass
+    ));
+    builder.Services.AddHostedService<AutoReindexService>();
+    builder.Services.AddHostedService<DocumentExpirationService>();
+    Log.Information("🌐 Starting in API mode with OutboxRelay and IndexingWorker");
+}
 builder.Services.AddHttpClient("webhook", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
