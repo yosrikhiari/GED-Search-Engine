@@ -301,10 +301,12 @@ public class OpenSearchService : ISearchService
 
             var result = new SearchResult
             {
-                TotalResults     = Math.Max(totalBm25, documents.Count) + pendingCount,
+                // Use the actual indexed count from OpenSearch + pending count
+                // This ensures totalResults reflects the real state as documents process
+                TotalResults     = Math.Max((int)(bm25Response?.Total ?? 0), documents.Count),
                 Page             = request.Page,
                 PageSize         = request.PageSize,
-                TotalPages       = (int)Math.Ceiling((double)(Math.Max(totalBm25, documents.Count) + pendingCount) / request.PageSize),
+                TotalPages       = (int)Math.Ceiling((double)(Math.Max((int)(bm25Response?.Total ?? 0), documents.Count) + pendingCount) / request.PageSize),
                 Documents        = documents,
                 PendingDocuments = pendingDocs,
                 PendingCount     = pendingCount,

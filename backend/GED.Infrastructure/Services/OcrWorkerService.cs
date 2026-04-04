@@ -139,13 +139,20 @@ public class OcrWorkerService : BackgroundService
 
     /// <summary>
     /// Minimum confidence threshold for accepting extracted date.
+    /// Read from configuration (OCR:DateConfidenceThreshold), defaults to 0.7.
     /// </summary>
-    private const float DateConfidenceThreshold = 0.3f;
+    private readonly float _dateConfidenceThreshold;
 
     /// <summary>
     /// Minimum characters of native text to skip OCR processing.
     /// </summary>
-    private const int NativeTextMinChars = 300;
+    /// <remarks>
+    /// Skip OCR only if the PDF has sufficient native text.
+    /// 1500 chars ≈ roughly 1 page of dense text. This threshold was raised
+    /// from 300 because headers/footers alone can exceed that threshold
+    /// on a mostly-scanned document.
+    /// </remarks>
+    private const int NativeTextMinChars = 1500;
 
     /// <summary>
     /// Whether ResourceSaver mode is enabled.
@@ -175,6 +182,7 @@ public class OcrWorkerService : BackgroundService
         _rabbitHost      = rabbitHost;
         _rabbitUser      = rabbitUser;
         _rabbitPass      = rabbitPass;
+        _dateConfidenceThreshold = configuration.GetValue<float>("OCR:DateConfidenceThreshold", 0.7f);
     }
 
     /// <inheritdoc />
@@ -459,24 +467,32 @@ public class OcrWorkerService : BackgroundService
         var dateExtractor = scope.ServiceProvider.GetService<DocumentDateExtractor>();
         var enricher      = scope.ServiceProvider.GetService<OcrMetadataEnrichmentService>();
 
-        var document = await db.Documents
-            .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
+        var correlationId = message.CorrelationId ?? Guid.NewGuid().ToString("N")[..12];
         
-        if (document == null)
+        // Add correlation ID to logging scope for distributed tracing
+        using (_logger.BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId }))
         {
-            _logger.LogWarning("Document {DocumentId} not found — skipping", message.DocumentId);
-            return;
-        }
+            var document = await db.Documents
+                .FirstOrDefaultAsync(d => d.Id == message.DocumentId, ct);
+            
+            if (document == null)
+            {
+                _logger.LogWarning("Document {DocumentId} not found — skipping", message.DocumentId);
+                return;
+            }
 
-        _logger.LogInformation(
-            "🖼️  OCR pipeline: docId={DocId}, type={Type}, category={Cat}, hasNativeText={HasText} ({NativeChars} chars)",
-            document.Id, document.ContentType, document.Category,
-            !string.IsNullOrWhiteSpace(document.ExtractedText),
-            document.ExtractedText?.Length ?? 0);
+            var jobStartTime = DateTime.UtcNow;
 
-        var pipelineId = $"ocr-{message.DocumentId.ToString()[..8]}";
+            _logger.LogInformation(
+                "🖼️  OCR pipeline: docId={DocId}, type={Type}, category={Cat}, hasNativeText={HasText} ({NativeChars} chars)",
+                document.Id, document.ContentType, document.Category,
+                !string.IsNullOrWhiteSpace(document.ExtractedText),
+                document.ExtractedText?.Length ?? 0);
+
+            var pipelineId = $"ocr-{message.DocumentId.ToString()[..8]}";
 
         await SetStageAsync(db, document, "processing", ct);
+        await RecordHistoryAsync(db, document.Id, "started", "success", "OCR job received from queue", null, ct);
 
         // Check if document already has searchable native text (skip OCR)
         bool hasNativeText = !string.IsNullOrWhiteSpace(document.ExtractedText)
@@ -520,7 +536,7 @@ public class OcrWorkerService : BackgroundService
 
             await EnrichAndSaveAsync(
                 db, document, search, nativeEnrichResult, nativeDateInfo,
-                document.ExtractedText!, "native_text_llm", scope, ct);
+                document.ExtractedText!, "native_text_llm", scope, jobStartTime, ct);
 
             return;
         }
@@ -532,9 +548,10 @@ public class OcrWorkerService : BackgroundService
             return;
         }
 
-        _logger.LogInformation("🔍 Starting Tesseract OCR for {DocId}…", document.Id);
+        _logger.LogInformation("🔍 Starting OCR for {DocId}…", document.Id);
 
-        bool isImageUpload = TesseractDirectOcrService.SupportsContentType(document.ContentType);
+        bool isImageUpload = document.ContentType.StartsWith("image/");
+        var ocrStartTime = DateTime.UtcNow;
 
         OcrResult ocrResult;
         try
@@ -542,10 +559,22 @@ public class OcrWorkerService : BackgroundService
             using var fileStream = File.OpenRead(document.FilePath);
             if (isImageUpload)
             {
-                // Direct Tesseract for pure image files (no PDF intermediary needed)
-                var directOcr = scope.ServiceProvider.GetRequiredService<TesseractDirectOcrService>();
-                ocrResult = await directOcr.ProcessDocumentAsync(
-                    message.DocumentId, fileStream, message.Language ?? "eng", ct);
+                // Use ocrmypdf directly on images - it handles conversion internally
+                var imageOcr = scope.ServiceProvider.GetRequiredService<ImageOcrService>();
+                
+                var tempDir = Path.GetTempPath();
+                var jobId = Guid.NewGuid().ToString("N");
+                var outputPdfPath = Path.Combine(tempDir, $"ocr_out_{jobId}.pdf");
+                
+                var processedPdfPath = await imageOcr.ProcessImageAsync(
+                    document.FilePath, outputPdfPath, message.Language ?? "eng", ct);
+                
+                // Now extract text from the OCR-processed PDF
+                ocrResult = await ocrService.ProcessDocumentAsync(
+                    message.DocumentId, File.OpenRead(processedPdfPath), message.Language ?? "eng", ct);
+                
+                // Clean up temp PDF
+                try { File.Delete(processedPdfPath); } catch { }
             }
             else
             {
@@ -600,103 +629,163 @@ public class OcrWorkerService : BackgroundService
         document.Metadata["ocr_confidence_proxy"] = Math.Min(charsPerPage / 500f, 1.0f);
 
         await db.SaveChangesAsync(ct);
+        await RecordHistoryAsync(db, document.Id, "ocr", "success", 
+            $"Extracted {ocrResult.ExtractedText?.Length ?? 0} chars, quality: {ocrQuality}",
+            (long)(DateTime.UtcNow - ocrStartTime).TotalMilliseconds, ct);
         await ReIndexDocumentAsync(document, search, ct);
+
+        // ── Run Tika metadata extraction AFTER OCR ─────────────────────────────────
+        // For scanned PDFs, we extract metadata from the OCR-processed PDF
+        // For native PDFs that skipped OCR, this doesn't apply
+        var tikaMetadata = new Dictionary<string, string>();
+        var tikaStartTime = DateTime.UtcNow;
+        try
+        {
+            var tikaService = scope.ServiceProvider.GetService<TikaTextExtractionService>();
+            if (tikaService != null && !string.IsNullOrWhiteSpace(document.FilePath))
+            {
+                _logger.LogInformation("📄 Extracting metadata with Tika for {DocId}...", document.Id);
+                
+                // If this was a scanned document (went through OCR), use the processed file
+                // Otherwise use the original file (for native PDFs that skipped OCR)
+                string filePathToUse = document.FilePath;
+                
+                // Check if we have a temporary OCR output file - in current implementation,
+                // the OCR service handles the output internally, so we use the original
+                // The key is that we call Tika AFTER OCR completes
+                
+                tikaMetadata = await tikaService.ExtractMetadataAsync(filePathToUse, ct);
+                
+                if (tikaMetadata.Any())
+                {
+                    var (tikaCategory, tikaDescription) = TikaTextExtractionService.MapMetadataToFields(
+                        tikaMetadata, document.FileName);
+                    
+                    // Apply category from Tika if not already set
+                    if (!string.IsNullOrWhiteSpace(tikaCategory) && string.IsNullOrWhiteSpace(document.Category))
+                    {
+                        document.Category = tikaCategory;
+                        document.Metadata["category_source"] = "tika";
+                        _logger.LogInformation("✅ Category set from Tika: {Category}", tikaCategory);
+                    }
+                    
+                    // Apply description from Tika if current description is generic
+                    if (!string.IsNullOrWhiteSpace(tikaDescription) && 
+                        IsGenericDescription(document.Description, document.FileName))
+                    {
+                        document.Description = tikaDescription;
+                        document.Metadata["description_source"] = "tika";
+                        _logger.LogInformation("✅ Description set from Tika: {DescLen} chars", 
+                            tikaDescription.Length);
+                    }
+                    
+                    // Store Tika metadata in document metadata
+                    foreach (var kvp in tikaMetadata.Take(20)) // Limit to avoid bloat
+                    {
+                        document.Metadata[$"tika_{kvp.Key}"] = kvp.Value;
+                    }
+                    
+                    await db.SaveChangesAsync(ct);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tika metadata extraction failed for {DocId}", document.Id);
+            await RecordHistoryAsync(db, document.Id, "tika", "failed", $"Metadata extraction failed: {ex.Message}", null, ct);
+        }
 
         _logger.LogInformation(
             "✅ Stage 'text_extracted' committed for {DocId} — continuing with LLM cleaning + enrichment…",
             document.Id);
 
         await SetStageAsync(db, document, "llm_cleaning", ct);
+        await RecordHistoryAsync(db, document.Id, "tika", "success", 
+            $"Category: {document.Category ?? "none"}, extracted {tikaMetadata.Count} metadata fields",
+            (long)(DateTime.UtcNow - tikaStartTime).TotalMilliseconds, ct);
+
+        var llmStartTime = DateTime.UtcNow;
 
         string cleanedText = ocrResult.ExtractedText!;
         DocumentDateInfo? dateInfo = null;
         OcrMetadataEnrichmentService.EnrichmentResult? enrichResult = null;
 
-        // Run LLM calls - parallel when ResourceSaver is disabled, sequential when enabled
-        var cleanTask   = Task.FromResult<string?>(null);
-        var dateTask    = Task.FromResult<DocumentDateInfo?>(null);
-        var enrichTask  = Task.FromResult<OcrMetadataEnrichmentService.EnrichmentResult?>(null);
-
-        if (_resourceSaverEnabled)
+        // Step 1: Clean OCR text first (must be sequential)
+        try
         {
-            // Sequential LLM calls to prevent Ollama resource exhaustion
-            try
-            {
-                if (textCleaner != null)
-                {
-                    _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
-                        ocrResult.ExtractedText!.Length);
-                    cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
-                }
-
-                if (dateExtractor != null && document.DocumentDate == null)
-                {
-                    _logger.LogInformation("📅 Extracting document date with Ollama…");
-                    dateInfo = await dateExtractor.ExtractDocumentDateAsync(
-                        ocrResult.ExtractedText!, document.FileName, document.Category ?? "Other", ct);
-                }
-
-                if (enricher != null)
-                {
-                    _logger.LogInformation("🏷️ Enriching document metadata with Ollama…");
-                    enrichResult = await enricher.EnrichAsync(
-                        ocrResult.ExtractedText!, document.FileName, document.Category ?? "Other", ct);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "One or more LLM calls failed for {DocId}", document.Id);
-            }
-        }
-        else
-        {
-            // Standard parallel LLM calls
             if (textCleaner != null)
             {
                 _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
                     ocrResult.ExtractedText!.Length);
-                cleanTask = textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct)
-                    .ContinueWith(t => t.IsFaulted ? null : t.Result, ct);
+                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
             }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "LLM text cleaning failed for {DocId} — using raw OCR text", document.Id);
+        }
 
+        // Step 2: Date extraction and metadata enrichment can run in parallel on cleaned text
+        Task<DocumentDateInfo?>? dateTask = null;
+        Task<OcrMetadataEnrichmentService.EnrichmentResult?>? enrichTask = null;
+
+        try
+        {
+            // Date extraction (only if not already extracted)
             if (dateExtractor != null && document.DocumentDate == null)
             {
+                _logger.LogInformation("📅 Extracting document date with Ollama…");
                 dateTask = dateExtractor.ExtractDocumentDateAsync(
-                    ocrResult.ExtractedText!, document.FileName, document.Category ?? "Other", ct);
+                    cleanedText, document.FileName, document.Category ?? "Other", ct);
             }
 
+            // Metadata enrichment
             if (enricher != null)
             {
+                _logger.LogInformation("🏷️ Enriching document metadata with Ollama…");
                 enrichTask = enricher.EnrichAsync(
-                    ocrResult.ExtractedText!, document.FileName, document.Category ?? "Other", ct);
+                    cleanedText, document.FileName, document.Category ?? "Other", ct);
             }
 
-            try
+            // When ResourceSaver is enabled, run sequentially to prevent Ollama resource exhaustion
+            if (_resourceSaverEnabled)
             {
-                await Task.WhenAll(cleanTask, dateTask, enrichTask);
+                if (dateTask != null)
+                    dateInfo = await dateTask;
+                if (enrichTask != null)
+                    enrichResult = await enrichTask;
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogWarning(ex, "One or more LLM calls failed for {DocId}", document.Id);
+                // Run in parallel for better performance
+                var allTasks = new List<Task>();
+                if (dateTask != null) allTasks.Add(dateTask);
+                if (enrichTask != null) allTasks.Add(enrichTask);
+
+                if (allTasks.Count > 0)
+                {
+                    await Task.WhenAll(allTasks);
+                }
+
+                dateInfo = dateTask?.IsCompletedSuccessfully == true ? dateTask.Result : null;
+                enrichResult = enrichTask?.IsCompletedSuccessfully == true ? enrichTask.Result : null;
             }
-
-            // Extract results, handling any failures
-            if (cleanTask.IsCompletedSuccessfully && cleanTask.Result != null)
-                cleanedText = cleanTask.Result;
-            else if (textCleaner != null)
-                _logger.LogWarning("LLM cleaning failed for {DocId} — keeping raw Tesseract text", document.Id);
-
-            if (dateTask.IsCompletedSuccessfully)
-                dateInfo = dateTask.Result;
-
-            if (enrichTask.IsCompletedSuccessfully)
-                enrichResult = enrichTask.Result;
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "One or more LLM calls failed for {DocId}", document.Id);
+        }
+
+        // Record LLM processing completion
+        await RecordHistoryAsync(db, document.Id, "llm_enrichment", "success", 
+            $"Text cleaned: {cleanedText.Length} chars, tags: {enrichResult?.Tags?.Count ?? 0}, date: {dateInfo?.DocumentDate?.ToString("yyyy-MM-dd") ?? "none"}",
+            (long)(DateTime.UtcNow - llmStartTime).TotalMilliseconds, ct);
 
         // Final enrichment (date + tags + description)
         await EnrichAndSaveAsync(
             db, document, search, enrichResult, dateInfo,
-            cleanedText!, "ocr_llm", scope, ct);
+            cleanedText!, "ocr_llm", scope, jobStartTime, ct);
+        }
     }
 
     /// <summary>
@@ -711,14 +800,17 @@ public class OcrWorkerService : BackgroundService
         string textToAnalyze,
         string enrichmentSource,
         IServiceScope scope,
+        DateTime jobStartTime,
         CancellationToken ct)
     {
         document.Metadata ??= new Dictionary<string, object>();
+        var chunkStartTime = DateTime.UtcNow;
 
         // Apply document date
-        if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= DateConfidenceThreshold)
+        if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= _dateConfidenceThreshold)
         {
             document.DocumentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
+            document.DateConfidenceScore = dateInfo.Confidence;
             document.Metadata["extracted_date"]  = document.DocumentDate.Value.ToString("yyyy-MM-dd");
             document.Metadata["date_confidence"] = dateInfo.Confidence;
             document.Metadata["date_type"]       = dateInfo.DateType;
@@ -755,14 +847,11 @@ public class OcrWorkerService : BackgroundService
                 .Take(15)
                 .ToList();
 
-            if (!string.IsNullOrWhiteSpace(enrichResult.Description))
-                document.Description = enrichResult.Description;
-
             document.Metadata["enrichment_source"] = enrichmentSource;
 
             _logger.LogInformation(
-                "✅ AI enrichment applied: {TagCount} tags, desc={DescLen} chars",
-                document.Tags.Count, document.Description?.Length ?? 0);
+                "✅ AI enrichment applied: {TagCount} tags for document {DocId}",
+                document.Tags.Count, document.Id);
         }
         else
         {
@@ -797,6 +886,7 @@ public class OcrWorkerService : BackgroundService
         // Update status to Indexed now that OCR and enrichment are complete
         document.Status = DocumentStatus.Indexed;
 
+        var indexingStartTime = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
@@ -807,8 +897,12 @@ public class OcrWorkerService : BackgroundService
 
         // Re-index with enriched data
         await ReIndexDocumentAsync(document, search, ct);
+        await RecordHistoryAsync(db, document.Id, "indexing", "success", 
+            "Document indexed in OpenSearch", (long)(DateTime.UtcNow - indexingStartTime).TotalMilliseconds, ct);
 
         // Chunk-level indexing for RAG
+        int chunkCount = 0;
+        var ragStartTime = DateTime.UtcNow;
         try
         {
             var chunker    = scope.ServiceProvider.GetRequiredService<DocumentChunkingService>();
@@ -836,6 +930,7 @@ public class OcrWorkerService : BackgroundService
             };
 
             var chunks = chunker.ChunkText(document.Id, textToAnalyze);
+            chunkCount = chunks.Count;
             if (chunks.Any())
             {
                 await openSearch.IndexChunksAsync(domainDoc, chunks, ct);
@@ -848,7 +943,18 @@ public class OcrWorkerService : BackgroundService
         {
             _logger.LogWarning(ex,
                 "Chunk indexing failed for {DocId} — RAG will use full-doc fallback", document.Id);
+            await RecordHistoryAsync(db, document.Id, "rag_chunks", "failed", 
+                $"Chunk indexing failed: {ex.Message}", null, ct);
         }
+
+        // Record RAG completion
+        await RecordHistoryAsync(db, document.Id, "rag_chunks", "success", 
+            $"Indexed {chunkCount} chunks for RAG", (long)(DateTime.UtcNow - ragStartTime).TotalMilliseconds, ct);
+
+        // Final completion record
+        await RecordHistoryAsync(db, document.Id, "completed", "success", 
+            $"Document fully processed: {document.Tags?.Count ?? 0} tags, date: {document.DocumentDate?.ToString("yyyy-MM-dd") ?? "none"}",
+            (long)(DateTime.UtcNow - jobStartTime).TotalMilliseconds, ct);
     }
 
     /// <summary>
@@ -928,6 +1034,35 @@ public class OcrWorkerService : BackgroundService
     }
 
     /// <summary>
+    /// Records a processing history entry for timeline tracking.
+    /// </summary>
+    private async Task RecordHistoryAsync(
+        GedDbContext db, Guid documentId, string stage, string status, 
+        string? message = null, long? durationMs = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var entry = new Infrastructure.Data.ProcessingHistory
+            {
+                Id          = Guid.NewGuid(),
+                DocumentId  = documentId,
+                Timestamp   = DateTime.UtcNow,
+                Stage       = stage,
+                Status      = status,
+                Message     = message,
+                DurationMs  = durationMs
+            };
+            db.ProcessingHistory.Add(entry);
+            await db.SaveChangesAsync(ct);
+            _logger.LogDebug("📜 History: {Stage} → {Status} for {DocId}", stage, status, documentId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not record history for {Stage} on {DocId}", stage, documentId);
+        }
+    }
+
+    /// <summary>
     /// Re-indexes a document in the search engine with current data.
     /// </summary>
     private async Task ReIndexDocumentAsync(
@@ -990,6 +1125,9 @@ public class OcrWorkerService : BackgroundService
                 doc.Metadata["ocr_stage"]     = "failed";
                 doc.Metadata["ocr_failed_at"] = DateTime.UtcNow.ToString("o");
                 await db.SaveChangesAsync(ct);
+                
+                await RecordHistoryAsync(db, documentId, "ocr", "failed", error, null, ct);
+                await RecordHistoryAsync(db, documentId, "completed", "failed", $"Processing failed: {error}", null, ct);
             }
         }
         catch (Exception ex)
@@ -1006,16 +1144,21 @@ public class OcrJobMessage
 {
     /// <summary>
     /// Unique identifier for this OCR job.
-    /// </summary>
+/// </summary>
     public Guid JobId { get; set; }
 
     /// <summary>
     /// Document ID to process.
-    /// </summary>
+/// </summary>
     public Guid DocumentId { get; set; }
 
     /// <summary>
     /// Language code(s) for OCR (e.g., "eng", "eng+fra+ara").
     /// </summary>
     public string Language { get; set; } = "eng";
+
+    /// <summary>
+    /// Correlation ID for distributed tracing across async workers.
+    /// </summary>
+    public string? CorrelationId { get; set; }
 }

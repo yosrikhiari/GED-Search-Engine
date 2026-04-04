@@ -17,7 +17,7 @@ namespace GED.API.Controllers;
 /// No eventual-consistency lag: access takes effect on the very next search.
 /// </summary>
 [ApiController]
-[Route("api/documents")]
+[Route("api/document-permissions")]
 [Authorize]
 public class DocumentAclController : ControllerBase
 {

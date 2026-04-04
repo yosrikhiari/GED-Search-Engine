@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
 using System.Security.Claims;
 using static GED.Core.Models.OcrConstants;
+using ProcessingHistoryEntity = GED.Infrastructure.Data.ProcessingHistory;
 
 namespace GED.API.Controllers;
 
@@ -70,6 +71,7 @@ public async Task<ActionResult<Document>> UploadDocument(
     IFormFile file,
     [FromForm] string? title    = null,
     [FromForm] string? category = null,
+    [FromForm] int? priority    = null,
     [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey = null)
 {
     if (!string.IsNullOrWhiteSpace(idempotencyKey))
@@ -188,7 +190,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
             var document = await _documentService.UploadDocumentAsync(
                 stream, sanitizedFileName, file.ContentType,
-                title ?? sanitizedFileName, metadata);
+                title ?? sanitizedFileName, metadata, priority);
 
             _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
 
@@ -285,12 +287,20 @@ public async Task<ActionResult<Document>> UploadDocument(
             var files = Request.Form.Files;
             var category = Request.Form["category"].FirstOrDefault();
             var titlesJson = Request.Form["titles"].FirstOrDefault();
+            var prioritiesJson = Request.Form["priorities"].FirstOrDefault();
 
             Dictionary<string, string>? titles = null;
             if (!string.IsNullOrEmpty(titlesJson))
             {
                 try { titles = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(titlesJson); }
                 catch { /* ignore malformed titles */ }
+            }
+
+            Dictionary<string, int>? priorities = null;
+            if (!string.IsNullOrEmpty(prioritiesJson))
+            {
+                try { priorities = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(prioritiesJson); }
+                catch { /* ignore malformed priorities */ }
             }
 
             if (files.Count == 0)
@@ -367,6 +377,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
                         var sanitizedFileName = SanitizeFileName(file.FileName);
                         var title = titles?.GetValueOrDefault(file.FileName) ?? sanitizedFileName;
+                        var filePriority = priorities?.GetValueOrDefault(file.FileName);
 
                         using var stream = file.OpenReadStream();
                         var metadata = new Dictionary<string, object> { ["category"] = category ?? "Other" };
@@ -374,7 +385,7 @@ public async Task<ActionResult<Document>> UploadDocument(
                         await SendProgress("file_progress", new { fileIndex, stage = "processing", progress = 60 });
 
                         var document = await scopedDocumentService.UploadDocumentAsync(
-                            stream, sanitizedFileName, file.ContentType, title, metadata, ct);
+                            stream, sanitizedFileName, file.ContentType, title, metadata, filePriority, ct);
 
                         var processingTime = DateTime.UtcNow - fileStartTime;
                         await SendProgress("file_complete", new
@@ -510,6 +521,30 @@ public async Task<ActionResult<Document>> UploadDocument(
         }
     }
 
+    /// <summary>
+    /// Returns the processing history for a document.
+    /// </summary>
+    [HttpGet("{id}/history")]
+    public async Task<ActionResult<List<ProcessingHistoryEntity>>> GetProcessingHistory(Guid id)
+    {
+        try
+        {
+            var history = await _db.ProcessingHistory
+                .Where(h => h.DocumentId == id)
+                .OrderBy(h => h.Timestamp)
+                .ToListAsync();
+            return Ok(history);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting processing history for document {DocumentId}", id);
+            return StatusCode(500, new { 
+                error = "An error occurred while retrieving the processing history.",
+                reference = HttpContext.Items["CorrelationId"]
+            });
+        }
+    }
+
     [HttpGet("{id}/download")]
     public async Task<IActionResult> DownloadDocument(Guid id)
     {
@@ -631,6 +666,99 @@ public async Task<ActionResult<Document>> UploadDocument(
             failed = documentIds.Count - deletedCount,
             results
         });
+    }
+
+    /// <summary>
+    /// Update document processing priority in the queue
+    /// </summary>
+    [HttpPut("{id}/priority")]
+    public async Task<IActionResult> UpdateDocumentPriority(Guid id, [FromBody] UpdatePriorityRequest request)
+    {
+        try
+        {
+            if (request.Priority < 0)
+                return BadRequest(new { error = "Priority must be a non-negative integer" });
+
+            // Find the outbox message for this document's OCR job
+            var outboxMsg = await _db.OutboxMessages
+                .Where(m => m.Payload.Contains(id.ToString()) && m.ProcessedAt == null)
+                .OrderBy(m => m.CreatedAt)
+                .FirstOrDefaultAsync();
+
+            if (outboxMsg == null)
+            {
+                return NotFound(new { error = "Document not found or already processing" });
+            }
+
+            outboxMsg.Priority = request.Priority;
+            await _db.SaveChangesAsync();
+
+            _logger.LogInformation("Updated priority for document {DocumentId} to {Priority}", id, request.Priority);
+
+            return Ok(new { id, priority = request.Priority });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating priority for document {DocumentId}", id);
+            return StatusCode(500, new { error = "Failed to update priority", message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Bulk update document priorities
+    /// </summary>
+    [HttpPost("bulk-update-priority")]
+    public async Task<IActionResult> BulkUpdatePriority([FromBody] List<PriorityUpdate> updates)
+    {
+        if (updates == null || !updates.Any())
+            return BadRequest(new { error = "No priority updates provided" });
+
+        try
+        {
+            var documentIds = updates.Select(u => u.DocumentId).ToList();
+            
+            // Find all pending outbox messages for these documents
+            var outboxMessages = await _db.OutboxMessages
+                .Where(m => m.ProcessedAt == null)
+                .Where(m => m.Payload.Contains("DocumentId"))
+                .ToListAsync();
+
+            var updated = 0;
+            var results = new List<object>();
+
+            foreach (var update in updates)
+            {
+                try
+                {
+                    var msg = outboxMessages.FirstOrDefault(m => 
+                        m.Payload.Contains(update.DocumentId.ToString()));
+
+                    if (msg != null)
+                    {
+                        msg.Priority = update.Priority;
+                        updated++;
+                        results.Add(new { id = update.DocumentId, success = true, priority = update.Priority });
+                    }
+                    else
+                    {
+                        results.Add(new { id = update.DocumentId, success = false, error = "Not found or already processing" });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new { id = update.DocumentId, success = false, error = ex.Message });
+                }
+            }
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new { total = updates.Count, updated, results });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error bulk updating priorities");
+            return StatusCode(500, new { error = "Failed to update priorities", message = ex.Message });
+        }
     }
 
     /// <summary>
@@ -1003,6 +1131,7 @@ public async Task<ActionResult<Document>> UploadDocument(
             
             foreach (var doc in documents)
             {
+                var correlationId = Guid.NewGuid().ToString("N")[..12];
                 var outboxMessage = new OutboxMessage
                 {
                     Id = Guid.NewGuid(),
@@ -1011,7 +1140,8 @@ public async Task<ActionResult<Document>> UploadDocument(
                     {
                         JobId = Guid.NewGuid(),
                         DocumentId = doc.Id,
-                        Language = "eng+fra+ara"
+                        Language = "eng+fra+ara",
+                        CorrelationId = correlationId
                     }),
                     CreatedAt = DateTime.UtcNow,
                     RetryCount = 0
@@ -1077,6 +1207,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
     private async Task QueueIndexingJobAsync(Guid documentId, string? extractedText)
     {
+        var correlationId = Guid.NewGuid().ToString("N")[..12];
         var outboxMessage = new OutboxMessage
         {
             Id        = Guid.NewGuid(),
@@ -1084,7 +1215,8 @@ public async Task<ActionResult<Document>> UploadDocument(
             Payload   = System.Text.Json.JsonSerializer.Serialize(new
             {
                 DocumentId   = documentId,
-                HasExtractedText = !string.IsNullOrWhiteSpace(extractedText)
+                HasExtractedText = !string.IsNullOrWhiteSpace(extractedText),
+                CorrelationId = correlationId
             }),
             CreatedAt  = DateTime.UtcNow,
             RetryCount = 0
@@ -1092,4 +1224,15 @@ public async Task<ActionResult<Document>> UploadDocument(
         _db.OutboxMessages.Add(outboxMessage);
         await _db.SaveChangesAsync();
     }
+}
+
+public class UpdatePriorityRequest
+{
+    public int Priority { get; set; }
+}
+
+public class PriorityUpdate
+{
+    public Guid DocumentId { get; set; }
+    public int Priority { get; set; }
 }

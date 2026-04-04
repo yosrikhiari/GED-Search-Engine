@@ -10,6 +10,7 @@
     <!-- Configuration -->
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="8.0.11" />
 
     <!--  EF Core -->
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.25" />

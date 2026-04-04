@@ -19,6 +19,7 @@ public class GedDbContext : DbContext
     public DbSet<UserGroupAssignment>    UserGroupAssignments  { get; set; }
     public DbSet<DocumentVersion>        DocumentVersions      { get; set; }
     public DbSet<WebhookDelivery>       WebhookDeliveries     { get; set; }
+    public DbSet<ProcessingHistory>      ProcessingHistory     { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -174,6 +175,10 @@ public class GedDbContext : DbContext
             e.HasIndex(d => d.Category).HasDatabaseName("ix_documents_category");
             e.HasIndex(d => d.Status).HasDatabaseName("ix_documents_status");
             e.HasIndex(d => d.ContentType).HasDatabaseName("ix_documents_content_type");
+            e.HasIndex(d => d.FileHash)
+                .IsUnique()
+                .HasDatabaseName("ix_documents_file_hash")
+                .HasFilter("[file_hash] IS NOT NULL");
 
             e.HasMany(d => d.DocumentMetadata)
              .WithOne(m => m.Document)
@@ -211,7 +216,9 @@ public class GedDbContext : DbContext
             e.Property(m => m.AcknowledgedAt).HasColumnName("acknowledged_at");
             e.Property(m => m.Error).HasColumnName("error");
             e.Property(m => m.RetryCount).HasColumnName("retry_count");
+            e.Property(m => m.Priority).HasColumnName("priority");
             e.HasIndex(m => m.ProcessedAt).HasDatabaseName("ix_outbox_unprocessed");
+            e.HasIndex(m => m.Priority).HasDatabaseName("ix_outbox_priority");
         });
 
         // ── DocumentVersions table ──────────────────────────────────────────────
@@ -244,20 +251,22 @@ public class GedDbContext : DbContext
         modelBuilder.Entity<WebhookDelivery>(e =>
         {
             e.ToTable("webhook_deliveries");
-            e.HasKey(d => d.Id);
-            e.Property(d => d.Id).HasColumnName("id").HasColumnType("uniqueidentifier");
-            e.Property(d => d.WebhookConfigId).HasColumnName("webhook_config_id").HasColumnType("uniqueidentifier");
-            e.Property(d => d.Event).HasColumnName("event").HasMaxLength(100).IsRequired();
-            e.Property(d => d.Payload).HasColumnName("payload").HasColumnType("nvarchar(max)");
-            e.Property(d => d.ResponseStatusCode).HasColumnName("response_status_code");
-            e.Property(d => d.ResponseBody).HasColumnName("response_body").HasColumnType("nvarchar(max)");
-            e.Property(d => d.AttemptNumber).HasColumnName("attempt_number");
-            e.Property(d => d.Succeeded).HasColumnName("succeeded");
-            e.Property(d => d.ErrorMessage).HasColumnName("error_message").HasMaxLength(2000);
-            e.Property(d => d.DurationMs).HasColumnName("duration_ms");
-            e.Property(d => d.CreatedAt).HasColumnName("created_at");
-            e.HasIndex(d => d.CreatedAt).HasDatabaseName("ix_webhook_deliveries_created_at");
-            e.HasIndex(d => new { d.Event, d.Succeeded }).HasDatabaseName("ix_webhook_deliveries_event_status");
+            e.HasKey(w => w.Id);
+        });
+
+        // ── ProcessingHistory table ───────────────────────────────────────────
+        modelBuilder.Entity<ProcessingHistory>(e =>
+        {
+            e.ToTable("processing_history");
+            e.HasKey(p => p.Id);
+            e.Property(p => p.Id).HasColumnName("id").HasColumnType("uniqueidentifier");
+            e.Property(p => p.DocumentId).HasColumnName("document_id").HasColumnType("uniqueidentifier");
+            e.Property(p => p.Timestamp).HasColumnName("timestamp").HasColumnType("datetime2");
+            e.Property(p => p.Stage).HasColumnName("stage").HasMaxLength(100);
+            e.Property(p => p.Status).HasColumnName("status").HasMaxLength(50);
+            e.Property(p => p.Message).HasColumnName("message").HasColumnType("nvarchar(max)");
+            e.Property(p => p.DurationMs).HasColumnName("duration_ms").HasColumnType("bigint");
+            e.HasIndex(p => new { p.DocumentId, p.Timestamp }).HasDatabaseName("ix_processing_history_doc");
         });
     }
 }
@@ -276,6 +285,7 @@ public class DocumentEntity
     public string? FileHash { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? DocumentDate { get; set; }
+    public float? DateConfidenceScore { get; set; }
     public DateTime? ModifiedAt { get; set; }
     public string? CreatedBy { get; set; }
     public string? ModifiedBy { get; set; }
@@ -317,4 +327,15 @@ public class WebhookDelivery
     public string? ErrorMessage { get; set; }
     public long DurationMs { get; set; }
     public DateTime CreatedAt { get; set; }
+}
+
+public class ProcessingHistory
+{
+    public Guid Id { get; set; }
+    public Guid DocumentId { get; set; }
+    public DateTime Timestamp { get; set; }
+    public string Stage { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty;
+    public string? Message { get; set; }
+    public long? DurationMs { get; set; }
 }

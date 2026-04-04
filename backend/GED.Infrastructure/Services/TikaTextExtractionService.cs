@@ -7,7 +7,7 @@ namespace GED.Infrastructure.Services;
 
 /// <summary>
 /// Text extraction using Apache Tika Server (REST API), with built-in fallback.
-///
+/// 
 /// <para>
 /// This service is the primary <see cref="ITextExtractionService"/> implementation
 /// registered in DI. It attempts extraction via Tika Server first, then falls back
@@ -25,6 +25,19 @@ namespace GED.Infrastructure.Services;
 /// This service handles synchronous text extraction during upload.
 /// For scanned/image documents, OCR runs asynchronously in <see cref="OcrWorkerService"/>.
 /// Documents with 100+ chars of native text skip OCR entirely.
+/// </para>
+/// 
+/// <para>
+/// Tika Metadata Extraction:
+/// This service can also extract metadata from documents by calling the /meta endpoint.
+/// Available metadata fields vary by file type but typically include:
+/// - dc:title, dc:description - Document title and description
+/// - Content-Type - MIME type
+/// - dcterms:created, dcterms:modified - Creation and modification dates
+/// - dc:creator, meta:author - Author information
+/// - meta:keywords - Keywords/tags
+/// - For PDFs: pdf:creator, pdf:producer, xmp:CreatorTool
+/// - For Office: cp:category, cp:subject
 /// </para>
 /// </summary>
 public class TikaTextExtractionService : ITextExtractionService
@@ -69,7 +82,6 @@ public class TikaTextExtractionService : ITextExtractionService
         var enabledStr = configuration["Tika:Enabled"];
         _tikaEnabled = bool.TryParse(enabledStr, out var enabled) ? enabled : true;
 
-        // Set a sensible default timeout on the shared HttpClient
         if (_httpClient.Timeout == Timeout.InfiniteTimeSpan ||
             _httpClient.Timeout > TikaTimeout)
         {
@@ -113,15 +125,128 @@ public class TikaTextExtractionService : ITextExtractionService
     }
 
     /// <summary>
-    /// Simulates a Tika failure for testing circuit breaker behavior.
-    /// Throws HttpRequestException to simulate an unavailable Tika server.
+    /// Extracts metadata from a document using Tika's /meta endpoint.
     /// </summary>
+    /// <param name="filePath">Path to the file.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Dictionary of metadata key-value pairs.</returns>
+    public async Task<Dictionary<string, string>> ExtractMetadataAsync(
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (!_tikaEnabled)
+        {
+            return metadata;
+        }
+
+        try
+        {
+            var metaEndpoint = $"{_tikaUrl.TrimEnd('/')}/meta";
+
+            _logger.LogDebug("Extracting metadata from {FilePath} via Tika", filePath);
+
+            using var fileStream = File.OpenRead(filePath);
+            using var content = new StreamContent(fileStream);
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, metaEndpoint)
+            {
+                Content = content
+            };
+
+            var response = await _httpClient.SendAsync(request, cancellationToken);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var metaText = await response.Content.ReadAsStringAsync(cancellationToken);
+                metadata = ParseTikaMetadata(metaText);
+                
+                _logger.LogInformation("✅ Tika extracted {Count} metadata fields from {FilePath}",
+                    metadata.Count, Path.GetFileName(filePath));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tika metadata extraction failed for {FilePath}", filePath);
+        }
+
+        return metadata;
+    }
+
+    /// <summary>
+    /// Parses Tika's metadata output format (key: value per line).
+    /// </summary>
+    private static Dictionary<string, string> ParseTikaMetadata(string metaText)
+    {
+        var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(metaText))
+            return metadata;
+
+        var lines = metaText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            var colonIndex = line.IndexOf(':');
+            if (colonIndex > 0)
+            {
+                var key = line[..colonIndex].Trim();
+                var value = line[(colonIndex + 1)..].Trim();
+                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(value))
+                {
+                    metadata[key] = value;
+                }
+            }
+        }
+
+        return metadata;
+    }
+
+    /// <summary>
+    /// Maps Tika metadata to category and description.
+    /// </summary>
+    public static (string? category, string? description) MapMetadataToFields(
+        Dictionary<string, string> metadata, string fileName)
+    {
+        string? category = null;
+        string? description = null;
+
+        // Map Content-Type to category
+        if (metadata.TryGetValue("Content-Type", out var contentType))
+        {
+            category = contentType.ToLower() switch
+            {
+                var ct when ct.Contains("pdf") => "Document",
+                var ct when ct.Contains("word") || ct.Contains("document") => "Document",
+                var ct when ct.Contains("spreadsheet") || ct.Contains("excel") => "Spreadsheet",
+                var ct when ct.Contains("presentation") || ct.Contains("powerpoint") => "Presentation",
+                var ct when ct.Contains("image") => "Image",
+                var ct when ct.Contains("text") => "Letter",
+                _ => "Other"
+            };
+        }
+
+        // Map dc:description or dc:title to description
+        if (metadata.TryGetValue("dc:description", out var desc) && !string.IsNullOrWhiteSpace(desc))
+        {
+            description = desc.Length > 300 ? desc[..297] + "..." : desc;
+        }
+        else if (metadata.TryGetValue("dc:title", out var title) && !string.IsNullOrWhiteSpace(title) && title != Path.GetFileNameWithoutExtension(fileName))
+        {
+            description = title.Length > 300 ? title[..297] + "..." : title;
+        }
+        else if (metadata.TryGetValue("meta:subject", out var subject) && !string.IsNullOrWhiteSpace(subject))
+        {
+            description = subject.Length > 300 ? subject[..297] + "..." : subject;
+        }
+
+        return (category, description);
+    }
+
     public Task SimulateFailureAsync()
     {
         throw new HttpRequestException("Simulated Tika failure for testing");
     }
-
-    // ── Private ───────────────────────────────────────────────────────────────
 
     private async Task<string> ExtractWithTikaAsync(
         Stream fileStream,
@@ -133,13 +258,7 @@ public class TikaTextExtractionService : ITextExtractionService
         ms.Position = 0;
 
         using var content = new StreamContent(ms);
-        content.Headers.ContentType =
-            new MediaTypeHeaderValue(contentType);
-
-        // ── FIX: Tell Tika we want plain text, not XHTML ──────────────────
-        // Without this header Tika defaults to returning an XHTML document
-        // wrapping the extracted text, so callers receive raw XML instead of
-        // the actual document content.
+        content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         content.Headers.Add("Accept", "text/plain");
 
         var tikaEndpoint = $"{_tikaUrl.TrimEnd('/')}/tika";
@@ -152,7 +271,6 @@ public class TikaTextExtractionService : ITextExtractionService
         {
             Content = content
         };
-        // Explicitly request plain text in the Accept header on the request too
         request.Headers.Accept.Clear();
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/plain"));
 
@@ -167,48 +285,23 @@ public class TikaTextExtractionService : ITextExtractionService
 
         var text = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        // ── Defensive cleanup: strip any residual XML/HTML ────────────────
-        // If Tika ignores the Accept header (older versions), do a best-effort
-        // strip so downstream services don't receive markup.
-        if (text.TrimStart().StartsWith("<?xml") ||
-            text.TrimStart().StartsWith("<html"))
+        if (text.TrimStart().StartsWith("<?xml") || text.TrimStart().StartsWith("<html"))
         {
-            _logger.LogWarning(
-                "Tika returned XML/HTML despite Accept: text/plain — stripping markup");
+            _logger.LogWarning("Tika returned XML/HTML despite Accept: text/plain — stripping markup");
             text = StripHtmlTags(text);
         }
 
-        _logger.LogInformation(
-            "✅ Tika extracted {Chars} chars from {ContentType}",
-            text.Length, contentType);
+        _logger.LogInformation("✅ Tika extracted {Chars} chars from {ContentType}", text.Length, contentType);
 
         return text;
     }
 
-    /// <summary>
-    /// Very simple HTML/XML tag stripper used only as a fallback when Tika
-    /// ignores the Accept: text/plain header.
-    /// </summary>
     private static string StripHtmlTags(string html)
     {
-        // Remove tags
-        var stripped = System.Text.RegularExpressions.Regex.Replace(
-            html, "<[^>]+>", " ");
-
-        // Decode common HTML entities
-        stripped = stripped
-            .Replace("&amp;",  "&")
-            .Replace("&lt;",   "<")
-            .Replace("&gt;",   ">")
-            .Replace("&quot;", "\"")
-            .Replace("&apos;", "'")
-            .Replace("&#160;", " ")
-            .Replace("&nbsp;", " ");
-
-        // Collapse whitespace
-        stripped = System.Text.RegularExpressions.Regex.Replace(
-            stripped, @"\s{2,}", " ").Trim();
-
+        var stripped = System.Text.RegularExpressions.Regex.Replace(html, "<[^>]+>", " ");
+        stripped = stripped.Replace("&amp;", "&").Replace("&lt;", "<").Replace("&gt;", ">")
+            .Replace("&quot;", "\"").Replace("&apos;", "'").Replace("&#160;", " ").Replace("&nbsp;", " ");
+        stripped = System.Text.RegularExpressions.Regex.Replace(stripped, @"\s{2,}", " ").Trim();
         return stripped;
     }
 }

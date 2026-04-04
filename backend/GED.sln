@@ -10,6 +10,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GED.Infrastructure", "GED.I
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GED.Tests", "GED.Tests\GED.Tests.csproj", "{8AF39B03-2B75-4FFB-A098-EB914A8C45D6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GED.IndexingWorker", "GED.IndexingWorker\GED.IndexingWorker.csproj", "{D5E6F7A8-B9C0-4D5E-0F1A-5B6C7D8E9F0A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GED.Scheduler", "GED.Scheduler\GED.Scheduler.csproj", "{E6F7A8B9-C0D4-5E0F-1A2B-3C4D5E6F7A8B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -36,5 +40,13 @@ Global
 		{8AF39B03-2B75-4FFB-A098-EB914A8C45D6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8AF39B03-2B75-4FFB-A098-EB914A8C45D6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8AF39B03-2B75-4FFB-A098-EB914A8C45D6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D5E6F7A8-B9C0-4D5E-0F1A-5B6C7D8E9F0A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D5E6F7A8-B9C0-4D5E-0F1A-5B6C7D8E9F0A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D5E6F7A8-B9C0-4D5E-0F1A-5B6C7D8E9F0A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D5E6F7A8-B9C0-4D5E-0F1A-5B6C7D8E9F0A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E6F7A8B9-C0D4-5E0F-1A2B-3C4D5E6F7A8B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E6F7A8B9-C0D4-5E0F-1A2B-3C4D5E6F7A8B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E6F7A8B9-C0D4-5E0F-1A2B-3C4D5E6F7A8B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E6F7A8B9-C0D4-5E0F-1A2B-3C4D5E6F7A8B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

@@ -1,3 +1,4 @@
+using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -61,9 +62,9 @@ public class OutboxRelayService : BackgroundService
     private readonly IConfiguration _configuration;
 
     /// <summary>
-    /// Polling interval between relay cycles.
+    /// Polling interval between relay cycles (configurable via OUTBOX_POLL_INTERVAL_SECONDS).
     /// </summary>
-    private readonly TimeSpan _pollInterval = TimeSpan.FromSeconds(1);
+    private readonly TimeSpan _pollInterval;
 
     /// <summary>
     /// Maximum retry attempts before giving up on a message.
@@ -71,9 +72,9 @@ public class OutboxRelayService : BackgroundService
     private const int MaxRetries = 5;
 
     /// <summary>
-    /// Maximum messages to process per poll cycle.
+    /// Maximum messages to process per poll cycle (configurable via OUTBOX_BATCH_SIZE).
     /// </summary>
-    private const int BatchSize = 20;
+    private readonly int _batchSize;
 
     /// <summary>
     /// Whether ResourceSaver mode is enabled.
@@ -91,8 +92,18 @@ public class OutboxRelayService : BackgroundService
         _sp = sp;
         _logger = logger;
         _configuration = configuration;
+
+        var pollIntervalSeconds = configuration.GetValue<int>("Outbox:PollIntervalSeconds", 1);
+        _pollInterval = TimeSpan.FromSeconds(Math.Max(1, pollIntervalSeconds));
+
+        _batchSize = configuration.GetValue<int>("Outbox:BatchSize", 20);
+
         _resourceSaverEnabled = configuration.GetValue<bool>("ResourceSaver:Enabled", false);
-        
+
+        _logger.LogInformation(
+            "📬 Outbox relay configured: PollInterval={Interval}s, BatchSize={Batch}, ResourceSaver={ResourceSaver}",
+            _pollInterval.TotalSeconds, _batchSize, _resourceSaverEnabled);
+
         if (_resourceSaverEnabled)
         {
             _logger.LogInformation("ResourceSaver mode enabled - mutual exclusion between OCR and indexing jobs");
@@ -102,7 +113,7 @@ public class OutboxRelayService : BackgroundService
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("📬 Outbox relay started (polling every {Interval}s, ResourceSaver={Enabled})", 
+        _logger.LogInformation("📬 Outbox relay started (polling every {Interval}s, ResourceSaver={Enabled})",
             _pollInterval.TotalSeconds, _resourceSaverEnabled);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -135,11 +146,16 @@ public class OutboxRelayService : BackgroundService
         var db           = scope.ServiceProvider.GetRequiredService<GedDbContext>();
         var rabbitMq     = scope.ServiceProvider.GetRequiredService<RabbitMqService>();
 
-        // Fetch unprocessed messages (not yet published, under retry limit)
+        // Fetch unprocessed messages with row-level locking to prevent duplicate delivery
+        // across concurrent instances. Uses SQL Server's WITH (UPDLOCK, ROWLOCK) hint.
+        // Order by priority (lower = higher priority) then by created_at
         var pending = await db.OutboxMessages
-            .Where(m => m.ProcessedAt == null && m.RetryCount < MaxRetries)
-            .OrderBy(m => m.CreatedAt)
-            .Take(BatchSize)
+            .FromSqlRaw(
+                @"SELECT * FROM outbox_messages WITH (UPDLOCK, ROWLOCK)
+                  WHERE processed_at IS NULL AND retry_count < {0}
+                  ORDER BY CASE WHEN priority IS NULL THEN 1 ELSE 0 END, priority, created_at
+                  OFFSET 0 ROWS FETCH NEXT {1} ROWS ONLY",
+                MaxRetries, _batchSize)
             .ToListAsync(ct);
 
         if (!pending.Any()) return;
@@ -178,19 +194,12 @@ public class OutboxRelayService : BackgroundService
         foreach (var msg in pending)
         {
             // ResourceSaver mutual exclusion check
-            if (_resourceSaverEnabled)
+            // Note: OcrJob should NEVER be skipped - it must complete before IndexingJob can run
+            // IndexingJob depends on OCR-enriched text, so OcrJob has priority
+            if (_resourceSaverEnabled && msg.Type == "IndexingJob" && ocrInFlight > 0)
             {
-                if (msg.Type == "OcrJob" && indexingInFlight > 0)
-                {
-                    _logger.LogInformation("⏸️ Skipping OcrJob {Id} - {Count} IndexingJob(s) in-flight", msg.Id, indexingInFlight);
-                    continue;
-                }
-                
-                if (msg.Type == "IndexingJob" && ocrInFlight > 0)
-                {
-                    _logger.LogInformation("⏸️ Skipping IndexingJob {Id} - {Count} OcrJob(s) in-flight", msg.Id, ocrInFlight);
-                    continue;
-                }
+                _logger.LogInformation("⏸️ Skipping IndexingJob {Id} - {Count} OcrJob(s) in-flight (must wait for OCR to complete)", msg.Id, ocrInFlight);
+                continue;
             }
 
             try

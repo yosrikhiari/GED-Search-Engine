@@ -102,7 +102,9 @@ public class OcrMetadataEnrichmentService
     }
 
     /// <summary>
-    /// Result of metadata enrichment containing tags and description.
+    /// Result of metadata enrichment containing tags.
+    /// Note: Description is now provided by Tika metadata extraction, not LLM.
+    /// This property is kept for backward compatibility but is not populated.
     /// </summary>
     public class EnrichmentResult
     {
@@ -112,20 +114,23 @@ public class OcrMetadataEnrichmentService
         public List<string> Tags { get; set; } = new();
 
         /// <summary>
-        /// Generated description summarizing the document.
+        /// Description - now provided by Tika metadata, not LLM.
+        /// Kept for backward compatibility but no longer populated.
         /// </summary>
+        [Obsolete("Description is now provided by Tika metadata extraction")]
         public string Description { get; set; } = string.Empty;
     }
 
     /// <summary>
-    /// Generates AI tags and description from OCR text.
+    /// Generates AI tags from OCR text. 
+    /// Description is now provided by Tika metadata extraction.
     /// </summary>
     /// <param name="ocrText">Cleaned OCR text to analyze.</param>
     /// <param name="fileName">Original filename for context.</param>
     /// <param name="category">Document category.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// <see cref="EnrichmentResult"/> with tags and description, or null on failure.
+    /// <see cref="EnrichmentResult"/> with tags, or null on failure.
     /// </returns>
     /// <remarks>
     /// Returns null on any failure — never throws.
@@ -143,7 +148,7 @@ public class OcrMetadataEnrichmentService
         try
         {
             _logger.LogInformation(
-                "🏷️  Enriching metadata with Ollama for {FileName} ({Chars} chars)",
+                "🏷️  Enriching tags with Ollama for {FileName} ({Chars} chars)",
                 fileName, ocrText.Length);
 
             // Truncate text to max chars for efficiency
@@ -202,10 +207,11 @@ public class OcrMetadataEnrichmentService
 
     /// <summary>
     /// Builds the prompt for metadata enrichment with predefined tag vocabulary.
+    /// Note: Description is now provided by Tika metadata extraction, not LLM.
     /// </summary>
     private static string BuildPrompt(string text, string fileName, string category)
     {
-        return $@"You are a document analysis assistant. Analyze this {category} document and return metadata.
+        return $@"You are a document analysis assistant. Analyze this {category} document and return tags.
 
 DOCUMENT FILE: {fileName}
 DOCUMENT TEXT:
@@ -218,15 +224,13 @@ Time: 2020, 2021, 2022, 2023, 2024, 2025, q1, q2, q3, q4
 Topics: finance, accounting, hr, legal, procurement, logistics, it, marketing, operations, real-estate, construction, healthcare, education
 Languages: french, english, arabic
 
-Return ONLY a JSON object (no markdown, no explanation) with exactly these two fields:
+Return ONLY a JSON object (no markdown, no explanation) with exactly this field:
 
-1. ""tags"": array of 4-12 lowercase tags. Use predefined tags when they fit. You MAY add free-form tags for specific names, organizations, project names, or amounts not covered above.
-   Do NOT include generic tags like ""document"", ""text"", ""file"", ""content""
-
-2. ""description"": a single plain-text sentence (max 250 characters) summarizing what this document is about.
+""tags"": array of 4-12 lowercase tags. Use predefined tags when they fit. You MAY add free-form tags for specific names, organizations, project names, or amounts not covered above.
+Do NOT include generic tags like ""document"", ""text"", ""file"", ""content""
 
 Example output:
-{{""tags"":[""invoice"",""finance"",""2024"",""acme-corp"",""approved""],""description"":""Invoice #1042 from Acme Corp for consulting services rendered in Q3 2024, total amount 12,500 EUR.""}}
+{{""tags"":[""invoice"",""finance"",""2024"",""acme-corp"",""approved""]}}
 
 Now analyze the document above and return JSON:";
     }
@@ -273,26 +277,14 @@ Now analyze the document above and return JSON:";
             if (tags.Count > MaxTags)
                 tags = tags[..MaxTags];
 
-            // Parse description
-            string description = string.Empty;
-            if (root.TryGetProperty("description", out var descEl) &&
-                descEl.ValueKind == JsonValueKind.String)
-            {
-                description = descEl.GetString()?.Trim() ?? string.Empty;
-                if (description.Length > MaxDescriptionChars)
-                    description = description[..(MaxDescriptionChars - 3)] + "...";
-            }
-
-            if (string.IsNullOrWhiteSpace(description))
-            {
-                _logger.LogWarning("Ollama returned empty description — enrichment partial");
-            }
+            // Description is now provided by Tika metadata extraction, not LLM
+            // Keep backward compatibility - don't fail if LLM still returns description
 
             _logger.LogInformation(
-                "✅ Metadata enriched: {TagCount} tags, {DescLen} char description",
-                tags.Count, description.Length);
+                "✅ Metadata enriched: {TagCount} tags",
+                tags.Count);
 
-            return new EnrichmentResult { Tags = tags, Description = description };
+            return new EnrichmentResult { Tags = tags };
         }
         catch (JsonException ex)
         {

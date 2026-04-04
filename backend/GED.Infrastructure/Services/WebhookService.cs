@@ -25,6 +25,8 @@ public class WebhookService : IWebhookService
     private readonly IDistributedCache _cache;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _webhooksFilePath;
+    private readonly HashSet<string> _allowedHosts;
+    private readonly bool _allowAllHosts;
 
     private readonly List<WebhookConfig> _webhooks = new();
     private readonly object _lock = new();
@@ -43,7 +45,85 @@ public class WebhookService : IWebhookService
         _cache = cache;
         _httpClientFactory = httpClientFactory;
         _webhooksFilePath = configuration["Webhooks:ConfigPath"] ?? "/var/lib/ged/webhooks.json";
+        
+        // Load SSRF allowlist from configuration
+        var allowlistStr = configuration["Webhooks:AllowedHosts"] ?? "";
+        _allowAllHosts = string.IsNullOrWhiteSpace(allowlistStr) || allowlistStr == "*";
+        _allowedHosts = new HashSet<string>(
+            allowlistStr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            StringComparer.OrdinalIgnoreCase);
+        
+        if (_allowAllHosts)
+        {
+            _logger.LogWarning("Webhook SSRF protection disabled (allowlist is empty or '*'). Consider configuring Webhooks:AllowedHosts for production.");
+        }
+        else
+        {
+            _logger.LogInformation("Webhook SSRF allowlist configured: {AllowedHosts}", string.Join(", ", _allowedHosts));
+        }
+        
         LoadWebhooks();
+    }
+
+    private bool IsHostAllowed(string url)
+    {
+        if (_allowAllHosts) return true;
+        
+        try
+        {
+            var uri = new Uri(url, UriKind.Absolute);
+            
+            // Block private IP ranges (SSRF protection)
+            if (IsPrivateIpAddress(uri.Host))
+            {
+                _logger.LogWarning("Webhook URL blocked (private IP): {Url}", url);
+                return false;
+            }
+            
+            // Block localhost
+            if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.Equals("127.0.0.1") ||
+                uri.Host.Equals("::1"))
+            {
+                _logger.LogWarning("Webhook URL blocked (localhost): {Url}", url);
+                return false;
+            }
+            
+            // Check against allowlist
+            return _allowedHosts.Contains(uri.Host);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse webhook URL: {Url}", url);
+            return false;
+        }
+    }
+
+    private static bool IsPrivateIpAddress(string host)
+    {
+        try
+        {
+            var addresses = System.Net.Dns.GetHostAddresses(host);
+                foreach (var addr in addresses)
+                {
+                    if (System.Net.IPAddress.IsLoopback(addr)) return true;
+                if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    var bytes = addr.GetAddressBytes();
+                    // 10.0.0.0/8
+                    if (bytes[0] == 10) return true;
+                    // 172.16.0.0/12
+                    if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return true;
+                    // 192.168.0.0/16
+                    if (bytes[0] == 192 && bytes[1] == 168) return true;
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public Task<List<WebhookConfig>> GetAllWebhooksAsync()
@@ -147,6 +227,12 @@ public class WebhookService : IWebhookService
 
     private async Task DeliverWebhookWithRetryAsync(WebhookConfig webhook, WebhookPayload payload)
     {
+        if (!IsHostAllowed(webhook.Url))
+        {
+            _logger.LogWarning("Webhook delivery blocked by SSRF allowlist: {Url}", webhook.Url);
+            return;
+        }
+        
         var client = _httpClientFactory.CreateClient("webhook");
         client.Timeout = TimeSpan.FromSeconds(webhook.TimeoutSeconds);
 

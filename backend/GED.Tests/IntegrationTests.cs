@@ -11,7 +11,7 @@ namespace GED.Tests;
 public class IntegrationTests
 {
     [Fact]
-    public void Test3_ConstructorDoesNotCreateUsersFile()
+    public async Task Test3_ConstructorDoesNotCreateUsersFile()
     {
         // Arrange - use a temp directory that doesn't exist
         var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
@@ -46,7 +46,7 @@ public class IntegrationTests
         
         // Now call InitializeAsync - this SHOULD create the file if needed
         // (but since no file exists and no DB factory, nothing happens)
-        authService.InitializeAsync().Wait();
+        await authService.InitializeAsync();
         
         // Still should not exist because no users to save
         var fileExistsAfterInit = File.Exists(usersFilePath);

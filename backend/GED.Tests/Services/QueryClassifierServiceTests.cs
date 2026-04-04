@@ -339,14 +339,15 @@ public class QueryClassifierServiceTests
     [Fact]
     public void Config_DefaultValues_AreSet()
     {
-        var defaultTopK = 5;
-        var defaultConfidenceThreshold = 0.45f;
-        var factualTopK = 5;
-        var factualThreshold = 0.5f;
-        var summarizationTopK = 10;
-        var summarizationThreshold = 0.3f;
+        const int defaultTopK = 5;
+        const float defaultConfidenceThreshold = 0.45f;
+        const int factualTopK = 5;
+        const float factualThreshold = 0.5f;
+        const int summarizationTopK = 10;
+        const float summarizationThreshold = 0.3f;
 
         defaultTopK.Should().Be(5);
+        defaultConfidenceThreshold.Should().Be(0.45f);
         factualTopK.Should().Be(5);
         factualThreshold.Should().Be(0.5f);
         summarizationTopK.Should().Be(10);

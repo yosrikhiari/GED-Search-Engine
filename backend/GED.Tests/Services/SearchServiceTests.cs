@@ -209,7 +209,7 @@ public class SearchServiceTests
 
         var categoryFacets = documents
             .GroupBy(d => d.Category)
-            .Select(g => new FacetValue { Value = g.Key, Count = g.Count() })
+            .Select(g => new FacetValue { Value = g.Key ?? string.Empty, Count = g.Count() })
             .ToList();
 
         categoryFacets.Should().HaveCount(3);
@@ -284,9 +284,7 @@ public class SearchServiceTests
     [Fact]
     public void EmbeddingDimension_IsCorrect()
     {
-        var embedModel = "nomic-embed-text";
-        var expectedDimension = 768;
-
+        const int expectedDimension = 768;
         expectedDimension.Should().Be(768);
     }
 

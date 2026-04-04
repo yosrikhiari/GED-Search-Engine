@@ -1,0 +1,44 @@
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+COPY ["GED.IndexingWorker/GED.IndexingWorker.csproj", "GED.IndexingWorker/"]
+COPY ["GED.Core/GED.Core.csproj",                   "GED.Core/"]
+COPY ["GED.Infrastructure/GED.Infrastructure.csproj", "GED.Infrastructure/"]
+
+RUN dotnet restore "GED.IndexingWorker/GED.IndexingWorker.csproj"
+
+COPY . .
+
+RUN dotnet publish "GED.IndexingWorker/GED.IndexingWorker.csproj" \
+    -c Release \
+    -o /app/publish \
+    --no-restore
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+RUN groupadd --gid 1000 gedgroup && \
+    useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home geduser
+
+RUN mkdir -p /var/lib/ged/documents \
+             /var/lib/ged \
+             /app/logs \
+             && chown -R geduser:gedgroup /var/lib/ged \
+             && chown -R geduser:gedgroup /app/logs
+
+USER geduser
+
+WORKDIR /app
+
+COPY --from=build --chown=geduser:gedgroup /app/publish .
+
+ENV DOTNET_RUNNING_IN_CONTAINER=true
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
+
+ENTRYPOINT ["dotnet", "GED.IndexingWorker.dll"]

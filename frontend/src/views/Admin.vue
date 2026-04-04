@@ -1996,66 +1996,19 @@
                 />
               </svg>
             </button>
-            <button
-              class="hdr-btn hdr-delete"
-              title="Supprimer"
-              @click="deleteDocFromViewer"
-            >
-              <svg
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                />
-              </svg>
-            </button>
-            <div class="tab-switcher">
-              <button
-                :class="['tab-btn', { active: viewerTab === 'preview' }]"
-                @click="viewerTab = 'preview'"
-              >
-                <svg
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                  />
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                  />
-                </svg>
-                Aperçu
-              </button>
+            <!-- Tab buttons: Détails / Historique -->
+            <div class="viewer-tabs">
               <button
                 :class="['tab-btn', { active: viewerTab === 'details' }]"
                 @click="viewerTab = 'details'"
               >
-                <svg
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
                 Détails
+              </button>
+              <button
+                :class="['tab-btn', { active: viewerTab === 'history' }]"
+                @click="viewerTab = 'history'; fetchProcessingHistory(currentDocument?.id)"
+              >
+                Historique
               </button>
             </div>
             <button
@@ -2071,7 +2024,7 @@
                   stroke-linecap="round"
                   stroke-linejoin="round"
                   stroke-width="2"
-                  d="M6 18L18 6M6 6l12 12"
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                 />
               </svg>
             </button>
@@ -2080,10 +2033,9 @@
 
         <!-- Body: two-column split -->
         <div class="viewer-body">
-          <!-- LEFT: File Preview -->
+          <!-- LEFT: File Preview - always visible -->
           <div
             class="viewer-preview-pane"
-            :class="{ 'tab-hidden': viewerTab !== 'preview' }"
           >
             <div
               v-if="documentLoading"
@@ -2266,8 +2218,8 @@
 
           <!-- RIGHT: Details + Admin Edit pane -->
           <div
-            class="viewer-details-pane"
-            :class="{ 'tab-hidden': viewerTab !== 'details' }"
+            v-show="viewerTab === 'details'"
+            class="viewer-details-pane viewer-details-panel"
           >
             <!-- OCR status bar -->
             <div
@@ -2559,20 +2511,440 @@
               </div>
             </div>
           </div>
+
+          <!-- RIGHT: History tab — sibling of details, not a child -->
+          <div
+            v-show="viewerTab === 'history'"
+            class="viewer-details-pane viewer-history-panel"
+          >
+              <div class="detail-section">
+                <h3 class="detail-section-title">
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  ><path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                  /></svg>
+                  Informations du fichier
+                </h3>
+                <dl class="detail-list">
+                  <div class="dl-row">
+                    <dt>Type</dt><dd><span class="mime-badge">{{ getFileExtension(currentDocument?.fileName).toUpperCase() }}</span><span class="mime-text">{{ currentDocument?.contentType }}</span></dd>
+                  </div>
+                  <div class="dl-row">
+                    <dt>Taille</dt><dd>{{ formatSize(currentDocument?.fileSize) }}</dd>
+                  </div>
+                  <div class="dl-row">
+                    <dt>Statut</dt><dd>
+                      <span
+                        class="status-dot"
+                        :class="getDocStatusClass(currentDocument?.id, currentDocument?.status)"
+                      >{{ getDocStatusLabel(currentDocument?.id, currentDocument?.status) }}</span>
+                    </dd>
+                  </div>
+                  <div class="dl-row">
+                    <dt>Importé</dt><dd>{{ formatDateLong(currentDocument?.createdAt) }}</dd>
+                  </div>
+                  <div
+                    v-if="currentDocument?.createdBy"
+                    class="dl-row"
+                  >
+                    <dt>Par</dt><dd>{{ currentDocument.createdBy }}</dd>
+                  </div>
+                  <div
+                    v-if="currentDocument?.modifiedAt"
+                    class="dl-row"
+                  >
+                    <dt>Modifié</dt><dd>{{ formatDateLong(currentDocument.modifiedAt) }}</dd>
+                  </div>
+                  <div
+                    v-if="currentDocument?.id"
+                    class="dl-row"
+                  >
+                    <dt>ID</dt><dd
+                      class="dd-mono"
+                      style="font-size:.68rem"
+                    >
+                      {{ currentDocument.id }}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              <div
+                v-if="currentDocument?.tags?.length"
+                class="detail-section"
+              >
+                <h3 class="detail-section-title">
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  ><path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+                  /></svg>
+                  Étiquettes
+                </h3>
+                <div class="tags-cloud">
+                  <span
+                    v-for="tag in currentDocument.tags"
+                    :key="tag"
+                    class="tag-cloud-item"
+                  >#{{ tag }}</span>
+                </div>
+              </div>
+              <div class="detail-section">
+                <h3 class="detail-section-title">
+                  <svg
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  ><path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                  /></svg>
+                  Traitement
+                </h3>
+                <div
+                  v-if="historyLoading"
+                  class="preview-loading"
+                >
+                  <div class="pulse-ring" /><p>Chargement de l'historique...</p>
+                </div>
+                <div
+                  v-else-if="!processingHistory.length"
+                  class="preview-empty"
+                >
+                  <p>Aucun historique de traitement disponible</p>
+                </div>
+                <div
+                  v-else
+                  class="history-timeline"
+                >
+                  <div
+                    v-for="(item, idx) in processingHistory"
+                    :key="idx"
+                    class="timeline-item"
+                    :class="item.status.toLowerCase()"
+                  >
+                    <div class="timeline-marker">
+                      <div class="marker-dot" /><div
+                        v-if="idx < processingHistory.length - 1"
+                        class="marker-line"
+                      />
+                    </div>
+                    <div class="timeline-content">
+                      <div class="timeline-header">
+                        <span class="timeline-stage">{{ getStageName(item.stage) }}</span><span class="timeline-duration">{{ formatDuration(item.durationMs) }}</span>
+                      </div>
+                      <div class="timeline-time">
+                        {{ new Date(item.timestamp).toLocaleString('fr-FR') }}
+                      </div>
+                      <div
+                        v-if="item.message"
+                        class="timeline-msg"
+                      >
+                        {{ item.message }}
+                      </div>
+                      <div
+                        v-if="item.status === 'Failed'"
+                        class="timeline-error"
+                      >
+                        {{ item.message || 'Erreur' }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      <AccessManagementModal
+        v-if="showAccessModal"
+        :initial-tab="accessModalTab"
+        :initial-groups="accessGroups"
+        :initial-access-summary="accessSummaryData"
+        @close="showAccessModal = false"
+        @saved="onAccessSaved"
+      />
+
+      <!-- ── ACL MODAL ───────────────────────────────────────────────────── -->
+      <div
+        v-if="showAcl && aclDoc"
+        class="modal-overlay"
+        @click.self="showAcl = false"
+      >
+        <div class="modal modal-wide">
+          <div class="modal-header">
+            <div>
+              <h2>Accès au document</h2>
+              <p class="modal-subtitle">
+                {{ aclDoc.title }}
+              </p>
+            </div>
+            <button
+              class="close-btn"
+              @click="showAcl = false"
+            >
+              ✕
+            </button>
+          </div>
+          <div class="modal-body">
+            <div
+              v-if="aclError"
+              class="banner error"
+            >
+              {{ aclError }}
+            </div>
+            <div
+              v-if="aclSuccess"
+              class="banner success"
+            >
+              {{ aclSuccess }}
+            </div>
+
+            <div class="acl-form">
+              <h3 class="section-label">
+                Accorder l'accès
+              </h3>
+              <div class="acl-form-row">
+                <select
+                  v-model="grantUserId"
+                  class="form-input"
+                >
+                  <option value="">
+                    — Choisir un utilisateur —
+                  </option>
+                  <option
+                    v-for="u in nonAdminUsers"
+                    :key="u.id"
+                    :value="u.id"
+                  >
+                    {{ u.fullName || u.username }} ({{ roleLabel(u.role) }})
+                  </option>
+                </select>
+                <select
+                  v-model="grantPermission"
+                  class="form-input short"
+                >
+                  <option value="Read">
+                    Lecture
+                  </option>
+                  <option value="Write">
+                    Écriture
+                  </option>
+                  <option value="FullControl">
+                    Contrôle total
+                  </option>
+                </select>
+              </div>
+              <div class="acl-form-row">
+                <div class="access-type-toggle">
+                  <button
+                    class="toggle-btn"
+                    :class="{ active: grantPermanent }"
+                    @click="grantPermanent = true"
+                  >
+                    🔓 Accès permanent
+                  </button>
+                  <button
+                    class="toggle-btn"
+                    :class="{ active: !grantPermanent }"
+                    @click="grantPermanent = false"
+                  >
+                    ⏱ Accès limité dans le temps
+                  </button>
+                </div>
+              </div>
+              <div
+                v-if="!grantPermanent"
+                class="acl-form-row"
+              >
+                <label class="form-label">Date d'expiration</label>
+                <input
+                  v-model="grantExpiry"
+                  type="datetime-local"
+                  class="form-input"
+                  :min="minExpiry"
+                >
+              </div>
+              <button
+                :disabled="!grantUserId || savingAcl"
+                class="btn-primary"
+                @click="grantAccess"
+              >
+                {{ savingAcl ? 'Enregistrement…' : 'Accorder l\'accès' }}
+              </button>
+            </div>
+
+            <div class="acl-list">
+              <h3 class="section-label">
+                Accès existants
+              </h3>
+              <div
+                v-if="loadingAcl"
+                class="loading-state"
+              >
+                <div class="spinner-ring" />
+              </div>
+              <div
+                v-else-if="aclEntries.length === 0"
+                class="empty-acl"
+              >
+                Aucun accès spécifique accordé.
+              </div>
+              <div
+                v-else
+                class="acl-entries"
+              >
+                <div
+                  v-for="entry in aclEntries"
+                  :key="entry.id"
+                  class="acl-entry"
+                  :class="{ expired: !entry.isActive }"
+                >
+                  <div class="acl-user-info">
+                    <div class="user-mini-avatar sm">
+                      {{ (entry.fullName || entry.username).charAt(0).toUpperCase() }}
+                    </div>
+                    <div>
+                      <p class="doc-name">
+                        {{ entry.fullName || entry.username }}
+                      </p>
+                      <p class="muted">
+                        {{ entry.username }}
+                      </p>
+                    </div>
+                  </div>
+                  <div class="acl-meta">
+                    <span class="perm-badge">{{ permLabel(entry.permission) }}</span>
+                    <span
+                      v-if="entry.isPermanent"
+                      class="perm-permanent"
+                    >Permanent</span>
+                    <span
+                      v-else-if="entry.isActive"
+                      class="perm-expiry"
+                    >Expire le {{ formatDate(entry.expiresAt) }}</span>
+                    <span
+                      v-else
+                      class="perm-expired"
+                    >Expiré</span>
+                  </div>
+                  <button
+                    class="btn-icon-sm danger"
+                    @click="revokeAccess(entry)"
+                  >
+                    Révoquer
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── CREATE USER MODAL ─────────────────────────────────────────── -->
+      <div
+        v-if="showCreateUser"
+        class="modal-overlay"
+        @click.self="showCreateUser = false; editingUserId = null"
+      >
+        <div class="modal">
+          <div class="modal-header">
+            <h2>{{ editingUserId ? 'Modifier l\'utilisateur' : 'Créer un utilisateur' }}</h2>
+            <button
+              class="close-btn"
+              @click="showCreateUser = false; editingUserId = null"
+            >
+              ✕
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <label class="form-label">Nom d'utilisateur *</label>
+              <input
+                v-model="newUser.username"
+                class="form-input"
+                placeholder="ex: jean.dupont"
+              >
+            </div>
+            <div class="form-row">
+              <label class="form-label">Mot de passe {{ editingUserId ? '(laisser vide pour garder l\'actuel)' : '*' }}</label>
+              <input
+                v-model="newUser.password"
+                type="password"
+                class="form-input"
+                :placeholder="editingUserId ? '••••••••' : 'Min. 8 caractères'"
+              >
+            </div>
+            <div class="form-row">
+              <label class="form-label">Nom complet</label>
+              <input
+                v-model="newUser.fullName"
+                class="form-input"
+                placeholder="Jean Dupont"
+              >
+            </div>
+            <div class="form-row">
+              <label class="form-label">Email</label>
+              <input
+                v-model="newUser.email"
+                type="email"
+                class="form-input"
+                placeholder="jean@example.com"
+              >
+            </div>
+            <div class="form-row">
+              <label class="form-label">Rôle</label>
+              <select
+                v-model="newUser.role"
+                class="form-input"
+              >
+                <option value="User">
+                  Utilisateur
+                </option>
+                <option value="Manager">
+                  Responsable
+                </option>
+                <option value="ReadOnly">
+                  Lecture seule
+                </option>
+                <option value="Admin">
+                  Administrateur
+                </option>
+              </select>
+            </div>
+            <div class="modal-footer">
+              <button
+                class="btn-ghost"
+                @click="showCreateUser = false; editingUserId = null"
+              >
+                Annuler
+              </button>
+              <button
+                :disabled="savingUser"
+                class="btn-primary"
+                @click="createUser"
+              >
+                {{ savingUser ? 'Enregistrement…' : (editingUserId ? 'Enregistrer' : 'Créer') }}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
-    <!-- ── ACCESS MANAGEMENT MODAL ──────────────────────────────────────── -->
-    <AccessManagementModal
-      v-if="showAccessModal"
-      :initial-tab="accessModalTab"
-      :initial-groups="accessGroups"
-      :initial-access-summary="accessSummaryData"
-      @close="showAccessModal = false"
-      @saved="onAccessSaved"
-    />
 
     <!-- ── UPLOAD MODAL (Batch) ───────────────────────────────────────────────── -->
+    <teleport to="body">
     <div
       v-if="showUpload"
       class="modal-overlay"
@@ -2599,7 +2971,7 @@
             ✕
           </button>
         </div>
-        
+      
         <!-- Error State - Show failed files with retry option -->
         <div
           v-if="batchImportState === 'error'"
@@ -2640,7 +3012,7 @@
             </button>
           </div>
         </div>
-        
+      
         <!-- Processing State - Show real-time status -->
         <div
           v-else-if="batchImportState === 'processing'"
@@ -2649,9 +3021,17 @@
           <div class="batch-progress-info">
             <p>{{ batchDocuments.filter(d => d.status === 'indexed').length }} / {{ batchDocuments.length }} document(s) traité(s)</p>
           </div>
-          <div class="batch-doc-list">
+          <div class="batch-filter-bar">
+            <input
+              v-model="batchFilterQuery"
+              type="text"
+              placeholder="Filtrer par nom ou catégorie..."
+              class="batch-filter-input"
+            >
+          </div>
+          <div class="batch-doc-list batch-doc-list-scrollable">
             <div
-              v-for="(doc, idx) in batchDocuments"
+              v-for="(doc, idx) in filteredBatchDocuments"
               :key="idx"
               :class="['batch-doc-item', doc.status]"
             >
@@ -2664,9 +3044,18 @@
                 <p class="batch-doc-name">
                   {{ doc.name }}
                 </p>
+                <p
+                  v-if="doc.category"
+                  class="batch-doc-category"
+                >
+                  Catégorie: {{ doc.category }}
+                </p>
                 <p class="batch-doc-stage">
                   <span v-if="doc.status === 'indexed'">Terminé</span>
-                  <span v-else-if="doc.queuePosition">Position: {{ doc.queuePosition }}</span>
+                  <span
+                    v-else-if="doc.queuePosition"
+                    class="queue-pos-badge"
+                  >#{{ doc.queuePosition }} - {{ doc.stageLabel }}</span>
                   <span v-else>{{ doc.stageLabel }}</span>
                 </p>
               </div>
@@ -2678,7 +3067,7 @@
             </p>
           </div>
         </div>
-        
+      
         <!-- Completed State -->
         <div
           v-else-if="batchImportState === 'completed'"
@@ -2716,7 +3105,7 @@
             </button>
           </div>
         </div>
-        
+      
         <!-- Upload State - File Selection -->
         <div
           v-else
@@ -2787,6 +3176,25 @@
               class="file-preview-item"
               :class="{ selected: batchSelectedFiles.includes(index) }"
             >
+              <div class="file-order-controls">
+                <button
+                  class="order-btn"
+                  :disabled="index === 0"
+                  title="Déplacer vers le haut"
+                  @click="moveFileUp(index)"
+                >
+                  ▲
+                </button>
+                <span class="file-order-num">{{ index + 1 }}</span>
+                <button
+                  class="order-btn"
+                  :disabled="index === selectedFiles.length - 1"
+                  title="Déplacer vers le bas"
+                  @click="moveFileDown(index)"
+                >
+                  ▼
+                </button>
+              </div>
               <input
                 type="checkbox"
                 :checked="batchSelectedFiles.includes(index)"
@@ -2851,272 +3259,7 @@
         </div>
       </div>
     </div>
-
-    <!-- ── ACL MODAL ───────────────────────────────────────────────────── -->
-    <div
-      v-if="showAcl && aclDoc"
-      class="modal-overlay"
-      @click.self="showAcl = false"
-    >
-      <div class="modal modal-wide">
-        <div class="modal-header">
-          <div>
-            <h2>Accès au document</h2>
-            <p class="modal-subtitle">
-              {{ aclDoc.title }}
-            </p>
-          </div>
-          <button
-            class="close-btn"
-            @click="showAcl = false"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="modal-body">
-          <div
-            v-if="aclError"
-            class="banner error"
-          >
-            {{ aclError }}
-          </div>
-          <div
-            v-if="aclSuccess"
-            class="banner success"
-          >
-            {{ aclSuccess }}
-          </div>
-
-          <div class="acl-form">
-            <h3 class="section-label">
-              Accorder l'accès
-            </h3>
-            <div class="acl-form-row">
-              <select
-                v-model="grantUserId"
-                class="form-input"
-              >
-                <option value="">
-                  — Choisir un utilisateur —
-                </option>
-                <option
-                  v-for="u in nonAdminUsers"
-                  :key="u.id"
-                  :value="u.id"
-                >
-                  {{ u.fullName || u.username }} ({{ roleLabel(u.role) }})
-                </option>
-              </select>
-              <select
-                v-model="grantPermission"
-                class="form-input short"
-              >
-                <option value="Read">
-                  Lecture
-                </option>
-                <option value="Write">
-                  Écriture
-                </option>
-                <option value="FullControl">
-                  Contrôle total
-                </option>
-              </select>
-            </div>
-            <div class="acl-form-row">
-              <div class="access-type-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: grantPermanent }"
-                  @click="grantPermanent = true"
-                >
-                  🔓 Accès permanent
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: !grantPermanent }"
-                  @click="grantPermanent = false"
-                >
-                  ⏱ Accès limité dans le temps
-                </button>
-              </div>
-            </div>
-            <div
-              v-if="!grantPermanent"
-              class="acl-form-row"
-            >
-              <label class="form-label">Date d'expiration</label>
-              <input
-                v-model="grantExpiry"
-                type="datetime-local"
-                class="form-input"
-                :min="minExpiry"
-              >
-            </div>
-            <button
-              :disabled="!grantUserId || savingAcl"
-              class="btn-primary"
-              @click="grantAccess"
-            >
-              {{ savingAcl ? 'Enregistrement…' : 'Accorder l\'accès' }}
-            </button>
-          </div>
-
-          <div class="acl-list">
-            <h3 class="section-label">
-              Accès existants
-            </h3>
-            <div
-              v-if="loadingAcl"
-              class="loading-state"
-            >
-              <div class="spinner-ring" />
-            </div>
-            <div
-              v-else-if="aclEntries.length === 0"
-              class="empty-acl"
-            >
-              Aucun accès spécifique accordé.
-            </div>
-            <div
-              v-else
-              class="acl-entries"
-            >
-              <div
-                v-for="entry in aclEntries"
-                :key="entry.id"
-                class="acl-entry"
-                :class="{ expired: !entry.isActive }"
-              >
-                <div class="acl-user-info">
-                  <div class="user-mini-avatar sm">
-                    {{ (entry.fullName || entry.username).charAt(0).toUpperCase() }}
-                  </div>
-                  <div>
-                    <p class="doc-name">
-                      {{ entry.fullName || entry.username }}
-                    </p>
-                    <p class="muted">
-                      {{ entry.username }}
-                    </p>
-                  </div>
-                </div>
-                <div class="acl-meta">
-                  <span class="perm-badge">{{ permLabel(entry.permission) }}</span>
-                  <span
-                    v-if="entry.isPermanent"
-                    class="perm-permanent"
-                  >Permanent</span>
-                  <span
-                    v-else-if="entry.isActive"
-                    class="perm-expiry"
-                  >Expire le {{ formatDate(entry.expiresAt) }}</span>
-                  <span
-                    v-else
-                    class="perm-expired"
-                  >Expiré</span>
-                </div>
-                <button
-                  class="btn-icon-sm danger"
-                  @click="revokeAccess(entry)"
-                >
-                  Révoquer
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── CREATE USER MODAL ─────────────────────────────────────────── -->
-    <div
-      v-if="showCreateUser"
-      class="modal-overlay"
-      @click.self="showCreateUser = false; editingUserId = null"
-    >
-      <div class="modal">
-        <div class="modal-header">
-          <h2>{{ editingUserId ? 'Modifier l\'utilisateur' : 'Créer un utilisateur' }}</h2>
-          <button
-            class="close-btn"
-            @click="showCreateUser = false; editingUserId = null"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="modal-body">
-          <div class="form-row">
-            <label class="form-label">Nom d'utilisateur *</label>
-            <input
-              v-model="newUser.username"
-              class="form-input"
-              placeholder="ex: jean.dupont"
-            >
-          </div>
-          <div class="form-row">
-            <label class="form-label">Mot de passe {{ editingUserId ? '(laisser vide pour garder l\'actuel)' : '*' }}</label>
-            <input
-              v-model="newUser.password"
-              type="password"
-              class="form-input"
-              :placeholder="editingUserId ? '••••••••' : 'Min. 8 caractères'"
-            >
-          </div>
-          <div class="form-row">
-            <label class="form-label">Nom complet</label>
-            <input
-              v-model="newUser.fullName"
-              class="form-input"
-              placeholder="Jean Dupont"
-            >
-          </div>
-          <div class="form-row">
-            <label class="form-label">Email</label>
-            <input
-              v-model="newUser.email"
-              type="email"
-              class="form-input"
-              placeholder="jean@example.com"
-            >
-          </div>
-          <div class="form-row">
-            <label class="form-label">Rôle</label>
-            <select
-              v-model="newUser.role"
-              class="form-input"
-            >
-              <option value="User">
-                Utilisateur
-              </option>
-              <option value="Manager">
-                Responsable
-              </option>
-              <option value="ReadOnly">
-                Lecture seule
-              </option>
-              <option value="Admin">
-                Administrateur
-              </option>
-            </select>
-          </div>
-          <div class="modal-footer">
-            <button
-              class="btn-ghost"
-              @click="showCreateUser = false; editingUserId = null"
-            >
-              Annuler
-            </button>
-            <button
-              :disabled="savingUser"
-              class="btn-primary"
-              @click="createUser"
-            >
-              {{ savingUser ? 'Enregistrement…' : (editingUserId ? 'Enregistrer' : 'Créer') }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </teleport>
   </div>
 </template>
 
@@ -3124,6 +3267,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUiStore } from '@/stores/ui.js'
+import { documents as documentsApi } from '../api.js'
 import AccessManagementModal from '../components/AccessManagementModal.vue'
 import TaxonomyManager from '../components/TaxonomyManager.vue'
 import ChartWidget from '../shared/ui/ChartWidget.vue'
@@ -3212,12 +3356,16 @@ const pendingPollInterval = ref(null)
 
 const startPendingPoll = () => {
   if (pendingPollInterval.value) return
+  console.log('[PendingPoll] Starting continuous pending polling...')
   pendingPollInterval.value = setInterval(async () => {
+    console.log('[PendingPoll] Polling for pending documents...')
     // Refresh search results to get updated pending count
     await refreshSearchResults()
+    console.log('[PendingPoll] Updated: pendingCount =', searchResults.value?.pendingCount, ', pendingDocs =', searchResults.value?.pendingDocuments?.length)
     
     // If no more pending documents, stop polling
     if (!searchResults.value?.pendingDocuments?.length) {
+      console.log('[PendingPoll] No more pending documents, stopping polling')
       stopPendingPoll()
     }
   }, 5000) // Poll every 5 seconds
@@ -3462,7 +3610,7 @@ const applyAutocomplete = (sug) => {
 
 // ── Expanded summaries ─────────────────────────────────────────────────────────
 const expandedSummaries = ref(new Set())
-const toggleSummary = (id) => {
+const _toggleSummary = (id) => {
   const s = new Set(expandedSummaries.value); s.has(id) ? s.delete(id) : s.add(id); expandedSummaries.value = s
 }
 
@@ -3496,6 +3644,10 @@ const fetchDocuments = async (query = '') => {
     if (res.ok) {
       const data = await res.json()
       documents.value = data.documents || []
+      // Also set searchResults so pending section and counters work
+      searchResults.value = data
+      // Mark as searched so grid uses searchResults.documents
+      searched.value = true
     }
   } finally { loadingDocs.value = false }
 }
@@ -3688,10 +3840,10 @@ const deleteDoc = async (doc) => {
 
 // ── Upload (Batch) ─────────────────────────────────────────────────────────────────────
 const showUpload      = ref(false)
+watch(showUpload, (v) => console.log('[Upload modal]', v))
 const selectedFiles   = ref([])
 const uploadTitle     = ref('')
 const uploadCategory  = ref('')
-const uploading       = ref(false)
 const uploadProgress  = ref(0)
 const categories      = ['Invoice','Contract','Report','Letter','Memo','Presentation','Spreadsheet','Image','Other']
 
@@ -3702,6 +3854,62 @@ const batchUploadComplete = ref(false) // All files transferred
 const batchCheckInterval = ref(null)
 const batchRetryFiles = ref([]) // Files that failed to upload
 const batchSelectedFiles = ref([]) // Track which files are selected for bulk category assignment
+const batchFilterQuery = ref('') // Filter search for batch processing widget
+const batchPriorityMap = ref({}) // Map of documentId -> priority for reordering
+
+// Computed filter for batch documents
+const filteredBatchDocuments = computed(() => {
+  if (!batchFilterQuery.value) return batchDocuments.value
+  const q = batchFilterQuery.value.toLowerCase()
+  return batchDocuments.value.filter(d => 
+    d.name.toLowerCase().includes(q) || 
+    (d.category && d.category.toLowerCase().includes(q))
+  )
+})
+
+// Move document up in priority (send to backend) - DEPRECATED: unused
+const _moveBatchDocUp = async (idx) => {
+  const doc = filteredBatchDocuments.value[idx]
+  if (!doc || !doc.id || idx === 0) return
+  
+  // Calculate new priority (lower = higher priority)
+  const currentPriority = batchPriorityMap.value[doc.id] || 999
+  const newPriority = Math.max(0, currentPriority - 1)
+  batchPriorityMap.value[doc.id] = newPriority
+  
+  // Send to backend
+  try {
+    await fetch(`/api/documents/${doc.id}/priority`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority: newPriority })
+    })
+  } catch (e) {
+    console.warn('Failed to update priority:', e)
+  }
+}
+
+// Move document down in priority (send to backend) - DEPRECATED: unused
+const _moveBatchDocDown = async (idx) => {
+  const doc = filteredBatchDocuments.value[idx]
+  if (!doc || !doc.id || idx === filteredBatchDocuments.value.length - 1) return
+  
+  // Calculate new priority (lower = higher priority)
+  const currentPriority = batchPriorityMap.value[doc.id] || 999
+  const newPriority = currentPriority + 1
+  batchPriorityMap.value[doc.id] = newPriority
+  
+  // Send to backend
+  try {
+    await fetch(`/api/documents/${doc.id}/priority`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority: newPriority })
+    })
+  } catch (e) {
+    console.warn('Failed to update priority:', e)
+  }
+}
 
 // Per-file categories - array matching selectedFiles
 const fileCategories = ref([])
@@ -3765,6 +3973,49 @@ const removeFile = (index) => {
   batchSelectedFiles.value = batchSelectedFiles.value.filter(i => i !== index).map(i => i > index ? i - 1 : i)
   const inp = document.querySelector('.hidden-input'); if (inp) inp.value = ''
 }
+
+// Reorder files in the list (changes priority)
+const moveFileUp = (index) => {
+  if (index === 0) return
+  // Swap file
+  const tempFile = selectedFiles.value[index]
+  selectedFiles.value[index] = selectedFiles.value[index - 1]
+  selectedFiles.value[index - 1] = tempFile
+  // Swap category
+  const tempCat = fileCategories.value[index]
+  fileCategories.value[index] = fileCategories.value[index - 1]
+  fileCategories.value[index - 1] = tempCat
+  // Adjust selection
+  const idx = batchSelectedFiles.value.indexOf(index)
+  if (idx !== -1) {
+    batchSelectedFiles.value[idx] = index - 1
+  }
+  const prevIdx = batchSelectedFiles.value.indexOf(index - 1)
+  if (prevIdx !== -1) {
+    batchSelectedFiles.value[prevIdx] = index
+  }
+}
+
+const moveFileDown = (index) => {
+  if (index === selectedFiles.value.length - 1) return
+  // Swap file
+  const tempFile = selectedFiles.value[index]
+  selectedFiles.value[index] = selectedFiles.value[index + 1]
+  selectedFiles.value[index + 1] = tempFile
+  // Swap category
+  const tempCat = fileCategories.value[index]
+  fileCategories.value[index] = fileCategories.value[index + 1]
+  fileCategories.value[index + 1] = tempCat
+  // Adjust selection
+  const idx = batchSelectedFiles.value.indexOf(index)
+  if (idx !== -1) {
+    batchSelectedFiles.value[idx] = index + 1
+  }
+  const nextIdx = batchSelectedFiles.value.indexOf(index + 1)
+  if (nextIdx !== -1) {
+    batchSelectedFiles.value[nextIdx] = index
+  }
+}
 const clearFiles = () => {
   selectedFiles.value = []
   uploadTitle.value = ''
@@ -3795,51 +4046,34 @@ const doUploadBatch = async () => {
   for (let i = 0; i < selectedFiles.value.length; i++) {
     const file = selectedFiles.value[i]
     const category = fileCategories.value[i] // Use per-file category
+    const priority = i // Priority based on list order (0 = highest priority)
     
     const form = new FormData()
     form.append('file', file)
     form.append('title', file.name.replace(/\.[^/.]+$/, ''))
     form.append('category', category)
+    form.append('priority', priority.toString())
     
     try {
-      const res = await fetch('/api/documents/upload', {
-        method: 'POST',
-        body: form
+      const doc = await documentsApi.upload(form)
+      batchDocuments.value.push({
+        id: doc.id,
+        name: file.name,
+        category: category,
+        status: 'queued',
+        stage: 'queued',
+        stageLabel: 'En attente',
+        queuePosition: null,
+        error: null
       })
+      uploadProgress.value = i + 1
       
-      if (res.ok) {
-        const doc = await res.json()
-        batchDocuments.value.push({
-          id: doc.id,
-          name: file.name,
-          category: category,
-          status: 'queued',
-          stage: 'queued',
-          stageLabel: 'En attente',
-          queuePosition: null,
-          error: null
-        })
-        uploadProgress.value = i + 1
-        
-        // Start polling immediately after first successful upload
-        if (!pollingStarted && batchDocuments.value.some(d => d.id)) {
-          batchImportState.value = 'processing'
-          startBatchProcessingPolling()
-          startPendingPoll() // Also start continuous pending polling
-          pollingStarted = true
-        }
-      } else {
-        const errorData = await res.json().catch(() => ({ error: 'Upload failed' }))
-        batchDocuments.value.push({
-          id: null,
-          name: file.name,
-          category: category,
-          status: 'failed',
-          stage: 'failed',
-          stageLabel: 'Échec',
-          queuePosition: null,
-          error: errorData.error || 'Upload failed'
-        })
+      // Start polling immediately after first successful upload
+      if (!pollingStarted && batchDocuments.value.some(d => d.id)) {
+        batchImportState.value = 'processing'
+        startBatchProcessingPolling()
+        startPendingPoll() // Also start continuous pending polling
+        pollingStarted = true
       }
     } catch (err) {
       batchDocuments.value.push({
@@ -3850,7 +4084,7 @@ const doUploadBatch = async () => {
         stage: 'failed',
         stageLabel: 'Échec',
         queuePosition: null,
-        error: err.message || 'Network error'
+        error: err.userMessage || err.message || 'Upload failed'
       })
     }
     await nextTick()
@@ -3874,16 +4108,19 @@ const doUploadBatch = async () => {
 }
 
 const startBatchProcessingPolling = () => {
-  // Poll every 3 seconds for batch document status
+  // Poll every 2 seconds for batch document status
   batchCheckInterval.value = setInterval(async () => {
+    console.log('[BatchPolling] Running batch processing poll...')
+    
     // Fetch latest search results to get pending documents
     await refreshSearchResults()
     
     const pendingDocs = searchResults.value?.pendingDocuments || []
     const indexedDocIds = new Set((searchResults.value?.documents || []).map(d => d.id))
     
-    let allComplete = true
+    console.log('[BatchPolling] Pending docs from search:', pendingDocs.length, 'Indexed docs:', indexedDocIds.size)
     
+    // Update batch documents with fresh data from search results
     for (const batchDoc of batchDocuments.value) {
       if (!batchDoc.id) continue // Skip failed docs
       
@@ -3897,19 +4134,21 @@ const startBatchProcessingPolling = () => {
         // Check pending documents for current status
         const pendingDoc = pendingDocs.find(p => p.id === batchDoc.id)
         if (pendingDoc) {
-          allComplete = false
-          // Get stage from OCR status or pending docs
-          const ocrStatus = docPipelineStatuses.value[batchDoc.id]
-          const stage = ocrStatus?.stageLabel || pendingDoc.status || 'En cours'
-          batchDoc.stage = pendingDoc.status?.toLowerCase() || 'processing'
+          // Use stage from pending doc - this has real-time processing stage
+          const stage = pendingDoc.ocrStageLabel || pendingDoc.processingStage || pendingDoc.status || 'En cours'
+          batchDoc.status = 'processing'
+          batchDoc.stage = 'processing'
           batchDoc.stageLabel = stage
-          // Queue position would come from pending docs
-          batchDoc.queuePosition = pendingDocs.indexOf(pendingDoc) + 1
+          // Get actual queue position from pending document
+          batchDoc.queuePosition = pendingDoc.queuePosition || pendingDocs.indexOf(pendingDoc) + 1
+          console.log('[BatchPolling] Doc', batchDoc.name, 'stage:', stage, 'queuePos:', batchDoc.queuePosition)
         } else {
-          // Document not in pending list - might be being processed or just indexed
-          allComplete = false
+          // Document not in pending list - might be being processed between states
+          batchDoc.status = 'processing'
           batchDoc.stage = 'processing'
           batchDoc.stageLabel = 'En cours...'
+          batchDoc.queuePosition = null
+          console.log('[BatchPolling] Doc', batchDoc.name, 'not found in pending, assuming processing')
         }
       }
     }
@@ -3919,13 +4158,16 @@ const startBatchProcessingPolling = () => {
       d.status !== 'indexed' && d.status !== 'failed'
     )
     
-    if (processingDocs.length === 0) {
+    console.log('[BatchPolling] Processing docs:', processingDocs.length, 'Upload complete:', batchUploadComplete.value)
+    
+    if (processingDocs.length === 0 && batchUploadComplete.value) {
       // All documents are complete
+      console.log('[BatchPolling] All complete, stopping')
       clearInterval(batchCheckInterval.value)
       batchCheckInterval.value = null
       batchImportState.value = 'completed'
     }
-  }, 3000)
+  }, 2000)
 }
 
 const retryFailedFiles = async () => {
@@ -3942,28 +4184,21 @@ const retryFailedFiles = async () => {
     const form = new FormData()
     form.append('file', originalFile)
     form.append('title', originalFile.name.replace(/\.[^/.]+$/, ''))
-    form.append('category', uploadCategory.value)
+    form.append('category', failedDoc.category)
     
     try {
-      const res = await fetch('/api/documents/upload', {
-        method: 'POST',
-        body: form
-      })
-      
-      if (res.ok) {
-        const doc = await res.json()
-        // Update the failed document with new info
-        const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
-        if (idx !== -1) {
-          batchDocuments.value[idx] = {
-            id: doc.id,
-            name: failedDoc.name,
-            status: 'queued',
-            stage: 'queued',
-            stageLabel: 'En attente',
-            queuePosition: null,
-            error: null
-          }
+      const doc = await documentsApi.upload(form)
+      // Update the failed document with new info
+      const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
+      if (idx !== -1) {
+        batchDocuments.value[idx] = {
+          id: doc.id,
+          name: failedDoc.name,
+          status: 'queued',
+          stage: 'queued',
+          stageLabel: 'En attente',
+          queuePosition: null,
+          error: null
         }
       }
     } catch (err) {
@@ -3998,10 +4233,58 @@ const currentDocument    = ref(null)
 const documentUrl        = ref(null)
 const documentContent    = ref(null)
 const documentLoading    = ref(false)
-const viewerTab          = ref('preview')
+const viewerTab          = ref('details')
 const officeMode         = ref('text')
 const ocrStatus          = ref(null)  // OCR status for CURRENTLY VIEWED document (in modal)
 const ocrPollInterval    = ref(null)  // Polling for the viewed document's OCR status
+const processingHistory   = ref([])  // Processing history for currently viewed document
+const historyLoading      = ref(false)  // Loading state for processing history
+
+// Processing history stage translations
+const stageTranslations = {
+  'upload': 'Téléchargement',
+  'text_extraction': 'Extraction de texte',
+  'ocr': 'OCR (reconnaissance de texte)',
+  'llm_cleaning': 'Nettoyage IA',
+  'tika_metadata': 'Métadonnées Tika',
+  'date_extraction': 'Extraction de date',
+  'enrichment': 'Enrichissement',
+  'indexing': 'Indexation',
+  'completed': 'Terminé',
+  'failed': 'Échec',
+  'processing': 'En cours',
+  'queued': 'En attente'
+}
+
+// Format duration for display
+const formatDuration = (ms) => {
+  if (ms === null || ms === undefined) return '—'
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(2)}s`
+}
+
+// Fetch processing history for a document
+// Fetches processing pipeline stages for the currently viewed document
+// Returns array of {stage, status, timestamp, durationMs, message, id, documentId}
+// Called when user clicks "Historique" tab or when document is first opened
+const fetchProcessingHistory = async (docId) => {
+  if (!docId) return
+  historyLoading.value = true
+  processingHistory.value = []
+  try {
+    const res = await authFetch(`/api/documents/${docId}/history`)
+    if (res.ok) {
+      processingHistory.value = await res.json()
+    }
+  } catch (e) {
+    console.warn('Failed to load processing history:', e)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+// Get translated stage name
+const getStageName = (stage) => stageTranslations[stage.toLowerCase()] || stage
 
 // Edit state (admin-only, in viewer)
 const editData    = reactive({ title: '', description: '', category: '', documentDate: '', tagsRaw: '', service: '' })
@@ -4081,7 +4364,7 @@ const getDocStatusClass = (docId, docStatus) => {
 // Pipeline Indicator: shows full pipeline status (En attente → En cours → Terminé)
 const getPipelineDisplay = (docId) => {
   const label = getDocStatusLabel(docId, null)
-  const statusClass = getDocStatusClass(docId, null)
+  // statusClass from getDocStatusClass is available if needed in future
   
   if (label === 'Terminé') return { text: 'Terminé', class: 'status-completed' }
   if (label === 'Échoué') return { text: 'Échoué', class: 'status-failed' }
@@ -4112,9 +4395,9 @@ const startOcrPolling = (docId) => {
   }, 4000)
 }
 
-// Legacy helper - delegates to unified getDocStatusLabel
+// Legacy helper - delegates to unified getDocStatusLabel - DEPRECATED: unused
 // NOTE: This only uses status, not tags. Prefer getDocStatusLabel when docId is available.
-const getOcrStatusLabel = (status) => {
+const _getOcrStatusLabel = (status) => {
   // Map raw OCR status to labels (for compatibility)
   const labels = { 
     0: 'En attente', 1: 'Traitement OCR', 2: 'Texte extrait', 3: 'Analyse IA', 4: 'En cours', 5: 'Échec',
@@ -4124,9 +4407,9 @@ const getOcrStatusLabel = (status) => {
   return labels[status] || 'En cours'
 }
 
-// Legacy helper - delegates to unified getDocStatusClass
+// Legacy helper - delegates to unified getDocStatusClass - DEPRECATED: unused
 // NOTE: This only uses status, not tags. Prefer getDocStatusClass when docId is available.
-const getOcrStatusClass = (status) => {
+const _getOcrStatusClass = (status) => {
   const classes = {
     0: 'status-pending', 1: 'status-processing', 2: 'status-processing', 3: 'status-processing', 4: 'status-processing', 5: 'status-failed',
     'Pending': 'status-pending', 'Processing': 'status-processing', 'TextExtracted': 'status-processing', 
@@ -4135,7 +4418,8 @@ const getOcrStatusClass = (status) => {
   return classes[status] || 'status-processing'
 }
 
-const fetchDocOcrStatus = async (docId) => {
+// DEPRECATED: unused
+const _fetchDocOcrStatus = async (docId) => {
   try {
     console.log('[Pipeline Status] Fetching for:', docId)
     const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: jsonHeaders() })
@@ -4176,9 +4460,9 @@ const isDocumentFullyComplete = (docId) => {
 }
 
 /**
- * Count fully complete documents from unified state
+ * Count fully complete documents from unified state - DEPRECATED: unused
  */
-const getFullyCompleteCount = (docs) => {
+const _getFullyCompleteCount = (docs) => {
   return docs.filter(d => isDocumentFullyComplete(d.id)).length
 }
 
@@ -4376,8 +4660,8 @@ const startDocListPolling = async () => {
           // Check if tags were added
           const tagsJustUpdated = newTagsCount > 0 && newTagsCount !== oldTags.length && !docTagsUpdated.value[doc.id]
           
-          // Update unified completion state
-          const justBecameComplete = updateDocCompletionState(doc.id, ocrData.status, newTagsCount, doc.status)
+          // Update unified completion state (result unused but function called for side effects)
+          updateDocCompletionState(doc.id, ocrData.status, newTagsCount, doc.status)
           
           if (tagsJustUpdated || ocrData.extractedText) {
             // Patch doc in documents.value
@@ -4474,10 +4758,11 @@ const viewDocument = async (doc) => {
   documentContent.value = null
   documentUrl.value = null
   ocrStatus.value = null
-  viewerTab.value = 'preview'
+  viewerTab.value = 'details'  // Default to details (not preview) so right panel always shows
   officeMode.value = 'text'
   editSuccess.value = ''
   editError.value = ''
+  processingHistory.value = []  // Reset history
 
   try {
     const r = await fetch(`/api/documents/${doc.id}`, { headers: jsonHeaders() })
@@ -4492,6 +4777,9 @@ const viewDocument = async (doc) => {
     }
     populateEditData(currentDocument.value)
   } catch { /* non-fatal */ }
+
+  // Fetch processing history for this document
+  await fetchProcessingHistory(doc.id)
 
   const dlPath  = `/api/documents/${doc.id}/download`
   const ocrPath = `/api/documents/${doc.id}/ocr-status`
@@ -4527,9 +4815,11 @@ const closeDocumentViewer = () => {
   documentUrl.value = null
   documentContent.value = null
   ocrStatus.value = null
+  processingHistory.value = []
 }
 
-const deleteDocFromViewer = async () => {
+// DEPRECATED: unused - keeping for potential future use
+const _deleteDocFromViewer = async () => {
   if (!currentDocument.value) return
   if (!confirm(`Supprimer "${currentDocument.value.title}" ? Cette action est irréversible.`)) return
   const res = await fetch(`/api/documents/${currentDocument.value.id}`, { method: 'DELETE', headers: jsonHeaders() })
@@ -4841,7 +5131,7 @@ const formatDateLong = (d) => {
   if (!d) return '—'
   try { return new Date(d).toLocaleString('fr-FR') } catch { return d }
 }
-const statusClass = (s) => ({ Indexed: 'active', Failed: 'danger', Processing: 'warning', Pending: 'warning' }[s] || 'inactive')
+const _statusClass = (s) => ({ Indexed: 'active', Failed: 'danger', Processing: 'warning', Pending: 'warning' }[s] || 'inactive')
 const roleLabel   = (r) => ({ Admin: 'Admin', Manager: 'Responsable', User: 'Utilisateur', ReadOnly: 'Lecture seule' }[r] || r)
 const roleClass   = (r) => ({ Admin: 'role-admin', Manager: 'role-manager', User: 'role-user', ReadOnly: 'role-readonly' }[r] || '')
 const initials    = (u) => (u.fullName || u.username || '?').split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
@@ -5026,15 +5316,30 @@ onMounted(async () => {
 onUnmounted(() => {
   stopDocListPolling()
   stopOcrPolling()
+  stopPendingPoll()
 })
 </script>
+
+<style>
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(4px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+</style>
 
 <style scoped>
 /* ── Layout ─────────────────────────────────────────────────────────────────── */
 .admin-layout { display: flex; min-height: 100vh; background: #f1f5f9; font-family: 'Segoe UI', system-ui, sans-serif; }
 
 /* ── Sidebar ────────────────────────────────────────────────────────────────── */
-.sidebar { width: 240px; min-height: 100vh; background: #0f172a; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.sidebar { width: 240px; min-height: 100vh; background: #0f172a; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; z-index: 10; }
 .sidebar-brand { display: flex; align-items: center; gap: .75rem; padding: 1.25rem 1rem; border-bottom: 1px solid #1e293b; }
 .brand-icon { width: 36px; height: 36px; background: linear-gradient(135deg, #3b82f6, #8b5cf6); border-radius: 10px; display: flex; align-items: center; justify-content: center; }
 .brand-icon svg { width: 20px; height: 20px; color: white; }
@@ -5198,7 +5503,7 @@ onUnmounted(() => {
 .muted { color: #6b7280; font-size: .85rem; }
 
 /* ── Viewer Modal ────────────────────────────────────────────────────────────── */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); z-index: 500; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 1rem; isolation: isolate; }
 .viewer-modal { background: white; border-radius: 18px; box-shadow: 0 30px 60px -12px rgba(0,0,0,.3); width: 100%; max-width: 1100px; height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
 
 /* Viewer header */
@@ -5221,6 +5526,7 @@ onUnmounted(() => {
 .hdr-delete:hover { border-color: #fca5a5; color: #dc2626; background: #fef2f2; }
 
 .tab-switcher { display: flex; gap: .25rem; background: #f1f5f9; border-radius: 8px; padding: .25rem; }
+.viewer-tabs { display: flex; gap: .25rem; background: #f1f5f9; border-radius: 8px; padding: .25rem; }
 .tab-btn { display: flex; align-items: center; gap: .35rem; padding: .35rem .75rem; border-radius: 6px; border: none; background: none; font-size: .78rem; cursor: pointer; color: #64748b; transition: all .15s; }
 .tab-btn svg { width: 14px; height: 14px; }
 .tab-btn.active { background: white; color: #111827; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
@@ -5271,7 +5577,31 @@ onUnmounted(() => {
 .unsupported-viewer code { font-size: .75rem; font-family: monospace; background: #f3f4f6; padding: .3rem .65rem; border-radius: 5px; color: #374151; }
 
 /* Details pane */
-.viewer-details-pane { overflow-y: auto; display: flex; flex-direction: column; background: #fafafa; }
+.viewer-details-pane { display: flex; overflow-y: auto; flex-direction: column; background: #fafafa; }
+
+/* Ensure inline style takes precedence - empty placeholder classes */
+.viewer-details-panel { }
+.viewer-history-panel { }
+
+/* Processing history timeline */
+.history-timeline { display: flex; flex-direction: column; padding: 1rem; gap: 0; }
+.timeline-item { display: flex; gap: 0.75rem; position: relative; padding-bottom: 1rem; }
+.timeline-item:last-child { padding-bottom: 0; }
+.timeline-marker { display: flex; flex-direction: column; align-items: center; flex-shrink: 0; width: 20px; }
+.marker-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #e5e7eb; background: #fff; z-index: 1; }
+.marker-line { width: 2px; flex: 1; min-height: 20px; background: #e5e7eb; margin-top: 4px; }
+.timeline-item.completed .marker-dot { background: #22c55e; border-color: #22c55e; }
+.timeline-item.completed .marker-line { background: #22c55e; }
+.timeline-item.failed .marker-dot { background: #ef4444; border-color: #ef4444; }
+.timeline-item.failed .marker-line { background: #ef4444; }
+.timeline-item.processing .marker-dot { background: #f59e0b; border-color: #f59e0b; animation: blink 1s ease infinite; }
+.timeline-item.processing .marker-line { background: #f59e0b; }
+.timeline-content { flex: 1; min-width: 0; }
+.timeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; }
+.timeline-stage { font-size: 0.85rem; font-weight: 600; color: #111827; }
+.timeline-duration { font-size: 0.75rem; color: #6b7280; font-family: monospace; }
+.timeline-time { font-size: 0.75rem; color: #9ca3af; }
+.timeline-error { font-size: 0.75rem; color: #dc2626; background: #fef2f2; padding: 0.5rem; border-radius: 6px; margin-top: 0.5rem; }
 
 /* OCR status bar */
 .ocr-status-bar { display: flex; align-items: center; gap: .5rem; padding: .55rem 1rem; font-size: .76rem; font-weight: 600; flex-shrink: 0; }
@@ -5322,12 +5652,15 @@ onUnmounted(() => {
 .edit-banner.error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
 
 /* ── Mobile tab switching ────────────────────────────────────────────────────── */
-@media (min-width: 900px) { .tab-hidden { display: flex !important; } .tab-switcher { display: none; } }
+@media (min-width: 900px) { 
+  /* .viewer-details-pane controlled by Vue inline style */
+}
 @media (max-width: 899px) {
   .viewer-body { grid-template-columns: 1fr; }
   .viewer-preview-pane { border-right: none; border-bottom: 1px solid #e5e7eb; height: 55vh; }
   .viewer-details-pane { height: auto; max-height: 35vh; }
   .tab-hidden { display: none !important; }
+  .viewer-tabs { display: none; }
 }
 
 /* ── Upload modal ────────────────────────────────────────────────────────────── */
@@ -5339,6 +5672,11 @@ onUnmounted(() => {
 .file-preview-item .file-emoji { font-size: 1.5rem; }
 .file-preview-item .doc-name { font-weight: 500; color: #1f2937; font-size: .875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-preview-item .muted { font-size: .75rem; color: #6b7280; }
+.file-order-controls { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 28px; }
+.order-btn { padding: 1px 5px; font-size: 9px; background: #e5e7eb; border: none; border-radius: 3px; cursor: pointer; color: #6b7280; }
+.order-btn:hover:not(:disabled) { background: #d1d5db; }
+.order-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.file-order-num { font-weight: 700; font-size: .875rem; color: #3b82f6; min-width: 18px; text-align: center; }
 
 .batch-category-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; }
 .batch-info { font-size: .8rem; color: #6b7280; margin-bottom: .75rem; }
@@ -5855,6 +6193,14 @@ onUnmounted(() => {
 .batch-error-summary { text-align: center; padding: 1rem; background: #fef2f2; border-radius: 8px; margin-bottom: 1rem; }
 .batch-error-summary p { color: #dc2626; font-weight: 600; }
 .batch-doc-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 300px; overflow-y: auto; }
+.batch-doc-list-scrollable { max-height: 400px; overflow-y: auto; }
+.batch-filter-bar { margin-bottom: 0.75rem; }
+.batch-filter-input { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 0.875rem; }
+.batch-filter-input:focus { outline: none; border-color: #3b82f6; }
+.batch-doc-reorder { display: flex; flex-direction: column; gap: 2px; }
+.reorder-btn { padding: 2px 6px; font-size: 10px; background: #e5e7eb; border: none; border-radius: 4px; cursor: pointer; color: #6b7280; }
+.reorder-btn:hover:not(:disabled) { background: #d1d5db; }
+.reorder-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .batch-doc-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; }
 .batch-doc-item.indexed { border-color: #86efac; background: #f0fdf4; }
 .batch-doc-item.processing { border-color: #bfdbfe; background: #eff6ff; }
@@ -5862,7 +6208,9 @@ onUnmounted(() => {
 .batch-doc-icon { font-size: 1.25rem; }
 .batch-doc-info { flex: 1; }
 .batch-doc-name { font-weight: 500; color: #1f2937; font-size: 0.875rem; }
+.batch-doc-category { font-size: 0.7rem; color: #6b7280; }
 .batch-doc-stage { font-size: 0.75rem; color: #6b7280; }
+.queue-pos-badge { background: #fef3c7; padding: 2px 6px; border-radius: 4px; font-weight: 600; color: #92400e; }
 .batch-doc-error { font-size: 0.75rem; color: #dc2626; }
 .batch-hint { text-align: center; font-size: 0.8rem; color: #6b7280; font-style: italic; }
 

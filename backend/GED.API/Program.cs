@@ -1,13 +1,17 @@
 using AspNetCoreRateLimit;
 using GED.API.Middleware;
 using GED.API.Services;
+using GED.API.Authorization;
 using GED.Infrastructure.Resilience;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using HealthChecks.UI.Client;
 using RabbitMQ.Client;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using GED.Core.Interfaces;
 using GED.Infrastructure.Data;
+using GED.Infrastructure.HealthChecks;
 using GED.Infrastructure.Services;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +21,7 @@ using OpenSearch.Net;
 using Serilog;
 using Polly;
 using Polly.CircuitBreaker;
+using GED.Core.Utilities;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -91,7 +96,7 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-var corsOrigins = builder.Configuration["Cors:Origins"] ?? "http://localhost:3000,http://localhost:5173";
+var corsOrigins = builder.Configuration["Cors:Origins"] ?? "http://localhost:3000,http://localhost:3001,http://localhost:5173";
 var corsOriginList = corsOrigins.Split(',', StringSplitOptions.RemoveEmptyEntries)
     .Select(o => o.Trim())
     .ToArray();
@@ -136,7 +141,7 @@ ValidateRequiredConfiguration(builder.Configuration, isDevelopment);
 var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 // Resolve environment variable placeholders like ${VAR_NAME}
-var connectionString = ResolveEnvironmentVariables(rawConnectionString ?? "");
+var connectionString = ConfigurationHelper.ResolveEnvironmentVariables(rawConnectionString ?? "");
 
 // Validate required configuration - fail fast if not set
 if (string.IsNullOrWhiteSpace(connectionString))
@@ -154,7 +159,7 @@ if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
     connectionString += $"{separator}Pooling=true;Min Pool Size=5;Max Pool Size=100;Connection Timeout=30;";
 }
 
-Log.Information("Database connection string configured (password masked): {ConnStr}", MaskConnectionString(connectionString));
+Log.Information("Database connection string configured (password masked): {ConnStr}", ConfigurationHelper.MaskConnectionString(connectionString));
 
 // AddDbContextFactory for singleton services that need DbContext (e.g., AuthService)
 builder.Services.AddDbContextFactory<GedDbContext>(options =>
@@ -201,15 +206,50 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 Log.Information("Cookie security: SameSite=Lax, SecurePolicy={SecurePolicy} (Production={IsProd})", 
     isProduction ? "Always" : "SameAsRequest", isProduction);
 
-builder.Services.AddAuthorization();
+// ── Authorization Policies ─────────────────────────────────────────────────────
+builder.Services.AddScoped<IAuthorizationHandler, CategoryAccessHandler>();
+builder.Services.AddScoped<IUserContextProvider, AuthServiceUserContextProvider>();
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("CategoryAccess", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.Requirements.Add(new CategoryAccessRequirement("category"));
+    });
+    
+    options.AddPolicy("CategoryUpload", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.Requirements.Add(new CategoryAccessRequirement("category"));
+    });
+});
 
 // ── OpenSearch ────────────────────────────────────────────────────────────────
 var opensearchUrlRaw      = builder.Configuration["OpenSearch:Url"] ?? "http://localhost:9200";
-var opensearchUrl = ResolveEnvironmentVariables(opensearchUrlRaw);
-var opensearchUsername = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Username"] ?? "");
-var opensearchPassword = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Password"] ?? "");
-var opensearchSecurityEnabledRaw = ResolveEnvironmentVariables(builder.Configuration["OpenSearch:SecurityEnabled"] ?? "false");
+var opensearchUrl = ConfigurationHelper.ResolveEnvironmentVariables(opensearchUrlRaw);
+var opensearchUsername = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Username"] ?? "");
+var opensearchPassword = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["OpenSearch:Password"] ?? "");
+var opensearchSecurityEnabledRaw = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["OpenSearch:SecurityEnabled"] ?? "false");
 var opensearchSecurityEnabled = bool.TryParse(opensearchSecurityEnabledRaw, out var osSec) && osSec;
+
+// ── Embedding Configuration ─────────────────────────────────────────────────────
+// Embedding model and dimensions must match. Changing the model requires a full reindex.
+// Current models:
+// - nomic-embed-text: 768 dimensions
+// - bge-m3: 1024 dimensions
+var embedModel = builder.Configuration["Embeddings:Model"] ?? "nomic-embed-text";
+var embedDimensions = builder.Configuration.GetValue<int>("Embeddings:Dimensions", 768);
+
+if (embedModel != "nomic-embed-text")
+{
+    Log.Warning("⚠️  EMBEDDING MODEL CHANGED to '{Model}' ({Dimensions} dimensions). " +
+                "A FULL REINDEX is required! Existing vectors will not match queries. " +
+                "Consider running: POST /api/admin/reindex-all",
+                embedModel, embedDimensions);
+}
+
+Log.Information("Embedding model: {Model}, dimensions: {Dimensions}", embedModel, embedDimensions);
 
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
@@ -237,9 +277,9 @@ if (isDevelopment)
 builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connectionSettings));
 
 // ── RabbitMQ ──────────────────────────────────────────────────────────────────
-var rabbitMqHost = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Host"] ?? "localhost");
-var rabbitMqUser = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Username"] ?? "admin");
-var rabbitMqPass = ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Password"] ?? "");
+var rabbitMqHost = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Host"] ?? "localhost");
+var rabbitMqUser = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Username"] ?? "admin");
+var rabbitMqPass = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Password"] ?? "");
 var rabbitMqPort = builder.Configuration.GetValue<int>("RabbitMQ:Port", 5672);
 Log.Information("RabbitMQ configured: Host={Host}, Port={Port}, User={User}", rabbitMqHost, rabbitMqPort, rabbitMqUser);
 
@@ -251,11 +291,14 @@ builder.Services.AddSingleton<RabbitMqService>(sp =>
 builder.Services.AddSingleton<IMessageQueueService>(sp =>
     sp.GetRequiredService<RabbitMqService>());
 
+// ── RabbitMQ Queue Declaration (idempotent, ensures queues exist on startup) ───
+builder.Services.AddHostedService<RabbitMqQueueInitService>();
+
 // ── Redis ─────────────────────────────────────────────────────────────────────
-var redisEnabledRaw = ResolveEnvironmentVariables(builder.Configuration["Redis:Enabled"] ?? "true");
+var redisEnabledRaw = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["Redis:Enabled"] ?? "true");
 var redisEnabled = bool.TryParse(redisEnabledRaw, out var rEn) && rEn;
 var redisConnectionStrRaw = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
-var redisConnectionStr = ResolveEnvironmentVariables(redisConnectionStrRaw);
+var redisConnectionStr = ConfigurationHelper.ResolveEnvironmentVariables(redisConnectionStrRaw);
 
 if (redisEnabled)
 {
@@ -306,6 +349,9 @@ builder.Services.AddScoped<ITextExtractionService>(sp =>
 var ollamaPolicy = OllamaResiliencePolicies.Combined(timeoutSeconds: 90);
 
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
+builder.Services.AddScoped<IDocumentStorageService, DocumentStorageService>();
+builder.Services.AddSingleton<IConfigurationService>(sp => 
+    new ConfigurationService(sp.GetRequiredService<IConfiguration>()));
 
 builder.Services.AddHttpClient<NlpService>(client =>
 {
@@ -385,11 +431,12 @@ builder.Services.AddScoped<IOcrService>(sp => new OcrmyPdfOcrService(
     sp.GetRequiredService<IMessageQueueService>(),
     builder.Configuration["OCR:OcrmypdfPath"] ?? "ocrmypdf"
 ));
-builder.Services.AddScoped<TesseractDirectOcrService>(sp =>
-    new TesseractDirectOcrService(
-        sp.GetRequiredService<ILogger<TesseractDirectOcrService>>(),
-        sp.GetRequiredService<IMessageQueueService>(),
-        builder.Configuration["OCR:TesseractPath"] ?? "tesseract"
+
+// ImageOcrService - uses ocrmypdf directly on images (replaces standalone Tesseract)
+builder.Services.AddScoped<ImageOcrService>(sp =>
+    new ImageOcrService(
+        sp.GetRequiredService<ILogger<ImageOcrService>>(),
+        builder.Configuration["OCR:OcrmypdfPath"] ?? "ocrmypdf"
     ));
 
 builder.Services.AddScoped<IDocumentService, DocumentService>();
@@ -413,18 +460,11 @@ if (workerType == "ocr")
 }
 else
 {
-    // API server - run all background services including OutboxRelay
-    // OCR workers are handled by dedicated ocr-worker services
+    // API server - run OutboxRelay for message delivery
+    // Maintenance services (AutoReindex, DocumentExpiration) run in dedicated scheduler container
+    // OCR workers and Indexing workers run in their own containers
     builder.Services.AddHostedService<OutboxRelayService>();
-    builder.Services.AddHostedService(sp => new IndexingWorkerService(
-        sp.GetRequiredService<IServiceProvider>(),
-        sp.GetRequiredService<ILogger<IndexingWorkerService>>(),
-        sp.GetRequiredService<IConfiguration>(),
-        rabbitMqHost, rabbitMqUser, rabbitMqPass
-    ));
-    builder.Services.AddHostedService<AutoReindexService>();
-    builder.Services.AddHostedService<DocumentExpirationService>();
-    Log.Information("🌐 Starting in API mode with OutboxRelay and IndexingWorker");
+    Log.Information("Starting in API mode with OutboxRelay (maintenance services run separately)");
 }
 builder.Services.AddHttpClient("webhook", client =>
 {
@@ -454,23 +494,133 @@ builder.Services.AddHealthChecks()
         return conn;
     },
         name: "rabbitmq", tags: new[] { "messaging", "critical" },
-        timeout: TimeSpan.FromSeconds(5));
+        timeout: TimeSpan.FromSeconds(5))
+    .AddCheck<RabbitMqBackpressureHealthCheck>("rabbitmq-backpressure", 
+        tags: new[] { "messaging", "backpressure" },
+        timeout: TimeSpan.FromSeconds(10));
 
 // =============================================================================
 var app = builder.Build();
 // =============================================================================
 
+// ── Database Migration (handles both fresh DB and existing init_schema.sql DB) ──
 try
 {
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
-    Log.Information("⏳ Applying EF Core migrations...");
-    await db.Database.MigrateAsync();
-    Log.Information("✅ EF Core migrations applied");
+    
+    // Step 1: Ensure missing columns exist (for DBs created by init_schema.sql)
+    await db.Database.ExecuteSqlRawAsync(@"
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('documents') AND name = 'DateConfidenceScore')
+            ALTER TABLE documents ADD DateConfidenceScore real NULL;
+        
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('outbox_messages') AND name = 'priority')
+            ALTER TABLE outbox_messages ADD priority int NULL;
+        
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('documents') AND name = 'file_hash')
+            ALTER TABLE documents ADD file_hash nvarchar(64) NULL;
+    ");
+    
+    // Step 2: Ensure missing tables exist
+    await db.Database.ExecuteSqlRawAsync(@"
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'document_versions')
+        BEGIN
+            CREATE TABLE document_versions (
+                id uniqueidentifier NOT NULL PRIMARY KEY,
+                document_id uniqueidentifier NOT NULL,
+                version_number int NOT NULL,
+                title nvarchar(500) NULL,
+                description nvarchar(2000) NULL,
+                file_name nvarchar(500) NULL,
+                file_size bigint NULL,
+                content_type nvarchar(200) NULL,
+                category nvarchar(200) NULL,
+                tags nvarchar(max) NULL,
+                metadata nvarchar(max) NULL,
+                changed_by nvarchar(500) NULL,
+                change_reason nvarchar(1000) NULL,
+                created_at datetime2 NOT NULL,
+                file_path nvarchar(max) NULL
+            );
+            CREATE UNIQUE INDEX ix_versions_doc_version ON document_versions(document_id, version_number);
+            CREATE INDEX ix_versions_document_id ON document_versions(document_id);
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'processing_history')
+        BEGIN
+            CREATE TABLE processing_history (
+                id uniqueidentifier NOT NULL PRIMARY KEY,
+                document_id uniqueidentifier NOT NULL,
+                timestamp datetime2 NOT NULL,
+                stage nvarchar(100) NOT NULL,
+                status nvarchar(50) NOT NULL,
+                message nvarchar(max) NULL,
+                duration_ms bigint NULL
+            );
+            CREATE INDEX ix_processing_history_doc ON processing_history(document_id, timestamp);
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'users')
+        BEGIN
+            CREATE TABLE users (
+                id uniqueidentifier NOT NULL PRIMARY KEY,
+                username nvarchar(100) NOT NULL,
+                password_hash nvarchar(max) NOT NULL,
+                full_name nvarchar(200) NULL,
+                email nvarchar(200) NULL,
+                is_active bit NOT NULL,
+                created_at datetime2 NOT NULL,
+                last_login_at datetime2 NULL,
+                role nvarchar(max) NOT NULL,
+                allowed_categories nvarchar(max) NULL
+            );
+            CREATE UNIQUE INDEX ix_users_username ON users(username);
+        END
+        
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'webhook_deliveries')
+        BEGIN
+            CREATE TABLE webhook_deliveries (
+                Id uniqueidentifier NOT NULL PRIMARY KEY,
+                WebhookConfigId uniqueidentifier NULL,
+                Event nvarchar(max) NOT NULL,
+                Payload nvarchar(max) NULL,
+                ResponseStatusCode int NULL,
+                ResponseBody nvarchar(max) NULL,
+                AttemptNumber int NOT NULL,
+                Succeeded bit NOT NULL,
+                ErrorMessage nvarchar(max) NULL,
+                DurationMs bigint NOT NULL,
+                CreatedAt datetime2 NOT NULL
+            );
+        END
+    ");
+    
+    // Step 3: Ensure __EFMigrationsHistory table exists and seed it if empty
+    await db.Database.ExecuteSqlRawAsync(@"
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '__EFMigrationsHistory')
+        BEGIN
+            CREATE TABLE __EFMigrationsHistory (
+                MigrationId nvarchar(150) NOT NULL PRIMARY KEY,
+                ProductVersion nvarchar(32) NOT NULL
+            );
+        END
+        
+        IF NOT EXISTS (SELECT * FROM __EFMigrationsHistory)
+        BEGIN
+            INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) VALUES 
+                ('20260313104638_InitialCreate', '8.0.0');
+            INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) VALUES 
+                ('20260403081357_AddDateConfidenceScore', '8.0.0');
+            INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) VALUES 
+                ('20260403085805_AddFileHashUniqueIndex', '8.0.0');
+        END
+    ");
+    
+    Log.Information("✅ Database schema validated and synchronized");
 }
 catch (Exception ex)
 {
-    Log.Error(ex, "❌ EF Core migration failed.");
+    Log.Error(ex, "❌ Database migration/validation failed.");
 }
 
 // ── OpenSearch index init ─────────────────────────────────────────────────────
@@ -520,7 +670,7 @@ try
                     .Keyword(k => k.Name("createdByUserId"))    // uploader username/id
                     .KnnVector(k => k
                         .Name("embedding")
-                        .Dimension(768)
+                        .Dimension(embedDimensions)
                         .Method(mm => mm
                             .Name("hnsw")
                             .SpaceType("cosinesimil")
@@ -587,7 +737,7 @@ try
                     .Keyword(k => k.Name("tags"))
                     .KnnVector(k => k
                         .Name("embedding")
-                        .Dimension(768)
+                        .Dimension(embedDimensions)
                         .Method(mm => mm
                             .Name("hnsw")
                             .SpaceType("cosinesimil")
@@ -679,80 +829,26 @@ app.MapControllers();
 Log.Information("GED Search Engine API starting...");
 Log.Information("OpenSearch:  {Url}", opensearchUrl);
 Log.Information("RabbitMQ:   {Host}", rabbitMqHost);
-Log.Information("SQL Server: {ConnStr}", MaskConnectionString(connectionString));
+Log.Information("SQL Server: {ConnStr}", ConfigurationHelper.MaskConnectionString(connectionString));
 
 app.Run();
 
 public partial class Program
 {
-    private static string MaskConnectionString(string connectionString)
-    {
-        if (string.IsNullOrEmpty(connectionString))
-            return "(empty)";
-
-        try
-        {
-            var parts = connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries);
-            var maskedParts = parts.Select(part =>
-            {
-                var key = part.Split('=', 2)[0].Trim();
-                if (key.Equals("password", StringComparison.OrdinalIgnoreCase) ||
-                    key.Equals("pwd", StringComparison.OrdinalIgnoreCase))
-                    return "Password=****";
-                if (key.Equals("user id", StringComparison.OrdinalIgnoreCase) ||
-                    key.Equals("user", StringComparison.OrdinalIgnoreCase) ||
-                    key.Equals("uid", StringComparison.OrdinalIgnoreCase))
-                    return "User Id=****";
-                return part;
-            });
-            return string.Join(";", maskedParts);
-        }
-        catch
-        {
-            return "**** (masking failed)";
-        }
-    }
-
-    /// <summary>
-    /// Resolves environment variable placeholders in the format ${VAR_NAME} or ${VAR_NAME:-default}.
-    /// </summary>
-    private static string ResolveEnvironmentVariables(string value)
-    {
-        if (string.IsNullOrEmpty(value))
-            return value;
-
-        return System.Text.RegularExpressions.Regex.Replace(
-            value,
-            @"\$\{([^}:]+)(?::-([^}]*))?\}",
-            match =>
-            {
-                var varName = match.Groups[1].Value;
-                var defaultValue = match.Groups[2].Success ? match.Groups[2].Value : "";
-                return Environment.GetEnvironmentVariable(varName) ?? defaultValue;
-            });
-    }
-
-    /// <summary>
-    /// Validates required environment variables in non-development environments.
-    /// Fails fast if critical configuration is missing.
-    /// </summary>
     private static void ValidateRequiredConfiguration(IConfiguration configuration, bool isDevelopment)
     {
         var errors = new List<string>();
         
-        // Database connection - critical in production
-        var dbConn = ResolveEnvironmentVariables(configuration.GetConnectionString("DefaultConnection") ?? "");
+        var dbConn = ConfigurationHelper.ResolveEnvironmentVariables(configuration.GetConnectionString("DefaultConnection") ?? "");
         if (string.IsNullOrWhiteSpace(dbConn) && !isDevelopment)
             errors.Add("ConnectionStrings__DefaultConnection (database)");
         
-        // RabbitMQ - critical
-        var rabbitHost = ResolveEnvironmentVariables(configuration["RabbitMQ:Host"] ?? "");
+        var rabbitHost = ConfigurationHelper.ResolveEnvironmentVariables(configuration["RabbitMQ:Host"] ?? "");
         if (string.IsNullOrWhiteSpace(rabbitHost) && !isDevelopment)
             errors.Add("RabbitMQ:Host");
         
-        // OpenSearch - critical
-        var opensearchUrl = ResolveEnvironmentVariables(configuration["OpenSearch:Url"] ?? "");
-        if (string.IsNullOrWhiteSpace(opensearchUrl) && !isDevelopment)
+        var osUrl = ConfigurationHelper.ResolveEnvironmentVariables(configuration["OpenSearch:Url"] ?? "");
+        if (string.IsNullOrWhiteSpace(osUrl) && !isDevelopment)
             errors.Add("OpenSearch:Url");
         
         if (errors.Any())

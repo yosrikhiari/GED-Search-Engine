@@ -1,3 +1,4 @@
+using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;

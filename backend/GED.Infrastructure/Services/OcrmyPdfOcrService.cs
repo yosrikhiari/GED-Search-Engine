@@ -25,7 +25,7 @@ namespace GED.Infrastructure.Services;
 /// </para>
 /// 
 /// <para>
-/// For standalone image files (JPEG, PNG, etc.) use <see cref="TesseractDirectOcrService"/>.
+/// For standalone image files (JPEG, PNG, etc.) use <see cref="ImageOcrService"/>.
 /// For native PDF text extraction, the <see cref="OcrWorkerService"/> skips this service entirely.
 /// </para>
 /// 

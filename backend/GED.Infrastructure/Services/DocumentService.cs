@@ -22,9 +22,10 @@ namespace GED.Infrastructure.Services;
 ///     </description>
 ///   </item>
 ///   <item>
-///     <term>File Storage</term>
+///     <term>File Storage Delegation</term>
 ///     <description>
-///       Persists uploaded files to the local filesystem with content-addressable naming.
+///       Delegates file storage to <see cref="IDocumentStorageService"/> which handles
+///       temp path pattern for atomic uploads.
 ///     </description>
 ///   </item>
 ///   <item>
@@ -52,7 +53,7 @@ namespace GED.Infrastructure.Services;
 public class DocumentService : IDocumentService
 {
     private readonly ILogger<DocumentService> _logger;
-    private readonly IStorageService _storageService;
+    private readonly IDocumentStorageService _documentStorage;
     private readonly ITextExtractionService _textExtractionService;
     private readonly DocumentDateExtractor? _dateExtractor;
 
@@ -68,15 +69,16 @@ public class DocumentService : IDocumentService
     private readonly GedDbContext _db;
 
     /// <summary>
-    /// Base directory path for file storage.
+    /// Minimum confidence threshold for accepting extracted date.
+    /// Read from configuration (OCR:DateConfidenceThreshold), defaults to 0.7.
     /// </summary>
-    private readonly string _basePath;
+    private readonly float _dateConfidenceThreshold;
 
     /// <summary>
     /// Initializes a new instance of <see cref="DocumentService"/>.
     /// </summary>
     /// <param name="logger">Logger for service events.</param>
-    /// <param name="storageService">Service for file storage operations.</param>
+    /// <param name="documentStorage">Service for document file storage with temp path pattern.</param>
     /// <param name="textExtractionService">Service for extracting text from documents.</param>
     /// <param name="db">Entity Framework database context.</param>
     /// <param name="ingestionPipeline">Pipeline for document enrichment steps.</param>
@@ -84,21 +86,20 @@ public class DocumentService : IDocumentService
     /// <param name="configuration">Application configuration.</param>
     public DocumentService(
         ILogger<DocumentService> logger,
-        IStorageService storageService,
+        IDocumentStorageService documentStorage,
         ITextExtractionService textExtractionService,
         GedDbContext db,
         DocumentIngestionPipeline ingestionPipeline,
-        DocumentDateExtractor? dateExtractor = null,
-        IConfiguration? configuration = null)
+        DocumentDateExtractor? dateExtractor,
+        Microsoft.Extensions.Configuration.IConfiguration configuration)
     {
         _logger = logger;
-        _storageService = storageService;
+        _documentStorage = documentStorage;
         _textExtractionService = textExtractionService;
         _ingestionPipeline = ingestionPipeline;
         _db = db;
         _dateExtractor = dateExtractor;
-        _basePath = configuration?["Document:StoragePath"] ?? "/var/lib/ged/documents";
-        Directory.CreateDirectory(_basePath);
+        _dateConfidenceThreshold = configuration.GetValue<float>("OCR:DateConfidenceThreshold", 0.7f);
     }
 
     /// <inheritdoc />
@@ -150,24 +151,33 @@ public class DocumentService : IDocumentService
         string contentType,
         string? title = null,
         Dictionary<string, object>? metadata = null,
+        int? priority = null,
         CancellationToken cancellationToken = default)
     {
+        var documentId = Guid.NewGuid();
+        var fileExtension = Path.GetExtension(fileName);
+        StoredFile? storedFile = null;
+
         try
         {
-            var documentId = Guid.NewGuid();
-            var fileExtension = Path.GetExtension(fileName);
+            storedFile = await _documentStorage.StageFileAsync(fileStream, documentId, fileExtension, cancellationToken);
 
-            // Use UUID as filename to prevent conflicts and enable content-addressable storage
-            var storedFileName = $"{documentId}{fileExtension}";
-            var filePath = Path.Combine(_basePath, storedFileName);
+            // ── 1b. Check for duplicate based on file hash ─────────────────────────
+            var existingDoc = await _db.Documents
+                .AsNoTracking()
+                .FirstOrDefaultAsync(d => d.FileHash == storedFile.FileHash, cancellationToken);
 
-            // ── 1. Stream file to disk while computing SHA-256 hash ──────────────
-            // This is memory-efficient - uses 80KB buffer instead of loading entire file
-            fileStream.Position = 0;
-            var (savedPath, fileHash) = await fileStream.WriteToFileWithHashAsync(filePath, cancellationToken);
-            _logger.LogInformation("Document {DocumentId} saved to {Path}, hash: {Hash}", documentId, savedPath, fileHash);
+            if (existingDoc != null)
+            {
+                _logger.LogInformation(
+                    "Duplicate detected: file hash {Hash} matches existing document {DocId} ({Title}). Returning existing document.",
+                    storedFile.FileHash, existingDoc.Id, existingDoc.Title);
 
-            var fileInfo = new FileInfo(savedPath);
+                // Clean up staged file since we're not using it
+                await _documentStorage.CleanupTempFileAsync(storedFile.TempPath, cancellationToken);
+
+                return MapToDomain(existingDoc);
+            }
 
             // ── 2. Run enrichment pipeline with file stream (streaming from disk) ─
             // Instead of loading entire file into memory, we pass a FileStream
@@ -177,7 +187,7 @@ public class DocumentService : IDocumentService
             try
             {
                 await using var fileStreamForExtraction = new FileStream(
-                    savedPath,
+                    storedFile.TempPath,
                     FileMode.Open,
                     FileAccess.Read,
                     FileShare.Read,
@@ -190,6 +200,7 @@ public class DocumentService : IDocumentService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to run ingestion pipeline for document {DocumentId}", documentId);
+                await _documentStorage.CleanupTempFileAsync(storedFile.TempPath, cancellationToken);
                 throw;
             }
 
@@ -212,7 +223,7 @@ public class DocumentService : IDocumentService
                     var dateInfo = await _dateExtractor.ExtractDocumentDateAsync(
                         ingestion.ExtractedText, fileName, category ?? "Other", cancellationToken);
 
-                    if (dateInfo?.DocumentDate != null && dateInfo.Confidence > 0.5f)
+                    if (dateInfo?.DocumentDate != null && dateInfo.Confidence >= _dateConfidenceThreshold)
                     {
                         documentDate = DateTime.SpecifyKind(dateInfo.DocumentDate.Value, DateTimeKind.Utc);
                         mergedMetadata["extracted_date"] = documentDate.Value.ToString("yyyy-MM-dd");
@@ -241,10 +252,10 @@ public class DocumentService : IDocumentService
                 Title         = title ?? Path.GetFileNameWithoutExtension(fileName),
                 Description   = ingestion.Description ?? GenerateDescription(ingestion.ExtractedText, fileName),
                 FileName      = fileName,
-                FilePath      = filePath,
+                FilePath      = storedFile.FinalPath,
                 ContentType   = contentType,
-                FileSize      = fileInfo.Length,
-                FileHash      = fileHash,
+                FileSize      = storedFile.FileSize,
+                FileHash      = storedFile.FileHash,
                 CreatedAt     = uploadTime,
                 CreatedBy     = "system",
                 ModifiedAt    = uploadTime,
@@ -263,10 +274,11 @@ public class DocumentService : IDocumentService
             _db.Documents.Add(entity);
 
             // ── 6. Queue OCR job via outbox pattern ─────────────────────────
-            // Images → TesseractDirectOcrService, scanned PDFs → OcrmyPdfOcrService
+            // Images → ImageOcrService (uses ocrmypdf), scanned PDFs → OcrmyPdfOcrService
             // Both are routed inside OcrWorkerService.ProcessOcrJobAsync
             if (needsOcr)
             {
+                var correlationId = Guid.NewGuid().ToString("N")[..12];
                 var outboxMessage = new OutboxMessage
                 {
                     Id        = Guid.NewGuid(),
@@ -275,17 +287,33 @@ public class DocumentService : IDocumentService
                     {
                         JobId      = Guid.NewGuid(),
                         DocumentId = documentId,
-                        Language   = "eng+fra+ara"
+                        Language   = "eng+fra+ara",
+                        CorrelationId = correlationId
                     }),
                     CreatedAt  = uploadTime,
-                    RetryCount = 0
+                    RetryCount = 0,
+                    Priority   = priority // Set priority for queue ordering
                 };
                 _db.OutboxMessages.Add(outboxMessage);
-                _logger.LogInformation("📬 Outbox OCR job queued for document {Id}", documentId);
+                _logger.LogInformation("📬 Outbox OCR job queued for document {Id} with priority {Priority}", documentId, priority ?? 999);
             }
 
             // Single transaction: document + outbox message + optional OCR job
             await _db.SaveChangesAsync(cancellationToken);
+
+            // ── 7. Move file from temp to final location ONLY after DB commit succeeds
+            try
+            {
+                await _documentStorage.FinalizeFileAsync(storedFile.TempPath, storedFile.FinalPath, cancellationToken);
+            }
+            catch (IOException ex)
+            {
+                // File move failed but DB is committed - log warning but don't fail the upload
+                // The file exists in temp and can be recovered; DB record is the source of truth
+                _logger.LogWarning(ex, 
+                    "Failed to move document {DocumentId} from temp to final location. File remains in temp: {TempPath}",
+                    documentId, storedFile.TempPath);
+            }
 
             _logger.LogInformation(
                 "📄 Document persisted to DB: ID={Id}, Title={Title}, Category={Category}, DocumentDate={DocumentDate}",
@@ -296,6 +324,12 @@ public class DocumentService : IDocumentService
         }
         catch (Exception ex)
         {
+            // Clean up temp file on failure - file never made it to final location
+            if (storedFile != null)
+            {
+                await _documentStorage.CleanupTempFileAsync(storedFile.TempPath, cancellationToken);
+            }
+
             _logger.LogError(ex, "Error uploading document");
             throw;
         }
@@ -362,8 +396,7 @@ public class DocumentService : IDocumentService
             if (entity == null) return false;
 
             // Delete physical file from storage
-            if (File.Exists(entity.FilePath))
-                File.Delete(entity.FilePath);
+            await _documentStorage.DeleteFileAsync(entity.FilePath, cancellationToken);
 
             _db.Documents.Remove(entity);
             await _db.SaveChangesAsync(cancellationToken);
@@ -386,10 +419,7 @@ public class DocumentService : IDocumentService
         var document = await GetDocumentByIdAsync(id, cancellationToken)
             ?? throw new FileNotFoundException($"Document {id} not found");
 
-        if (!File.Exists(document.FilePath))
-            throw new FileNotFoundException($"File not found: {document.FilePath}");
-
-        return File.OpenRead(document.FilePath);
+        return await _documentStorage.GetFileStreamAsync(document.FilePath, cancellationToken);
     }
 
     /// <summary>

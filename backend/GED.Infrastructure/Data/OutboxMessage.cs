@@ -40,4 +40,10 @@ public class OutboxMessage
 
     /// <summary>How many publish attempts have failed. Relay stops at 5.</summary>
     public int       RetryCount  { get; set; } = 0;
+
+    /// <summary>
+    /// Priority for queue ordering. Lower values = higher priority.
+    /// Null = default priority (processed after explicit priorities).
+    /// </summary>
+    public int?      Priority    { get; set; }
 }

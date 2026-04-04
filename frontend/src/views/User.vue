@@ -1887,6 +1887,7 @@ import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { format } from 'date-fns'
 import { logger } from '../logger.js'
+import { documents } from '../api.js'
 import AppBreadcrumb from '../shared/components/AppBreadcrumb.vue'
 
 const searchBreadcrumbs = computed(() => [
@@ -2598,43 +2599,24 @@ const uploadDocuments = async () => {
     form.append('category', fileCategories.value[i])
     
     try {
-      const r = await fetch('/api/documents/upload', { 
-        method: 'POST', 
-        headers: authHeaders(), 
-        body: form 
+      const doc = await documents.upload(form)
+      batchDocuments.value.push({
+        id: doc.id,
+        name: file.name,
+        status: 'queued', // Initial status after upload
+        stage: 'queued',
+        stageLabel: 'En attente',
+        queuePosition: null,
+        error: null,
+        category: fileCategories.value[i]
       })
+      uploadProgress.value = i + 1
       
-      if (r.ok) {
-        const doc = await r.json()
-        batchDocuments.value.push({
-          id: doc.id,
-          name: file.name,
-          status: 'queued', // Initial status after upload
-          stage: 'queued',
-          stageLabel: 'En attente',
-          queuePosition: null,
-          error: null,
-          category: fileCategories.value[i]
-        })
-        uploadProgress.value = i + 1
-        
-        // Start polling immediately after first successful upload
-        if (!pollingStarted.value) {
-          pollingStarted.value = true
-          startBatchProcessingPolling()
-          startPendingPoll() // Also start continuous pending polling
-        }
-      } else {
-        const errorData = await r.json().catch(() => ({ error: 'Upload failed' }))
-        batchDocuments.value.push({
-          id: null,
-          name: file.name,
-          status: 'failed',
-          stage: 'failed',
-          stageLabel: 'Échec',
-          queuePosition: null,
-          error: errorData.error || 'Upload failed'
-        })
+      // Start polling immediately after first successful upload
+      if (!pollingStarted.value) {
+        pollingStarted.value = true
+        startBatchProcessingPolling()
+        startPendingPoll() // Also start continuous pending polling
       }
     } catch (err) {
       batchDocuments.value.push({
@@ -2644,7 +2626,7 @@ const uploadDocuments = async () => {
         stage: 'failed',
         stageLabel: 'Échec',
         queuePosition: null,
-        error: err.message || 'Network error'
+        error: err.userMessage || err.message || 'Upload failed'
       })
     }
     await nextTick()
@@ -2740,27 +2722,19 @@ const retryFailedFiles = async () => {
     form.append('category', category)
     
     try {
-      const r = await fetch('/api/documents/upload', { 
-        method: 'POST', 
-        headers: authHeaders(), 
-        body: form 
-      })
-      
-      if (r.ok) {
-        const doc = await r.json()
-        // Update the failed document with new info
-        const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
-        if (idx !== -1) {
-          batchDocuments.value[idx] = {
-            id: doc.id,
-            name: failedDoc.name,
-            status: 'queued',
-            stage: 'queued',
-            stageLabel: 'En attente',
-            queuePosition: null,
-            error: null,
-            category: category
-          }
+      const doc = await documents.upload(form)
+      // Update the failed document with new info
+      const idx = batchDocuments.value.findIndex(d => d.name === failedDoc.name)
+      if (idx !== -1) {
+        batchDocuments.value[idx] = {
+          id: doc.id,
+          name: failedDoc.name,
+          status: 'queued',
+          stage: 'queued',
+          stageLabel: 'En attente',
+          queuePosition: null,
+          error: null,
+          category: category
         }
       }
     } catch (err) {

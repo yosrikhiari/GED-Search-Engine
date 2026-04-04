@@ -30,9 +30,11 @@ public class MetricsRegistry
         {
             meter.CreateObservableGauge<long>(
                 "ged.rabbitmq.queue.depth",
-                () => new Measurement<long>(
-                    _rabbitMqStatus.GetQueueDepth(),
-                    new KeyValuePair<string, object?>("queue", "ocr-jobs")));
+                () =>
+                {
+                    var depth = _rabbitMqStatus?.GetQueueDepth() ?? 0;
+                    return new Measurement<long>(depth, new KeyValuePair<string, object?>("queue", "ocr-jobs"));
+                });
         }
             
         _exportSizeBytes = meter.CreateHistogram<double>(

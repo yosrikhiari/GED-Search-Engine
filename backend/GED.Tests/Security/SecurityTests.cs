@@ -10,10 +10,9 @@ public class SecurityTests
     [Fact]
     public void PasswordHash_UsesPBKDF2_WithSHA256()
     {
-        var password = "TestPassword123!";
-        var saltBytes = 16;
-        var hashBytes = 32;
-        var iterations = 100_000;
+        const int saltBytes = 16;
+        const int hashBytes = 32;
+        const int iterations = 100_000;
 
         saltBytes.Should().Be(16);
         hashBytes.Should().Be(32);

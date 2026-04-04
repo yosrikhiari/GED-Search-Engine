@@ -1,5 +1,12 @@
 -- ============================================================================
--- GED Elise — SQL Server schema (Idempotent - safe to run multiple times)
+-- GED Elise — SQL Server schema (Reference artifact)
+-- ============================================================================
+-- NOTE: This file is kept for reference and manual schema inspection only.
+-- Schema management is now handled by EF Core migrations (dotnet ef migrations).
+-- The backend API runs 'Database.MigrateAsync()' on startup.
+--
+-- DO NOT run this file manually in production - use EF migrations instead.
+-- This file may become out of sync with the current codebase.
 -- ============================================================================
 
 -- ─── documents ───────────────────────────────────────────────────────────────
@@ -129,6 +136,34 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_unprocessed' AN
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_acknowledged' AND object_id = OBJECT_ID('dbo.outbox_messages'))
     CREATE INDEX ix_outbox_acknowledged ON dbo.outbox_messages (processed_at, acknowledged_at);
+
+-- Add priority column for queue ordering (for existing databases)
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.outbox_messages') AND name = 'priority')
+    ALTER TABLE dbo.outbox_messages ADD priority INT NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_outbox_priority' AND object_id = OBJECT_ID('dbo.outbox_messages'))
+    CREATE INDEX ix_outbox_priority ON dbo.outbox_messages (priority, created_at);
+GO
+
+
+-- ─── ProcessingHistory ───────────────────────────────────────────────────────────
+IF OBJECT_ID('dbo.processing_history', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.processing_history (
+        id              UNIQUEIDENTIFIER  NOT NULL PRIMARY KEY,
+        document_id     UNIQUEIDENTIFIER  NOT NULL,
+        timestamp       DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
+        stage           NVARCHAR(100)     NOT NULL,
+        status          NVARCHAR(50)      NOT NULL,
+        message         NVARCHAR(MAX),
+        duration_ms     BIGINT
+    );
+END
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_processing_history_doc' AND object_id = OBJECT_ID('dbo.processing_history'))
+    CREATE INDEX ix_processing_history_doc ON dbo.processing_history (document_id, timestamp);
+GO
 
 
 -- ─── document_groups ─────────────────────────────────────────────────────────

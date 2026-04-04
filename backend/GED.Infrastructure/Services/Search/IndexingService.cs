@@ -3,6 +3,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace GED.Infrastructure.Services.Search;
@@ -17,6 +18,7 @@ public class IndexingService
     private readonly GedDbContext _db;
     private readonly ILogger<IndexingService> _logger;
     private readonly string _documentIndex;
+    private readonly SemaphoreSlim _embeddingSemaphore;
 
     public IndexingService(
         IOpenSearchClient client,
@@ -30,6 +32,10 @@ public class IndexingService
         _db = db;
         _logger = logger;
         _documentIndex = configuration["Search:IndexName"] ?? "ged-documents";
+        
+        var maxConcurrency = configuration.GetValue<int>("Embeddings:MaxConcurrency", 4);
+        _embeddingSemaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+        _logger.LogInformation("IndexingService initialized with embedding concurrency limit: {Limit}", maxConcurrency);
     }
 
     /// <summary>
@@ -102,7 +108,7 @@ public class IndexingService
     }
 
     /// <summary>
-    /// Indexes document chunks in OpenSearch.
+    /// Indexes document chunks in OpenSearch with parallel embedding generation.
     /// </summary>
     public async Task IndexChunksAsync(
         Document document,
@@ -123,14 +129,28 @@ public class IndexingService
 
         var accessLevel = aclUserIds.Count > 0 ? "restricted" : "open";
 
+        // Generate embeddings in parallel with bounded concurrency
+        var embeddingTasks = chunks.Select(async chunk =>
+        {
+            await _embeddingSemaphore.WaitAsync(cancellationToken);
+            try
+            {
+                chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(chunk.Text, cancellationToken);
+            }
+            finally
+            {
+                _embeddingSemaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(embeddingTasks);
+
+        // Index chunks to OpenSearch (these are fast, process sequentially)
         int indexed = 0;
         foreach (var chunk in chunks)
         {
             try
             {
-                chunk.Embedding = await _nlpService.GenerateEmbeddingAsync(
-                    chunk.Text, cancellationToken);
-
                 var chunkDoc = new
                 {
                     document_id = document.Id,
