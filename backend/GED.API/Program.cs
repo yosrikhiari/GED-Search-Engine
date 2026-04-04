@@ -236,12 +236,12 @@ var opensearchSecurityEnabled = bool.TryParse(opensearchSecurityEnabledRaw, out 
 // ── Embedding Configuration ─────────────────────────────────────────────────────
 // Embedding model and dimensions must match. Changing the model requires a full reindex.
 // Current models:
+// - bge-m3: 1024 dimensions (default)
 // - nomic-embed-text: 768 dimensions
-// - bge-m3: 1024 dimensions
-var embedModel = builder.Configuration["Embeddings:Model"] ?? "nomic-embed-text";
-var embedDimensions = builder.Configuration.GetValue<int>("Embeddings:Dimensions", 768);
+var embedModel = builder.Configuration["Embeddings:Model"] ?? "bge-m3";
+var embedDimensions = builder.Configuration.GetValue<int>("Embeddings:Dimensions", 1024);
 
-if (embedModel != "nomic-embed-text")
+if (embedModel != "bge-m3")
 {
     Log.Warning("⚠️  EMBEDDING MODEL CHANGED to '{Model}' ({Dimensions} dimensions). " +
                 "A FULL REINDEX is required! Existing vectors will not match queries. " +
@@ -402,6 +402,7 @@ builder.Services.AddScoped<IAuditService, AuditService>();
 // OpenSearchService is Scoped so it can receive GedDbContext (also Scoped).
 // GedDbContext is auto-injected by the DI container — no manual wiring needed.
 builder.Services.AddScoped<OpenSearchService>();
+builder.Services.AddSingleton<IPipelineEventService, PipelineEventService>();
 builder.Services.AddScoped<ISearchService>(sp =>
 {
     var opensearch = sp.GetRequiredService<OpenSearchService>();
@@ -454,7 +455,8 @@ if (workerType == "ocr")
         sp,
         sp.GetRequiredService<ILogger<OcrWorkerService>>(),
         builder.Configuration,
-        rabbitMqHost, rabbitMqUser, rabbitMqPass
+        pipelineEventService: sp.GetService<IPipelineEventService>(),
+        rabbitHost: rabbitMqHost, rabbitUser: rabbitMqUser, rabbitPass: rabbitMqPass
     ));
     Log.Information("🏭 Starting in OCR Worker mode (prefetchCount=4, scalable)");
 }
@@ -479,25 +481,37 @@ var redisConnection  = redisConnectionStr;
 
 // ── RabbitMQ Connection (async, non-blocking) ─────────────────────────────────
 builder.Services.AddSingleton<RabbitMqConnectionService>();
+builder.Services.AddHostedService<RabbitMqConnectionService>();
 builder.Services.AddSingleton(sp => sp.GetRequiredService<RabbitMqConnectionService>().Connection!);
+
+var rabbitServiceProvider = builder.Services.BuildServiceProvider();
+var rabbitConnService = rabbitServiceProvider.GetRequiredService<RabbitMqConnectionService>();
+var rabbitLogger = rabbitServiceProvider.GetRequiredService<ILogger<RabbitMqBackpressureHealthCheck>>();
 
 builder.Services.AddHealthChecks()
     .AddSqlServer(sqlConnectionStr, name: "sqlserver", tags: new[] { "db", "critical" },
         timeout: TimeSpan.FromSeconds(3))
     .AddRedis(redisConnection, name: "redis", tags: new[] { "cache" },
         timeout: TimeSpan.FromSeconds(2))
-    .AddRabbitMQ(sp => 
+    .AddCheck("rabbitmq-backpressure", new RabbitMqBackpressureHealthCheck(
+        () => rabbitConnService.Connection,
+        rabbitLogger
+    ), tags: new[] { "messaging", "backpressure" }, timeout: TimeSpan.FromSeconds(10))
+    .AddCheck("opensearch", () =>
     {
-        var conn = sp.GetRequiredService<RabbitMqConnectionService>().Connection;
-        if (conn == null || !conn.IsOpen)
-            throw new InvalidOperationException("RabbitMQ not connected");
-        return conn;
-    },
-        name: "rabbitmq", tags: new[] { "messaging", "critical" },
-        timeout: TimeSpan.FromSeconds(5))
-    .AddCheck<RabbitMqBackpressureHealthCheck>("rabbitmq-backpressure", 
-        tags: new[] { "messaging", "backpressure" },
-        timeout: TimeSpan.FromSeconds(10));
+        try
+        {
+            using var client = new HttpClient();
+            var response = client.GetAsync(opensearchUrl + "/_cluster/health").Result;
+            if (response.IsSuccessStatusCode)
+                return HealthCheckResult.Healthy("OpenSearch is healthy");
+            return HealthCheckResult.Unhealthy("OpenSearch returned: " + response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            return HealthCheckResult.Unhealthy("OpenSearch check failed: " + ex.Message);
+        }
+    }, tags: new[] { "search" }, timeout: TimeSpan.FromSeconds(5));
 
 // =============================================================================
 var app = builder.Build();

@@ -97,7 +97,7 @@ services:
 
   # ── SQL Server init ─────────────────────────────────────────────────────────--
   # NOTE: Database schema is managed by EF Core migrations (backend API runs Database.MigrateAsync on startup)
-  # This container only creates the empty database if it doesn't exist
+  # This container creates the database and initializes the schema
   sqlserver-init:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: ged-sqlserver-init
@@ -108,7 +108,9 @@ services:
       - ged-network
     environment:
       - SA_PASSWORD=${DB_PASSWORD:-GedPass_2024!}
-    command: ["/bin/bash", "-c", "/opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -No -C -Q \"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'ged_db') CREATE DATABASE ged_db\" && echo 'Database ready for EF migrations.'"]
+    volumes:
+      - ./backend/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql
+    command: ["/bin/bash", "-c", "/opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -No -C -Q \"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'ged_db') CREATE DATABASE ged_db\" && echo 'Database created.' && /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P '${DB_PASSWORD:-GedPass_2024!}' -d ged_db -No -C -i /docker-entrypoint-initdb.d/init_schema.sql && echo 'Schema initialized.'"]
     restart: "no"
 
   # ── Redis ─────────────────────────────────────────────────────────────────────
@@ -126,6 +128,30 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  # ── OpenSearch Dashboards ───────────────────────────────────────────────────────
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.12.0
+    container_name: ged-opensearch-dashboards
+    ports:
+      - "${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    networks:
+      - ged-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
 
   # ── Apache Tika ───────────────────────────────────────────────────────────────
   tika:
@@ -177,7 +203,17 @@ services:
       - ged-network
     environment:
       - OLLAMA_HOST=ollama:11434
-    command: ["/bin/sh", "-c", "echo 'Checking existing models...' && ollama list && echo 'Pulling missing models...' && ollama list | grep -q 'mistral' || ollama pull mistral && ollama list | grep -q 'nomic-embed-text' || ollama pull nomic-embed-text && echo 'Models ready.'"]
+    command: >
+      sh -c "
+        echo 'Waiting for Ollama to be ready...' &&
+        until ollama list > /dev/null 2>&1; do
+          echo 'Waiting...' && sleep 5
+        done &&
+        echo 'Ollama ready. Checking models...' &&
+        ollama list | grep -q 'mistral' || (echo 'Pulling mistral...' && ollama pull mistral) &&
+        ollama list | grep -q 'bge-m3' || (echo 'Pulling bge-m3...' && ollama pull bge-m3) &&
+        echo 'All models ready.'
+      "
     restart: "no"
 
   # ── OCR Worker Service (scalable) ───────────────────────────────────────────────
@@ -356,8 +392,8 @@ services:
       - Document__MaxUploadSizeMB=${DOCUMENT_MAX_UPLOAD_SIZE_MB:-100}
       - ResourceSaver__Enabled=${RESOURCE_SAVER_ENABLED:-true}
       - Worker__Type=${WORKER_TYPE:-api}
-      - Embeddings__Model=${EMBEDDING_MODEL:-nomic-embed-text}
-      - Embeddings__Dimensions=${EMBEDDING_DIMENSIONS:-768}
+      - Embeddings__Model=${EMBEDDING_MODEL:-bge-m3}
+      - Embeddings__Dimensions=${EMBEDDING_DIMENSIONS:-1024}
       - Embeddings__MaxConcurrency=${EMBEDDING_MAX_CONCURRENCY:-4}
     depends_on:
       opensearch:

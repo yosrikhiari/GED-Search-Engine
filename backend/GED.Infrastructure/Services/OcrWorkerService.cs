@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -102,10 +103,11 @@ namespace GED.Infrastructure.Services;
 /// </list>
 /// </para>
 /// </summary>
-public class OcrWorkerService : BackgroundService
+public partial class OcrWorkerService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<OcrWorkerService> _logger;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     /// <summary>
     /// RabbitMQ hostname for connection.
@@ -172,12 +174,14 @@ public class OcrWorkerService : BackgroundService
         IServiceProvider serviceProvider,
         ILogger<OcrWorkerService> logger,
         IConfiguration configuration,
+        IPipelineEventService? pipelineEventService = null,
         string rabbitHost = "localhost",
         string rabbitUser = "admin",
         string rabbitPass = "admin123")
     {
         _serviceProvider = serviceProvider;
-        _logger          = logger;
+        _logger = logger;
+        _pipelineEventService = pipelineEventService;
         _resourceSaverEnabled = configuration.GetValue<bool>("ResourceSaver:Enabled", false);
         _rabbitHost      = rabbitHost;
         _rabbitUser      = rabbitUser;
@@ -334,10 +338,37 @@ public class OcrWorkerService : BackgroundService
                                 _logger.LogInformation("📄 OCR job received: jobId={JobId}, documentId={DocId}",
                                     msg.JobId, msg.DocumentId);
 
+                                var sw = Stopwatch.StartNew();
+                                var correlationId = msg.CorrelationId ?? Guid.NewGuid().ToString("N")[..12];
+                                var startEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.OcrWorker,
+                                    Status = PipelineStatuses.Started,
+                                    CorrelationId = correlationId,
+                                    DocumentId = msg.DocumentId.ToString()
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt);
+
                                 await ProcessOcrJobAsync(msg, stoppingToken);
+                                sw.Stop();
+
+                                var completedEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.OcrWorker,
+                                    Status = PipelineStatuses.Completed,
+                                    CorrelationId = correlationId,
+                                    DocumentId = msg.DocumentId.ToString(),
+                                    DurationMs = sw.ElapsedMilliseconds
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt);
+
                                 ackSent = await SafeAckAsync(channel, deliveryTag, ackSent);
 
                                 _logger.LogInformation("✅ OCR job {JobId} acked", msg.JobId);
+
+                                await UpdateOutboxAcknowledgedAsync(msg.DocumentId, stoppingToken);
                             }
                             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                             {
@@ -348,6 +379,19 @@ public class OcrWorkerService : BackgroundService
                             catch (Exception ex)
                             {
                                 _logger.LogError(ex, "❌ OCR job failed for document {DocId}", msg?.DocumentId);
+
+                                var correlationId = msg?.CorrelationId ?? Guid.NewGuid().ToString("N")[..12];
+                                var failedEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.OcrWorker,
+                                    Status = PipelineStatuses.Failed,
+                                    CorrelationId = correlationId,
+                                    DocumentId = msg?.DocumentId.ToString() ?? string.Empty,
+                                    ErrorMessage = ex.Message,
+                                    ErrorType = ex.GetType().Name
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt);
 
                                 // Nack first — if the DB call below also fails we still want
                                 // the message dead-lettered rather than stuck unacked
@@ -1135,6 +1179,37 @@ public class OcrWorkerService : BackgroundService
             _logger.LogError(ex, "Failed to mark OCR failed for {DocId}", documentId);
         }
     }
+
+    private async Task UpdateOutboxAcknowledgedAsync(Guid documentId, CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<GedDbContext>();
+
+            var outboxMessage = await db.OutboxMessages
+                .Where(m => m.Type == "OcrJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
+                .Where(m => m.Payload.Contains(documentId.ToString()))
+                .OrderBy(m => m.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+
+            if (outboxMessage != null)
+            {
+                outboxMessage.AcknowledgedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
+                _logger.LogDebug("Updated AcknowledgedAt for outbox message {Id} (document {DocId})",
+                    outboxMessage.Id, documentId);
+            }
+            else
+            {
+                _logger.LogDebug("No pending OcrJob outbox message found for document {DocId}", documentId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update AcknowledgedAt for OcrJob document {DocId}", documentId);
+        }
+    }
 }
 
 /// <summary>
@@ -1161,4 +1236,10 @@ public class OcrJobMessage
     /// Correlation ID for distributed tracing across async workers.
     /// </summary>
     public string? CorrelationId { get; set; }
+}
+
+internal static class OcrWorkerConstants
+{
+    public const int DefaultPrefetchCount = 1;
+    public const int OcrProcessingTimeoutSeconds = 300;
 }

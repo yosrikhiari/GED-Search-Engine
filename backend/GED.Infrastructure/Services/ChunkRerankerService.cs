@@ -10,7 +10,7 @@ namespace GED.Infrastructure.Services;
 /// Hybrid chunk reranker that combines semantic similarity with lexical overlap
 /// to improve RAG retrieval quality.
 ///
-/// Uses the existing embedding model (nomic-embed-text) for semantic scoring
+/// Uses the existing embedding model (bge-m3) for semantic scoring
 /// and adds keyword-based relevance scoring for better QA retrieval.
 ///
 /// Why hybrid scoring:

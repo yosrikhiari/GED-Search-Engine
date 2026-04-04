@@ -161,13 +161,16 @@ builder.Services.AddScoped<ISearchService>(sp =>
 
 builder.Services.AddScoped<DocumentChunkingService>();
 
+builder.Services.AddSingleton<IPipelineEventService, PipelineEventService>();
+
 Log.Information("OCR Worker starting...");
 
 builder.Services.AddHostedService(sp => new OcrWorkerService(
     sp,
     sp.GetRequiredService<ILogger<OcrWorkerService>>(),
     sp.GetRequiredService<IConfiguration>(),
-    rabbitMqHost, rabbitMqUser, rabbitMqPass
+    pipelineEventService: sp.GetService<IPipelineEventService>(),
+    rabbitHost: rabbitMqHost, rabbitUser: rabbitMqUser, rabbitPass: rabbitMqPass
 ));
 
 var host = builder.Build();

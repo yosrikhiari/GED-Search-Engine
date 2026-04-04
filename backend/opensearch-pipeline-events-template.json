@@ -1,0 +1,46 @@
+{
+  "index_patterns": ["ged-pipeline-events-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.knn": false
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "pipeline_stage": { "type": "keyword" },
+        "document_id": { "type": "keyword" },
+        "correlation_id": { "type": "keyword" },
+        "status": { "type": "keyword" },
+        "duration_ms": { "type": "long" },
+        "service_name": { "type": "keyword" },
+        "file_name": { "type": "keyword" },
+        "file_size_bytes": { "type": "long" },
+        "content_type": { "type": "keyword" },
+        "category": { "type": "keyword" },
+        "user_id": { "type": "keyword" },
+        "file_hash": { "type": "keyword" },
+        "duplicate_detected": { "type": "boolean" },
+        "text_length_chars": { "type": "integer" },
+        "extraction_method": { "type": "keyword" },
+        "description_source": { "type": "keyword" },
+        "initial_status": { "type": "keyword" },
+        "outbox_message_created": { "type": "boolean" },
+        "queue_name": { "type": "keyword" },
+        "retry_count": { "type": "integer" },
+        "outbox_backlog_count": { "type": "integer" },
+        "ocr_skipped": { "type": "boolean" },
+        "ocr_confidence": { "type": "float" },
+        "page_count": { "type": "integer" },
+        "llm_cleaning_used": { "type": "boolean" },
+        "tags": { "type": "keyword" },
+        "chunk_count": { "type": "integer" },
+        "embedding_model": { "type": "keyword" },
+        "embedding_dimension": { "type": "integer" },
+        "error_type": { "type": "keyword" },
+        "error_message": { "type": "text" }
+      }
+    }
+  }
+}

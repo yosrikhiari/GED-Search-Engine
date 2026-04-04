@@ -23,6 +23,7 @@ BEGIN
         file_hash           NVARCHAR(200),
         created_at          DATETIME2         NOT NULL DEFAULT GETUTCDATE(),
         document_date       DATETIME2,
+        DateConfidenceScore REAL,
         modified_at         DATETIME2,
         created_by          NVARCHAR(200),
         modified_by         NVARCHAR(200),
@@ -38,6 +39,10 @@ BEGIN
         parent_document_id  UNIQUEIDENTIFIER
     );
 END
+
+-- Add DateConfidenceScore column if it doesn't exist (for existing databases)
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.documents') AND name = 'DateConfidenceScore')
+    ALTER TABLE dbo.documents ADD DateConfidenceScore REAL;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_documents_created_at'    AND object_id = OBJECT_ID('dbo.documents'))
     CREATE INDEX ix_documents_created_at    ON dbo.documents (created_at);

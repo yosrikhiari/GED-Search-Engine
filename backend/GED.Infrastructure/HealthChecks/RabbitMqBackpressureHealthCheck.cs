@@ -6,7 +6,7 @@ namespace GED.Infrastructure.HealthChecks;
 
 public class RabbitMqBackpressureHealthCheck : IHealthCheck
 {
-    private readonly Func<IConnection?> _connectionFactory;
+    private readonly Lazy<IConnection?> _connectionLazy;
     private readonly ILogger<RabbitMqBackpressureHealthCheck> _logger;
     private readonly int _warningThreshold;
     private readonly int _criticalThreshold;
@@ -17,7 +17,7 @@ public class RabbitMqBackpressureHealthCheck : IHealthCheck
         int warningThreshold = 5000,
         int criticalThreshold = 8000)
     {
-        _connectionFactory = connectionFactory;
+        _connectionLazy = new Lazy<IConnection?>(connectionFactory);
         _logger = logger;
         _warningThreshold = warningThreshold;
         _criticalThreshold = criticalThreshold;
@@ -27,14 +27,15 @@ public class RabbitMqBackpressureHealthCheck : IHealthCheck
         HealthCheckContext context,
         CancellationToken cancellationToken = default)
     {
-        var connection = _connectionFactory();
-        if (connection == null || !connection.IsOpen)
-        {
-            return HealthCheckResult.Unhealthy("RabbitMQ connection is not available");
-        }
-
         try
         {
+            var connection = _connectionLazy.Value;
+            if (connection == null || !connection.IsOpen)
+            {
+                _logger.LogDebug("RabbitMQ connection not available yet (may still be connecting)");
+                return HealthCheckResult.Healthy("RabbitMQ connecting...");
+            }
+
             var queueMetrics = new List<QueueMetric>();
             var queues = new[] { "ocr-queue", "indexing-queue" };
 
@@ -85,6 +86,7 @@ public class RabbitMqBackpressureHealthCheck : IHealthCheck
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Failed to check RabbitMQ queue depths");
             return HealthCheckResult.Unhealthy("Failed to check queue depths", ex);
         }
     }

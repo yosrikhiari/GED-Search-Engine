@@ -4,6 +4,7 @@ using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
@@ -56,6 +57,7 @@ public class DocumentService : IDocumentService
     private readonly IDocumentStorageService _documentStorage;
     private readonly ITextExtractionService _textExtractionService;
     private readonly DocumentDateExtractor? _dateExtractor;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     /// <summary>
     /// Handles all enrichment steps (text extraction, description, tags).
@@ -82,6 +84,7 @@ public class DocumentService : IDocumentService
     /// <param name="textExtractionService">Service for extracting text from documents.</param>
     /// <param name="db">Entity Framework database context.</param>
     /// <param name="ingestionPipeline">Pipeline for document enrichment steps.</param>
+    /// <param name="pipelineEventService">Optional pipeline event service for tracing.</param>
     /// <param name="dateExtractor">Optional LLM-based date extractor.</param>
     /// <param name="configuration">Application configuration.</param>
     public DocumentService(
@@ -90,16 +93,18 @@ public class DocumentService : IDocumentService
         ITextExtractionService textExtractionService,
         GedDbContext db,
         DocumentIngestionPipeline ingestionPipeline,
-        DocumentDateExtractor? dateExtractor,
-        Microsoft.Extensions.Configuration.IConfiguration configuration)
+        IPipelineEventService? pipelineEventService = null,
+        DocumentDateExtractor? dateExtractor = null,
+        Microsoft.Extensions.Configuration.IConfiguration configuration = null!)
     {
         _logger = logger;
         _documentStorage = documentStorage;
         _textExtractionService = textExtractionService;
         _ingestionPipeline = ingestionPipeline;
+        _pipelineEventService = pipelineEventService;
         _db = db;
         _dateExtractor = dateExtractor;
-        _dateConfidenceThreshold = configuration.GetValue<float>("OCR:DateConfidenceThreshold", 0.7f);
+        _dateConfidenceThreshold = configuration?.GetValue<float>("OCR:DateConfidenceThreshold", 0.7f) ?? 0.7f;
     }
 
     /// <inheritdoc />
@@ -158,9 +163,13 @@ public class DocumentService : IDocumentService
         var fileExtension = Path.GetExtension(fileName);
         StoredFile? storedFile = null;
 
+        var correlationId = (metadata?.GetValueOrDefault("correlation_id") as string)
+            ?? (metadata?.GetValueOrDefault("correlationId") as string)
+            ?? Guid.NewGuid().ToString("N")[..12];
+
         try
         {
-            storedFile = await _documentStorage.StageFileAsync(fileStream, documentId, fileExtension, cancellationToken);
+            storedFile = await _documentStorage.StageFileAsync(fileStream, documentId, fileExtension, correlationId, cancellationToken);
 
             // ── 1b. Check for duplicate based on file hash ─────────────────────────
             var existingDoc = await _db.Documents
@@ -195,7 +204,7 @@ public class DocumentService : IDocumentService
                     useAsync: true);
 
                 ingestion = await _ingestionPipeline.RunAsync(
-                    fileStreamForExtraction, fileName, contentType, category, cancellationToken);
+                    fileStreamForExtraction, fileName, contentType, category, documentId.ToString(), correlationId, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -278,7 +287,6 @@ public class DocumentService : IDocumentService
             // Both are routed inside OcrWorkerService.ProcessOcrJobAsync
             if (needsOcr)
             {
-                var correlationId = Guid.NewGuid().ToString("N")[..12];
                 var outboxMessage = new OutboxMessage
                 {
                     Id        = Guid.NewGuid(),
@@ -300,6 +308,22 @@ public class DocumentService : IDocumentService
 
             // Single transaction: document + outbox message + optional OCR job
             await _db.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation("[PipelineEvent] About to emit db_persist completed, corrId={CorrId}, serviceNull={IsNull}", correlationId, _pipelineEventService is null);
+            if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+            {
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "db_persist",
+                    DocumentId = documentId.ToString(),
+                    CorrelationId = correlationId,
+                    Status = "completed",
+                    DurationMs = 0,
+                    ServiceName = nameof(DocumentService),
+                    Category = category
+                }));
+                _logger.LogInformation("[PipelineEvent] Emit dispatched for db_persist completed");
+            }
 
             // ── 7. Move file from temp to final location ONLY after DB commit succeeds
             try

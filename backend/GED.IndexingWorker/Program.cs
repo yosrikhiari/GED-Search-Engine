@@ -105,6 +105,8 @@ builder.Services.AddScoped<ISearchService>(sp =>
 
 builder.Services.AddScoped<DocumentChunkingService>();
 
+builder.Services.AddSingleton<IPipelineEventService, PipelineEventService>();
+
 var redisEnabledRaw = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["Redis:Enabled"] ?? "true");
 var redisEnabled = bool.TryParse(redisEnabledRaw, out var rEn) && rEn;
 var redisConnectionStrRaw = builder.Configuration["Redis:ConnectionString"] ?? "localhost:6379";
@@ -135,7 +137,8 @@ builder.Services.AddHostedService(sp => new IndexingWorkerService(
     sp,
     sp.GetRequiredService<ILogger<IndexingWorkerService>>(),
     sp.GetRequiredService<IConfiguration>(),
-    rabbitMqHost, rabbitMqUser, rabbitMqPass,
+    pipelineEventService: sp.GetService<IPipelineEventService>(),
+    rabbitHost: rabbitMqHost, rabbitUser: rabbitMqUser, rabbitPass: rabbitMqPass,
     concurrencyLimit, batchSize
 ));
 

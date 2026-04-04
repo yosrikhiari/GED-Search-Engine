@@ -53,9 +53,9 @@ public class OpenSearchService : ISearchService
     private readonly string _documentIndex;
 
     /// <summary>
-    /// Embedding vector dimension (nomic-embed-text produces 768-dim vectors).
+    /// Embedding vector dimension (bge-m3 produces 1024-dim vectors).
     /// </summary>
-    private const int EmbeddingDim = 768;
+    private const int EmbeddingDim = 1024;
 
     /// <summary>
     /// Weight for BM25 scores in hybrid ranking (0.6 = 60% BM25 influence).
@@ -2147,7 +2147,7 @@ public class DocumentIndexModel
     public Dictionary<string, object>? Metadata { get; set; }
 
     /// <summary>
-    /// 768-dimensional nomic-embed-text vector for kNN search.
+    /// 1024-dimensional bge-m3 vector for kNN search.
     /// </summary>
     public float[]? Embedding { get; set; }
 

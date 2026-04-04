@@ -333,11 +333,11 @@ public class SearchServiceQualityTests
     }
 
     [Fact]
-    public void EmbeddingDimension_Is768()
+    public void EmbeddingDimension_Is1024()
     {
-        const int embeddingDim = 768;
+        const int embeddingDim = 1024;
         var testVector = new float[embeddingDim];
-        testVector.Length.Should().Be(768);
+        testVector.Length.Should().Be(1024);
     }
 
     [Fact]

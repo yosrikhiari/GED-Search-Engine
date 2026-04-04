@@ -17,7 +17,7 @@ public class NlpServiceTests
             {
                 { "NLP:Enabled", "true" },
                 { "NLP:EmbedApiEndpoint", "http://localhost:11434/api/embed" },
-                { "NLP:EmbedModel", "nomic-embed-text" }
+                { "NLP:EmbedModel", "bge-m3" }
             })
             .Build();
 

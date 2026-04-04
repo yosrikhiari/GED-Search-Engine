@@ -284,8 +284,8 @@ public class SearchServiceTests
     [Fact]
     public void EmbeddingDimension_IsCorrect()
     {
-        const int expectedDimension = 768;
-        expectedDimension.Should().Be(768);
+        const int expectedDimension = 1024;
+        expectedDimension.Should().Be(1024);
     }
 
     [Fact]

@@ -1,5 +1,7 @@
 using GED.Core.Interfaces;
+using GED.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 
 namespace GED.Infrastructure.Services;
@@ -20,6 +22,7 @@ namespace GED.Infrastructure.Services;
 /// Any step failure is logged and gracefully skipped (no silent data loss).
 /// </para>
 /// 
+/// <para>
 /// Pipeline steps (all optional, all fault-tolerant):
 ///
 /// <para>
@@ -60,12 +63,14 @@ public class DocumentIngestionPipeline
 {
     private readonly ITextExtractionService              _textExtractor;
     private readonly ILogger<DocumentIngestionPipeline>  _logger;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     /// <summary>
     /// Initializes a new instance of <see cref="DocumentIngestionPipeline"/>.
     /// </summary>
     /// <param name="textExtractor">Service for extracting text from documents.</param>
     /// <param name="logger">Logger for pipeline events.</param>
+    /// <param name="pipelineEventService">Optional pipeline event service for tracing.</param>
     /// <param name="dateExtractor">
     ///   (Deprecated) Kept for DI compatibility. Date extraction is now handled
     ///   asynchronously by <see cref="OcrWorkerService"/>.
@@ -73,10 +78,12 @@ public class DocumentIngestionPipeline
     public DocumentIngestionPipeline(
         ITextExtractionService textExtractor,
         ILogger<DocumentIngestionPipeline> logger,
+        IPipelineEventService? pipelineEventService = null,
         DocumentDateExtractor? dateExtractor = null)
     {
         _textExtractor = textExtractor;
         _logger        = logger;
+        _pipelineEventService = pipelineEventService;
     }
 
     /// <summary>
@@ -126,31 +133,104 @@ public class DocumentIngestionPipeline
         string?           category,
         CancellationToken ct = default)
     {
+        return await RunAsync(fileStream, fileName, contentType, category, null, null, ct);
+    }
+
+    public async Task<IngestionResult> RunAsync(
+        Stream            fileStream,
+        string            fileName,
+        string            contentType,
+        string?           category,
+        string?           documentId,
+        string?           correlationId,
+        CancellationToken ct = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
         var metadata = new Dictionary<string, object>();
 
-        // Reset stream position if seekable
-        if (fileStream.CanSeek)
-            fileStream.Position = 0;
+        _logger.LogInformation("[PipelineEvent] Ingestion: correlationId={CorrId}, serviceNull={IsNull}", correlationId, _pipelineEventService is null);
 
-        // Step 1: Extract text (fast — Tika or built-in parser)
-        var extractedText = await ExtractTextSafeAsync(fileStream, contentType, ct);
+        if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+        {
+            _logger.LogInformation("[PipelineEvent] About to emit ingestion started");
+            _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+            {
+                PipelineStage = "ingestion",
+                DocumentId = documentId ?? "",
+                CorrelationId = correlationId,
+                Status = "started",
+                DurationMs = 0,
+                ServiceName = nameof(DocumentIngestionPipeline)
+            }));
+            _logger.LogInformation("[PipelineEvent] Emit dispatched for ingestion started");
+        }
 
-        // Step 2: Generate description (synchronous, no LLM)
-        var description = GenerateDescription(extractedText, fileName);
+        try
+        {
+            // Reset stream position if seekable
+            if (fileStream.CanSeek)
+                fileStream.Position = 0;
 
-        // Step 3: Tags are NOT generated here anymore
-        // Tags are generated later by OcrWorkerService after OCR completes
+            // Step 1: Extract text (fast — Tika or built-in parser)
+            var extractedText = await ExtractTextSafeAsync(fileStream, contentType, ct);
+            string extractionMethod = extractedText != null ? "tika" : "fallback";
 
-        // Step 4 (REMOVED): LLM date extraction was here.
-        // It blocked the upload for 5–15s. Moved to OcrWorkerService.EnrichAndSaveAsync.
-        DateTime? documentDate = null;
+            // Step 2: Generate description (synchronous, no LLM)
+            var description = GenerateDescription(extractedText, fileName);
+            string descriptionSource = !string.IsNullOrWhiteSpace(extractedText) ? "extracted" : "filename_fallback";
 
-        _logger.LogInformation(
-            "✅ Ingestion complete for '{FileName}' — text={TextLen}chars (tags deferred to OCR worker)",
-            fileName,
-            extractedText?.Length ?? 0);
+            // Step 3: Tags are NOT generated here anymore
+            // Tags are generated later by OcrWorkerService after OCR completes
 
-        return new IngestionResult(extractedText, description, documentDate, null, metadata);
+            // Step 4 (REMOVED): LLM date extraction was here.
+            // It blocked the upload for 5–15s. Moved to OcrWorkerService.EnrichAndSaveAsync.
+            DateTime? documentDate = null;
+
+            stopwatch.Stop();
+
+            _logger.LogInformation(
+                "✅ Ingestion complete for '{FileName}' — text={TextLen}chars (tags deferred to OCR worker)",
+                fileName,
+                extractedText?.Length ?? 0);
+
+            if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+            {
+                _logger.LogInformation("[PipelineEvent] About to emit ingestion completed");
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "ingestion",
+                    DocumentId = documentId ?? "",
+                    CorrelationId = correlationId,
+                    Status = "completed",
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    ServiceName = nameof(DocumentIngestionPipeline),
+                    TextLengthChars = extractedText?.Length ?? 0,
+                    ExtractionMethod = extractionMethod,
+                    DescriptionSource = descriptionSource
+                }));
+                _logger.LogInformation("[PipelineEvent] Emit dispatched for ingestion completed");
+            }
+
+            return new IngestionResult(extractedText, description, documentDate, null, metadata);
+        }
+        catch (Exception ex)
+        {
+            if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+            {
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "ingestion",
+                    DocumentId = documentId ?? "",
+                    CorrelationId = correlationId,
+                    Status = "failed",
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    ServiceName = nameof(DocumentIngestionPipeline),
+                    ErrorType = ex.GetType().Name,
+                    ErrorMessage = ex.Message
+                }));
+            }
+            throw;
+        }
     }
 
     /// <summary>

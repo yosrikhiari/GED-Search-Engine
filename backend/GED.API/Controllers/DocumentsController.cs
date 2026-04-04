@@ -16,7 +16,6 @@ namespace GED.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]
 public class DocumentsController : ControllerBase
 {
     private readonly IDocumentService _documentService;
@@ -30,6 +29,7 @@ public class DocumentsController : ControllerBase
     private readonly AuthService _authService;
     private readonly IAuditService _auditService;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     private static readonly string[] AllowedCategories =
     {
@@ -50,7 +50,8 @@ public class DocumentsController : ControllerBase
         IDistributedCache cache,
         AuthService authService,
         IAuditService auditService,
-        IServiceScopeFactory scopeFactory)
+        IServiceScopeFactory scopeFactory,
+        IPipelineEventService? pipelineEventService = null)
     {
         _documentService = documentService;
         _searchService   = searchService;
@@ -63,6 +64,7 @@ public class DocumentsController : ControllerBase
         _authService     = authService;
         _auditService    = auditService;
         _scopeFactory    = scopeFactory;
+        _pipelineEventService = pipelineEventService;
         _resourceSaverEnabled = configuration.GetValue<bool>("ResourceSaver:Enabled", false);
     }
 
@@ -169,6 +171,29 @@ public async Task<ActionResult<Document>> UploadDocument(
             }
         }
 
+        // Generate correlation ID for end-to-end tracing
+        var correlationId = Guid.NewGuid().ToString("N")[..12];
+        var userId = username ?? "anonymous";
+
+        // Emit pipeline event: upload started
+        if (_pipelineEventService != null)
+        {
+            _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+            {
+                PipelineStage = "upload",
+                DocumentId = "",
+                CorrelationId = correlationId,
+                Status = "started",
+                DurationMs = 0,
+                ServiceName = nameof(DocumentsController),
+                FileName = file.FileName,
+                FileSizeBytes = file.Length,
+                ContentType = file.ContentType,
+                Category = category,
+                UserId = userId
+            }));
+        }
+
         // Sanitize filename to prevent path traversal attacks
         var sanitizedFileName = SanitizeFileName(file.FileName);
         if (sanitizedFileName != file.FileName)
@@ -185,18 +210,40 @@ public async Task<ActionResult<Document>> UploadDocument(
             using var stream = file.OpenReadStream();
             var metadata = new Dictionary<string, object>
             {
-                ["category"] = category
+                ["category"] = category,
+                ["correlation_id"] = correlationId
             };
 
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var document = await _documentService.UploadDocumentAsync(
                 stream, sanitizedFileName, file.ContentType,
                 title ?? sanitizedFileName, metadata, priority);
+            stopwatch.Stop();
 
             _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
 
+            // Emit pipeline event: upload completed
+            if (_pipelineEventService != null)
+            {
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "upload",
+                    DocumentId = document.Id.ToString(),
+                    CorrelationId = correlationId,
+                    Status = "completed",
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    ServiceName = nameof(DocumentsController),
+                    FileName = sanitizedFileName,
+                    FileSizeBytes = file.Length,
+                    ContentType = file.ContentType,
+                    Category = category,
+                    UserId = userId
+                }));
+            }
+
             if (_resourceSaverEnabled)
             {
-                await QueueIndexingJobAsync(document.Id, document.ExtractedText);
+                await QueueIndexingJobAsync(document.Id, document.ExtractedText, correlationId);
                 _logger.LogInformation("Document {DocumentId} queued for async indexing", document.Id);
             }
             else
@@ -338,6 +385,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
                     try
                     {
+                        var corrId = Guid.NewGuid().ToString("N")[..12];
                         using var scope = _scopeFactory.CreateScope();
                         var scopedDocumentService = scope.ServiceProvider.GetRequiredService<IDocumentService>();
                         var scopedSearchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
@@ -380,7 +428,7 @@ public async Task<ActionResult<Document>> UploadDocument(
                         var filePriority = priorities?.GetValueOrDefault(file.FileName);
 
                         using var stream = file.OpenReadStream();
-                        var metadata = new Dictionary<string, object> { ["category"] = category ?? "Other" };
+                        var metadata = new Dictionary<string, object> { ["category"] = category ?? "Other", ["correlation_id"] = corrId };
 
                         await SendProgress("file_progress", new { fileIndex, stage = "processing", progress = 60 });
 
@@ -412,7 +460,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
                         if (_resourceSaverEnabled)
                         {
-                            await QueueIndexingJobAsync(documentId, extractedText);
+                            await QueueIndexingJobAsync(documentId, extractedText, corrId);
                             _logger.LogInformation("Document {DocumentId} queued for async indexing", documentId);
                         }
                         else
@@ -1205,9 +1253,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         Version          = e.Version
     };
 
-    private async Task QueueIndexingJobAsync(Guid documentId, string? extractedText)
+    private async Task QueueIndexingJobAsync(Guid documentId, string? extractedText, string? correlationId = null)
     {
-        var correlationId = Guid.NewGuid().ToString("N")[..12];
+        var corrId = correlationId ?? Guid.NewGuid().ToString("N")[..12];
         var outboxMessage = new OutboxMessage
         {
             Id        = Guid.NewGuid(),
@@ -1216,7 +1264,7 @@ public async Task<ActionResult<Document>> UploadDocument(
             {
                 DocumentId   = documentId,
                 HasExtractedText = !string.IsNullOrWhiteSpace(extractedText),
-                CorrelationId = correlationId
+                CorrelationId = corrId
             }),
             CreatedAt  = DateTime.UtcNow,
             RetryCount = 0

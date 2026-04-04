@@ -31,7 +31,7 @@ namespace GED.Infrastructure.Services;
 ///     <term>Embedding generation uses Ollama</term>
 ///     <description>
 ///       The only Ollama call in the search path is <see cref="GenerateEmbeddingAsync"/>,
-///       which uses nomic-embed-text (an embedding model, not a text-generation model).
+///       which uses bge-m3 (a multilingual embedding model).
 ///       Embeddings are ~50-100ms and language-agnostic by design.
 ///     </description>
 ///   </item>
@@ -116,7 +116,7 @@ public class NlpService : INlpService
         // Embedding endpoint — separate from the generation endpoint
         _embedEndpoint = configuration["NLP:EmbedApiEndpoint"]
                          ?? "http://localhost:11434/api/embed";
-        _embedModel  = configuration["NLP:EmbedModel"] ?? "nomic-embed-text";
+        _embedModel  = configuration["NLP:EmbedModel"] ?? "bge-m3";
 
         // Warn if HttpClient doesn't have a timeout configured
         if (_httpClient.Timeout == TimeSpan.FromMilliseconds(Timeout.Infinite))
@@ -220,19 +220,19 @@ public class NlpService : INlpService
     }
 
     /// <summary>
-    /// Generates embedding vector for text using Ollama's nomic-embed-text model.
+    /// Generates embedding vector for text using Ollama's bge-m3 model.
     /// </summary>
     /// <param name="text">Text to embed.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>768-dimensional float array, or null if Ollama is unavailable.</returns>
+    /// <returns>1024-dimensional float array, or null if Ollama is unavailable.</returns>
     /// <remarks>
     /// Returns null if Ollama is unavailable — the caller (<see cref="OpenSearchService"/>)
     /// degrades gracefully to BM25-only search.
     /// 
-    /// Why nomic-embed-text?
+    /// Why bge-m3?
     /// <list type="bullet">
     ///   <item>Multilingual by training — Arabic, French, English all work natively.</item>
-    ///   <item>768 dimensions — good balance of precision vs index size.</item>
+    ///   <item>1024 dimensions — good balance of precision vs index size.</item>
     ///   <item>Fast: ~50-150ms on CPU, ~10-30ms on GPU.</item>
     ///   <item>Much faster than any text-generation model.</item>
     /// </list>
@@ -244,7 +244,7 @@ public class NlpService : INlpService
         if (!_nlpEnabled || string.IsNullOrWhiteSpace(text))
             return null;
 
-        // Truncate to ~4000 chars — nomic-embed-text context window is ~8192 tokens
+        // Truncate to ~4000 chars — bge-m3 context window is ~8192 tokens
         var input = text.Length > 4000 ? text[..4000] : text;
 
         try

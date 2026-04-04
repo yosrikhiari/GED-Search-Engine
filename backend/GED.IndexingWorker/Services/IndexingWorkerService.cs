@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -18,6 +19,7 @@ public class IndexingWorkerService : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<IndexingWorkerService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     private readonly string _rabbitHost;
     private readonly string _rabbitUser;
@@ -37,6 +39,7 @@ public class IndexingWorkerService : BackgroundService
         IServiceProvider serviceProvider,
         ILogger<IndexingWorkerService> logger,
         IConfiguration configuration,
+        IPipelineEventService? pipelineEventService = null,
         string rabbitHost = "localhost",
         string rabbitUser = "admin",
         string rabbitPass = "admin123",
@@ -46,6 +49,7 @@ public class IndexingWorkerService : BackgroundService
         _serviceProvider = serviceProvider;
         _logger = logger;
         _configuration = configuration;
+        _pipelineEventService = pipelineEventService;
         _rabbitHost = rabbitHost;
         _rabbitUser = rabbitUser;
         _rabbitPass = rabbitPass;
@@ -180,11 +184,12 @@ public class IndexingWorkerService : BackgroundService
                                         JobId = Guid.NewGuid(),
                                         DocumentId = documentId,
                                         Action = IndexingAction.Index,
-                                        CreatedAt = DateTime.UtcNow
+                                        CreatedAt = DateTime.UtcNow,
+                                        CorrelationId = simpleMsg.CorrelationId
                                     };
                                     _logger.LogInformation(
-                                        "Indexing job received (simple format): documentId={DocId}",
-                                        documentId);
+                                        "Indexing job received (simple format): documentId={DocId}, correlationId={CorrId}",
+                                        documentId, simpleMsg.CorrelationId);
                                 }
                                 else
                                 {
@@ -204,7 +209,33 @@ public class IndexingWorkerService : BackgroundService
                                         message.JobId, message.DocumentId, message.Action);
                                 }
 
+                                var sw = Stopwatch.StartNew();
+                                var correlationId = message.CorrelationId ?? string.Empty;
+                                var startEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.IndexingWorker,
+                                    Status = PipelineStatuses.Started,
+                                    CorrelationId = correlationId,
+                                    DocumentId = documentId.ToString()
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt);
+
                                 await ProcessIndexingJobAsync(message, stoppingToken);
+
+                                sw.Stop();
+                                var completedEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.IndexingWorker,
+                                    Status = PipelineStatuses.Completed,
+                                    CorrelationId = correlationId,
+                                    DocumentId = documentId.ToString(),
+                                    DurationMs = sw.ElapsedMilliseconds,
+                                    EmbeddingModel = "bge-m3",
+                                    EmbeddingDimension = 1024
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt);
 
                                 await UpdateOutboxAcknowledgedAsync(documentId, stoppingToken);
 
@@ -220,6 +251,20 @@ public class IndexingWorkerService : BackgroundService
                             catch (Exception ex)
                             {
                                 _logger.LogError(ex, "Indexing job failed for document {DocId}", documentId);
+
+                                var correlationId = message?.CorrelationId ?? Guid.NewGuid().ToString("N")[..12];
+                                var failedEvt = new PipelineEvent
+                                {
+                                    Timestamp = DateTime.UtcNow,
+                                    PipelineStage = PipelineStages.IndexingWorker,
+                                    Status = PipelineStatuses.Failed,
+                                    CorrelationId = correlationId,
+                                    DocumentId = documentId.ToString(),
+                                    ErrorMessage = ex.Message,
+                                    ErrorType = ex.GetType().Name
+                                };
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt);
+
                                 await SafeNackAsync(channel, deliveryTag, requeue: false);
 
                                 try { await connection.CloseAsync(); } catch { }

@@ -1,10 +1,12 @@
 using GED.Core.Interfaces;
+using GED.Core.Models;
 using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -60,6 +62,7 @@ public class OutboxRelayService : BackgroundService
     private readonly IServiceProvider _sp;
     private readonly ILogger<OutboxRelayService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly IPipelineEventService? _pipelineEventService;
 
     /// <summary>
     /// Polling interval between relay cycles (configurable via OUTBOX_POLL_INTERVAL_SECONDS).
@@ -87,11 +90,12 @@ public class OutboxRelayService : BackgroundService
     /// <param name="sp">Service provider for creating scoped dependencies.</param>
     /// <param name="logger">Logger for relay events.</param>
     /// <param name="configuration">Application configuration.</param>
-    public OutboxRelayService(IServiceProvider sp, ILogger<OutboxRelayService> logger, IConfiguration configuration)
+    public OutboxRelayService(IServiceProvider sp, ILogger<OutboxRelayService> logger, IConfiguration configuration, IPipelineEventService? pipelineEventService = null)
     {
         _sp = sp;
         _logger = logger;
         _configuration = configuration;
+        _pipelineEventService = pipelineEventService;
 
         var pollIntervalSeconds = configuration.GetValue<int>("Outbox:PollIntervalSeconds", 1);
         _pollInterval = TimeSpan.FromSeconds(Math.Max(1, pollIntervalSeconds));
@@ -160,8 +164,6 @@ public class OutboxRelayService : BackgroundService
 
         if (!pending.Any()) return;
 
-        // Check for in-flight jobs if ResourceSaver is enabled
-        // Include stale job detection - jobs in-flight for > 5 minutes are considered stuck
         var staleThreshold = DateTime.UtcNow.AddMinutes(-5);
         var ocrInFlight = 0;
         var indexingInFlight = 0;
@@ -170,12 +172,12 @@ public class OutboxRelayService : BackgroundService
         {
             ocrInFlight = await db.OutboxMessages
                 .Where(m => m.Type == "OcrJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
-                .Where(m => m.ProcessedAt > staleThreshold) // Only count recent in-flight jobs
+                .Where(m => m.ProcessedAt > staleThreshold)
                 .CountAsync(ct);
 
             indexingInFlight = await db.OutboxMessages
                 .Where(m => m.Type == "IndexingJob" && m.ProcessedAt != null && m.AcknowledgedAt == null)
-                .Where(m => m.ProcessedAt > staleThreshold) // Only count recent in-flight jobs
+                .Where(m => m.ProcessedAt > staleThreshold)
                 .CountAsync(ct);
 
             if (ocrInFlight > 0)
@@ -187,6 +189,15 @@ public class OutboxRelayService : BackgroundService
                 _logger.LogInformation("⏸️ Holding back indexing jobs - {Count} OCR jobs in-flight", ocrInFlight);
             }
         }
+
+        var startEvt = new PipelineEvent
+        {
+            Timestamp = DateTime.UtcNow,
+            PipelineStage = PipelineStages.OutboxRelay,
+            Status = PipelineStatuses.Started,
+            OutboxBacklogCount = pending.Count
+        };
+        _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt);
 
         _logger.LogInformation("📬 Outbox relay: processing {Count} messages (OCR:{OcrInFlight}, Indexing:{IdxInFlight})", 
             pending.Count, ocrInFlight, indexingInFlight);
@@ -204,15 +215,41 @@ public class OutboxRelayService : BackgroundService
 
             try
             {
+                var correlationId = ExtractCorrelationId(msg.Payload);
+                _logger.LogInformation("📤 OutboxRelay: type={Type}, payload={Payload}", msg.Type, msg.Payload);
+                
                 _logger.LogDebug("📤 About to publish outbox message {Id}, type={Type}", msg.Id, msg.Type);
                 await PublishMessageAsync(rabbitMq, msg, ct);
                 msg.ProcessedAt = DateTime.UtcNow;
                 _logger.LogInformation("✅ Outbox message {Id} ({Type}) published", msg.Id, msg.Type);
+
+                var completedEvt = new PipelineEvent
+                {
+                    Timestamp = DateTime.UtcNow,
+                    PipelineStage = PipelineStages.OutboxRelay,
+                    Status = PipelineStatuses.Completed,
+                    CorrelationId = correlationId ?? string.Empty,
+                    QueueName = msg.Type,
+                    RetryCount = msg.RetryCount
+                };
+                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt);
             }
             catch (Exception ex)
             {
                 msg.RetryCount++;
                 msg.Error = ex.Message;
+
+                var correlationId = ExtractCorrelationId(msg.Payload);
+                var failedEvt = new PipelineEvent
+                {
+                    Timestamp = DateTime.UtcNow,
+                    PipelineStage = PipelineStages.OutboxRelay,
+                    Status = PipelineStatuses.Failed,
+                    CorrelationId = correlationId ?? string.Empty,
+                    RetryCount = msg.RetryCount,
+                    ErrorMessage = ex.Message
+                };
+                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt);
 
                 if (msg.RetryCount >= MaxRetries)
                 {
@@ -233,6 +270,23 @@ public class OutboxRelayService : BackgroundService
 
         // Persist all state changes (ProcessedAt + RetryCount + Error) in one round-trip
         await db.SaveChangesAsync(ct);
+    }
+
+    private static string? ExtractCorrelationId(string payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            if (doc.RootElement.TryGetProperty("CorrelationId", out var elem))
+            {
+                return elem.GetString();
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

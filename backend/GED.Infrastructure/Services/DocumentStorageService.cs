@@ -1,12 +1,15 @@
 using GED.Core.Interfaces;
+using GED.Core.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace GED.Infrastructure.Services;
 
 public class DocumentStorageService : IDocumentStorageService
 {
     private readonly ILogger<DocumentStorageService> _logger;
+    private readonly IPipelineEventService? _pipelineEventService;
     private readonly string _basePath;
     private readonly string _tempPath;
 
@@ -15,9 +18,11 @@ public class DocumentStorageService : IDocumentStorageService
 
     public DocumentStorageService(
         ILogger<DocumentStorageService> logger,
-        IConfigurationService? config = null)
+        IConfigurationService? config = null,
+        IPipelineEventService? pipelineEventService = null)
     {
         _logger = logger;
+        _pipelineEventService = pipelineEventService;
         _basePath = config?["Document:StoragePath"] ?? "/var/lib/ged/documents";
         _tempPath = Path.Combine(Path.GetTempPath(), "ged-uploads");
         Directory.CreateDirectory(_basePath);
@@ -31,25 +36,91 @@ public class DocumentStorageService : IDocumentStorageService
         string fileExtension, 
         CancellationToken ct = default)
     {
+        return await StageFileAsync(fileStream, documentId, fileExtension, null, ct);
+    }
+
+    public async Task<StoredFile> StageFileAsync(
+        Stream fileStream, 
+        Guid documentId, 
+        string fileExtension, 
+        string? correlationId,
+        CancellationToken ct = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
         var storedFileName = $"{documentId}{fileExtension}";
         var finalPath = Path.Combine(_basePath, storedFileName);
         var tempPath = Path.Combine(_tempPath, $"{documentId}{fileExtension}");
 
-        fileStream.Position = 0;
-        var (savedPath, fileHash) = await fileStream.WriteToFileWithHashAsync(tempPath, ct);
-        
-        var fileInfo = new FileInfo(savedPath);
-        
-        _logger.LogInformation("Document {DocumentId} staged to temp {Path}, hash: {Hash}", 
-            documentId, savedPath, fileHash);
-
-        return new StoredFile
+        if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
         {
-            FinalPath = finalPath,
-            TempPath = tempPath,
-            FileHash = fileHash,
-            FileSize = fileInfo.Length
-        };
+            _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+            {
+                PipelineStage = "file_storage",
+                DocumentId = documentId.ToString(),
+                CorrelationId = correlationId ?? string.Empty,
+                Status = "started",
+                DurationMs = stopwatch.ElapsedMilliseconds,
+                ServiceName = nameof(DocumentStorageService),
+                FileName = fileExtension,
+                FileHash = "",
+                FileSizeBytes = 0
+            }));
+        }
+
+        try
+        {
+            fileStream.Position = 0;
+            var (savedPath, fileHash) = await fileStream.WriteToFileWithHashAsync(tempPath, ct);
+            
+            var fileInfo = new FileInfo(savedPath);
+            
+            _logger.LogInformation("Document {DocumentId} staged to temp {Path}, hash: {Hash}", 
+                documentId, savedPath, fileHash);
+
+            stopwatch.Stop();
+
+            if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+            {
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "file_storage",
+                    DocumentId = documentId.ToString(),
+                    CorrelationId = correlationId,
+                    Status = "completed",
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    ServiceName = nameof(DocumentStorageService),
+                    FileSizeBytes = fileInfo.Length,
+                    FileHash = fileHash,
+                    DuplicateDetected = false
+                }));
+            }
+
+            return new StoredFile
+            {
+                FinalPath = finalPath,
+                TempPath = tempPath,
+                FileHash = fileHash,
+                FileSize = fileInfo.Length
+            };
+        }
+        catch (Exception ex)
+        {
+            if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
+            {
+                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                {
+                    PipelineStage = "file_storage",
+                    DocumentId = documentId.ToString(),
+                    CorrelationId = correlationId,
+                    Status = "failed",
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    ServiceName = nameof(DocumentStorageService),
+                    ErrorType = ex.GetType().Name,
+                    ErrorMessage = ex.Message
+                }));
+            }
+            throw;
+        }
     }
 
     public async Task FinalizeFileAsync(string tempPath, string finalPath, CancellationToken ct = default)

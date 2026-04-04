@@ -31,4 +31,5 @@ public class IndexingJobSimpleMessage
 {
     public Guid DocumentId { get; set; }
     public bool HasExtractedText { get; set; }
+    public string? CorrelationId { get; set; }
 }

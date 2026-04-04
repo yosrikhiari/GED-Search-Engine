@@ -47,7 +47,7 @@ public interface INlpService
     Task<string> SummarizeTextAsync(string text, int maxLength = 200, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Generate a semantic embedding vector for the given text using Ollama nomic-embed-text.
+    /// Generate a semantic embedding vector for the given text using Ollama bge-m3.
     /// Returns null if Ollama is unavailable — callers must degrade gracefully to BM25-only.
     /// </summary>
     Task<float[]?> GenerateEmbeddingAsync(string text, CancellationToken cancellationToken = default);
