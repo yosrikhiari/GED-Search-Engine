@@ -138,3 +138,13 @@ pending-count-test.py
 upload-flow-diagram.html
 upload-flow-nested.html
 Docs/Services.md
+extract.ps1
+test-unique-1775301339.txt
+upload-test.ps1
+backend/extract_test.ps1
+test-docs/test-unique-1.pdf
+unique-test-1775300899.txt
+test-docs/test-unique-2.pdf
+test-docs/test-unique-3.pdf
+test-docs/test-unique-4.pdf
+.gitignore
