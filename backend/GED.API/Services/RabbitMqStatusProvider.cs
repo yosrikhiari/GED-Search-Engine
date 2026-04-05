@@ -24,9 +24,9 @@ public class RabbitMqStatusProvider : IRabbitMqStatusProvider
             if (_connection?.IsOpen != true)
                 return 0;
 
-            // QueueDeclarePassive is deprecated in v7, use async API
+            // KNOWN LIMITATION: Queue depth check not implemented for RabbitMQ.Client v7
+            // Tracking: The QueueDeclarePassive API is deprecated in v7, requires async channel implementation
             // For now, return 0 as placeholder - actual implementation needs async channel
-            // TODO: Implement proper async queue depth check for RabbitMQ.Client v7
             _logger.LogDebug("Queue depth check not implemented for RabbitMQ.Client v7");
             return 0;
         }

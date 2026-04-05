@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Quality;
 
+[Trait("Category", "Unit")]
 public class SearchServiceQualityTests
 {
     [Fact]

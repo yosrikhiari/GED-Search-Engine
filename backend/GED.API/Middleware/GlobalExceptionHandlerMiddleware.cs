@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using Serilog;
+using GED.API.Models;
 
 namespace GED.API.Middleware;
 
@@ -50,19 +51,15 @@ public class GlobalExceptionHandlerMiddleware
         // Determine status code and message based on exception type
         var (statusCode, message, details) = GetExceptionDetails(exception);
 
-        // Build structured error response
-        var errorResponse = new
-        {
-            error = new
-            {
-                code = GetErrorCode(exception),
-                message = message,
-                details = details,
-                correlationId = correlationId,
-                timestamp = DateTime.UtcNow.ToString("o"),
-                path = context.Request.Path.Value
-            }
-        };
+        // Build structured error response using DetailedErrorResponse to maintain consistent shape
+        var detailedError = DetailedErrorResponse.Create(
+            message,
+            details,
+            GetErrorCode(exception),
+            correlationId,
+            context.Request.Path.Value);
+
+        var errorResponse = new { error = detailedError };
 
         // Set response
         context.Response.ContentType = "application/json";

@@ -143,6 +143,8 @@ services:
         condition: service_healthy
     networks:
       - ged-network
+    volumes:
+      - ./opensearch_dashboards/saved_objects.ndjson:/usr/share/opensearch-dashboards/saved_objects.ndjson:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
       interval: 30s
@@ -152,6 +154,31 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     cpus: 0.5
+
+  # ── OpenSearch Dashboards Init ─────────────────────────────────────────────────
+  # Imports saved objects (dashboards, index patterns, visualizations) on startup
+  # To update saved objects:
+  #   1. Configure dashboards in OpenSearch Dashboards UI
+  #   2. Run: ./scripts/export_saved_objects.sh
+  #   3. Commit the updated saved_objects.ndjson
+  dashboards-init:
+    image: curlimages/curl:latest
+    container_name: ged-dashboards-init
+    depends_on:
+      opensearch-dashboards:
+        condition: service_healthy
+    networks:
+      - ged-network
+    volumes:
+      - ./scripts/import_saved_objects.sh:/import.sh:ro
+      - ./opensearch_dashboards/saved_objects.ndjson:/init/saved_objects.ndjson:ro
+    entrypoint: ["sh", "/import.sh"]
+    environment:
+      - DASHBOARDS_URL=http://opensearch-dashboards:5601
+      - EXPORT_FILE=/init/saved_objects.ndjson
+      - MAX_RETRIES=30
+      - RETRY_INTERVAL=5
+    restart: "no"
 
   # ── Apache Tika ───────────────────────────────────────────────────────────────
   tika:

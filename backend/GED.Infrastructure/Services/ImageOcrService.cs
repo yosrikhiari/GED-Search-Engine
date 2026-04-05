@@ -77,7 +77,11 @@ public class ImageOcrService
         // Clean up temp converted file
         if (tempConvertedPath != null)
         {
-            try { File.Delete(tempConvertedPath); } catch { }
+            try { File.Delete(tempConvertedPath); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to cleanup temp converted file: {Path}", tempConvertedPath);
+            }
         }
 
         _logger.LogInformation(
@@ -108,7 +112,7 @@ public class ImageOcrService
         return outputPdfPath;
     }
 
-    private static async Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
+    private async Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
         string exe, string args, CancellationToken ct)
     {
         using var process = new Process
@@ -137,7 +141,11 @@ public class ImageOcrService
         }
         catch (OperationCanceledException)
         {
-            try { process.Kill(entireProcessTree: true); } catch { }
+            try { process.Kill(entireProcessTree: true); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to kill OCR process on cancellation");
+            }
             throw;
         }
 

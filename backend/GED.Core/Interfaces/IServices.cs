@@ -17,7 +17,7 @@ public interface ISearchService
 public interface IDocumentService
 {
     Task<Document?> GetDocumentByIdAsync(Guid id, CancellationToken cancellationToken = default);
-    Task<Document> UploadDocumentAsync(Stream fileStream, string fileName, string contentType, string? title = null, Dictionary<string, object>? metadata = null, int? priority = null, CancellationToken cancellationToken = default);
+    Task<Document> UploadDocumentAsync(Stream fileStream, string fileName, string contentType, string? title = null, Dictionary<string, object>? metadata = null, int? priority = null, string? createdBy = null, CancellationToken cancellationToken = default);
     Task<bool> MarkDocumentAsDeletedAsync(Guid id, CancellationToken cancellationToken = default);
     Task<bool> DeleteDocumentAsync(Guid id, CancellationToken cancellationToken = default);
     Task<Document> UpdateDocumentAsync(Guid id, Document document, CancellationToken cancellationToken = default);
@@ -79,6 +79,24 @@ public interface IMessageQueueService
 /// </summary>
 public interface IUserContext
 {
+    List<string>? GetAllowedCategories(string username);
+    bool UserExists(string username);
+}
+
+/// <summary>
+/// Authentication service interface for user management and authentication.
+/// </summary>
+public interface IAuthService
+{
+    Task InitializeAsync();
+    LoginResponse? Login(LoginRequest request, string? clientIp = null);
+    bool Logout(string token);
+    (bool Success, string? Error) Register(RegisterRequest request);
+    List<UserDto> GetAllUsers();
+    UserDto? GetUserById(Guid id);
+    UserDto? GetUserByUsername(string username);
+    (bool Success, string? Error) UpdateUser(Guid id, RegisterRequest request);
+    bool DeactivateUser(Guid id);
     List<string>? GetAllowedCategories(string username);
     bool UserExists(string username);
 }

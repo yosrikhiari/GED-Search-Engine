@@ -3,6 +3,7 @@ using GED.API.Controllers;
 
 namespace GED.Tests.Models;
 
+[Trait("Category", "Unit")]
 public class TaxonomyModelTests
 {
     [Fact]

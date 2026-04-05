@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using GED.Infrastructure.Data;
+using GED.API.Models;
 
 namespace GED.API.Controllers;
 
@@ -73,7 +74,7 @@ public class WebhookDeliveriesController : ControllerBase
             .AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == id);
 
-        if (d == null) return NotFound();
+        if (d == null) return NotFound(ErrorResponse.Create("Webhook delivery not found"));
 
         return Ok(new WebhookDeliveryDto
         {

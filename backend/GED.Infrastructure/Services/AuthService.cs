@@ -25,7 +25,7 @@ namespace GED.Infrastructure.Services;
 /// Sessions are stored in Redis (via IDistributedCache) for horizontal scalability,
 /// with in-memory fallback if Redis is unavailable.
 /// </summary>
-public class AuthService : IUserContext
+public class AuthService : IUserContext, IAuthService
 {
     private readonly ILogger<AuthService> _logger;
     private readonly IDbContextFactory<GedDbContext>? _dbFactory;
@@ -61,6 +61,25 @@ public class AuthService : IUserContext
     private Dictionary<string, AppUser> _usersByUsername = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Tracks failed login attempts per brute force key (username:ip) for brute force protection.
+    /// NOTE: This is in-memory only. In multi-instance deployments, lockout state
+    /// is not shared across instances and will reset on application restart.
+    /// For distributed environments, replace with a Redis-backed implementation.
+    /// Lockout is keyed by username:ip to prevent attackers from bypassing by rotating IPs.
+    /// </summary>
+    private readonly Dictionary<string, (int Attempts, DateTime? LockoutUntil)> _failedAttempts = new();
+
+    /// <summary>
+    /// Number of failed attempts before lockout.
+    /// </summary>
+    private const int MaxFailedAttempts = 5;
+
+    /// <summary>
+    /// Duration of lockout after exceeding max failed attempts.
+    /// </summary>
+    private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(15);
+
+    /// <summary>
     /// Initializes a new instance of <see cref="AuthService"/> with Redis session support.
     /// Note: Initialization is deferred to InitializeAsync() to avoid file I/O in constructor.
     /// </summary>
@@ -91,6 +110,11 @@ public class AuthService : IUserContext
         else
         {
             _logger.LogWarning("Redis not available - using in-memory session storage");
+        }
+
+        if (string.IsNullOrWhiteSpace(_usersFilePath) && !_useDatabase)
+        {
+            _logger.LogWarning("No user persistence configured: both database and file path are unavailable. Users will exist only in memory.");
         }
         // Note: LoadUsers() and EnsureDefaultAdmin() are now called via InitializeAsync()
     }
@@ -228,6 +252,30 @@ public class AuthService : IUserContext
     }
 
     /// <summary>
+    /// Increments the failed login attempt counter for a brute force key (username:ip).
+    /// After MaxFailedAttempts, sets a lockout period.
+    /// </summary>
+    private void IncrementFailedAttempts(string bfKey)
+    {
+        if (!_failedAttempts.TryGetValue(bfKey, out var info))
+        {
+            info = (0, null);
+        }
+
+        info.Attempts++;
+        
+        if (info.Attempts >= MaxFailedAttempts && info.LockoutUntil == null)
+        {
+            info.LockoutUntil = DateTime.UtcNow.Add(LockoutDuration);
+            _logger.LogWarning(
+                "Account locked for brute force key '{BfKey}' due to {Attempts} failed login attempts. Lockout until {LockoutUntil}",
+                bfKey, info.Attempts, info.LockoutUntil);
+        }
+        
+        _failedAttempts[bfKey] = info;
+    }
+
+    /// <summary>
     /// Session data stored in Redis.
     /// </summary>
     private class SessionData
@@ -238,8 +286,35 @@ public class AuthService : IUserContext
     }
 
     /// <inheritdoc />
-    public LoginResponse? Login(LoginRequest request)
+    public LoginResponse? Login(LoginRequest request, string? clientIp = null)
     {
+        var normalizedUsername = request.Username.ToLowerInvariant();
+        var bfKey = string.IsNullOrEmpty(clientIp) 
+            ? normalizedUsername 
+            : $"{normalizedUsername}:{clientIp}";
+        
+        // Check for lockout due to brute force protection
+        lock (_lock)
+        {
+            if (_failedAttempts.TryGetValue(bfKey, out var attemptInfo))
+            {
+                if (attemptInfo.LockoutUntil.HasValue && attemptInfo.LockoutUntil.Value > DateTime.UtcNow)
+                {
+                    _logger.LogWarning(
+                        "Login blocked for '{Username}' from IP '{Ip}': brute force lockout until {LockoutUntil}",
+                        request.Username, clientIp ?? "unknown", attemptInfo.LockoutUntil.Value);
+                    // Do not reveal lockout reason in response
+                    return null;
+                }
+                
+                // Clean up expired lockout
+                if (attemptInfo.LockoutUntil.HasValue && attemptInfo.LockoutUntil.Value <= DateTime.UtcNow)
+                {
+                    _failedAttempts.Remove(bfKey);
+                }
+            }
+        }
+
         AppUser? user;
         
         // Find user (outside lock for Redis to minimize lock time)
@@ -261,8 +336,18 @@ public class AuthService : IUserContext
         // Verify password using constant-time comparison to prevent timing attacks
         if (!VerifyPassword(request.Password, user.PasswordHash))
         {
-            _logger.LogWarning("Login failed: wrong password for '{Username}'", request.Username);
+            lock (_lock)
+            {
+                IncrementFailedAttempts(bfKey);
+            }
+            _logger.LogWarning("Login failed: wrong password for '{Username}' from IP '{Ip}'", request.Username, clientIp ?? "unknown");
             return null;
+        }
+
+        // Successful login - reset failed attempts
+        lock (_lock)
+        {
+            _failedAttempts.Remove(bfKey);
         }
 
         // Migrate password hash to new iteration count if needed
@@ -667,9 +752,12 @@ public class AuthService : IUserContext
 
     private void LoadUsersFromDatabase()
     {
+        if (_dbFactory is null)
+            throw new InvalidOperationException("DbFactory is not configured but LoadUsersFromDatabase was called.");
+        
         try
         {
-            using var db = _dbFactory!.CreateDbContext();
+            using var db = _dbFactory.CreateDbContext();
             var entities = db.Users.AsNoTracking().ToList();
             
             _users.Clear();
@@ -730,9 +818,12 @@ public class AuthService : IUserContext
 
     private void SaveUsersToDatabase()
     {
+        if (_dbFactory is null)
+            throw new InvalidOperationException("DbFactory is not configured but SaveUsersToDatabase was called.");
+        
         try
         {
-            using var db = _dbFactory!.CreateDbContext();
+            using var db = _dbFactory.CreateDbContext();
             
             foreach (var user in _users)
             {

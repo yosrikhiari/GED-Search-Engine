@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
+using GED.API.Models;
 
 namespace GED.API.Controllers;
 
@@ -48,13 +49,13 @@ public class TaxonomyController : ControllerBase
     public async Task<ActionResult<TaxonomyCategory>> CreateCategory([FromBody] CreateCategoryRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
-            return BadRequest(new { error = "Category name is required." });
+            return BadRequest(ErrorResponse.Create("Category name is required."));
 
         TaxonomyCategory category;
         lock (_lock)
         {
             if (_categories.Any(c => c.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase)))
-                return BadRequest(new { error = $"Category '{request.Name}' already exists." });
+                return BadRequest(ErrorResponse.Create($"Category '{request.Name}' already exists."));
 
             category = new TaxonomyCategory
             {
@@ -82,12 +83,12 @@ public class TaxonomyController : ControllerBase
         lock (_lock)
         {
             category = _categories.FirstOrDefault(c => c.Id == id);
-            if (category == null) return NotFound();
+            if (category == null) return NotFound(ErrorResponse.Create("Category not found"));
 
             if (!string.IsNullOrWhiteSpace(request.Name) && request.Name != category.Name)
             {
                 if (_categories.Any(c => c.Id != id && c.Name.Equals(request.Name, StringComparison.OrdinalIgnoreCase)))
-                    return BadRequest(new { error = $"Category '{request.Name}' already exists." });
+                    return BadRequest(ErrorResponse.Create($"Category '{request.Name}' already exists."));
                 category.Name = request.Name.Trim();
             }
 
@@ -110,7 +111,7 @@ public class TaxonomyController : ControllerBase
         lock (_lock)
         {
             var removed = _categories.RemoveAll(c => c.Id == id);
-            if (removed == 0) return NotFound();
+            if (removed == 0) return NotFound(ErrorResponse.Create("Category not found or already deleted"));
         }
         await SaveTaxonomyAsync();
         _logger.LogInformation("Deleted taxonomy category {Id}", id);
@@ -175,7 +176,9 @@ public class TaxonomyController : ControllerBase
         lock (_lock)
         {
             var tag = _tags.FirstOrDefault(t => t.Id == id);
-            return tag == null ? NotFound() : Ok(tag);
+            if (tag == null)
+                return NotFound(ErrorResponse.Create("Taxonomy entry not found", HttpContext.Items["CorrelationId"]?.ToString()));
+            return Ok(tag);
         }
     }
 
@@ -183,14 +186,14 @@ public class TaxonomyController : ControllerBase
     public async Task<ActionResult<TaxonomyTag>> CreateTag([FromBody] CreateTagRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
-            return BadRequest(new { error = "Tag name is required." });
+            return BadRequest(ErrorResponse.Create("Tag name is required."));
 
         var normalizedName = NormalizeTagName(request.Name);
         TaxonomyTag tag;
         lock (_lock)
         {
             if (_tags.Any(t => t.Name.Equals(normalizedName, StringComparison.OrdinalIgnoreCase)))
-                return BadRequest(new { error = $"Tag '{request.Name}' already exists." });
+                return BadRequest(ErrorResponse.Create($"Tag '{request.Name}' already exists."));
 
             tag = new TaxonomyTag
             {
@@ -219,14 +222,14 @@ public class TaxonomyController : ControllerBase
         lock (_lock)
         {
             tag = _tags.FirstOrDefault(t => t.Id == id);
-            if (tag == null) return NotFound();
-            if (tag.IsSystem) return BadRequest(new { error = "System tags cannot be modified." });
+            if (tag == null) return NotFound(ErrorResponse.Create("Tag not found"));
+            if (tag.IsSystem) return BadRequest(ErrorResponse.Create("System tags cannot be modified."));
 
             if (!string.IsNullOrWhiteSpace(request.Name) && request.Name != tag.Name)
             {
                 var normalized = NormalizeTagName(request.Name);
                 if (_tags.Any(t => t.Id != id && t.Name.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
-                    return BadRequest(new { error = $"Tag '{request.Name}' already exists." });
+                    return BadRequest(ErrorResponse.Create($"Tag '{request.Name}' already exists."));
                 tag.Name = normalized;
             }
 
@@ -247,8 +250,8 @@ public class TaxonomyController : ControllerBase
         lock (_lock)
         {
             var tag = _tags.FirstOrDefault(t => t.Id == id);
-            if (tag == null) return NotFound();
-            if (tag.IsSystem) return BadRequest(new { error = "System tags cannot be deleted." });
+            if (tag == null) return NotFound(ErrorResponse.Create("Tag not found"));
+            if (tag.IsSystem) return BadRequest(ErrorResponse.Create("System tags cannot be deleted."));
 
             _tags.Remove(tag);
         }
@@ -260,10 +263,10 @@ public class TaxonomyController : ControllerBase
     public async Task<ActionResult<List<TaxonomyTag>>> CreateBulkTags([FromBody] CreateBulkTagsRequest request)
     {
         if (request.Names == null || !request.Names.Any())
-            return BadRequest(new { error = "Tag names are required." });
+            return BadRequest(ErrorResponse.Create("Tag names are required."));
 
         if (request.Names.Count > 100)
-            return BadRequest(new { error = "Maximum 100 tags per request." });
+            return BadRequest(ErrorResponse.Create("Maximum 100 tags per request."));
 
         var created = new List<TaxonomyTag>();
 

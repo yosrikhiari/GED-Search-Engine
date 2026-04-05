@@ -5,6 +5,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Integration;
 
+[Trait("Category", "Unit")]
 public class GedDbContextIntegrationTests : IDisposable
 {
     private readonly GedDbContext _context;
@@ -232,6 +233,32 @@ public class GedDbContextIntegrationTests : IDisposable
 
         var updated = await _context.OutboxMessages.FindAsync(message.Id);
         updated!.RetryCount.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task OutboxRelay_MarksMessageAsFailed_AfterMaxRetries()
+    {
+        const int MaxRetries = 5;
+        
+        var message = new OutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            Type = "OcrJob",
+            Payload = "{}",
+            CreatedAt = DateTime.UtcNow.AddHours(-1),
+            RetryCount = MaxRetries,
+            Error = "Persistent connection failure",
+            ProcessedAt = null
+        };
+
+        _context.OutboxMessages.Add(message);
+        await _context.SaveChangesAsync();
+
+        var retrieved = await _context.OutboxMessages.FindAsync(message.Id);
+        retrieved.Should().NotBeNull();
+        retrieved!.RetryCount.Should().Be(MaxRetries);
+        retrieved.ProcessedAt.Should().BeNull("Message should not be processed after max retries");
+        retrieved.Error.Should().NotBeNullOrEmpty("Error should be recorded");
     }
 
     [Fact]

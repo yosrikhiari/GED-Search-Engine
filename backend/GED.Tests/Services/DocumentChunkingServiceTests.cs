@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class DocumentChunkingServiceTests
 {
     private readonly DocumentChunkingService _service;

@@ -5,6 +5,7 @@ using Moq;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class AuditServiceTests
 {
     private readonly Mock<ILogger<AuditService>> _loggerMock;
@@ -146,6 +147,7 @@ public class AuditServiceTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class AuditEventTests
 {
     [Fact]

@@ -267,8 +267,11 @@ public class RagService : IRagService
 
         if (fallbackAnswer != null) { yield return fallbackAnswer; yield break; }
 
+        if (response is null)
+            throw new InvalidOperationException("HTTP response was null after success check.");
+
         // Stream response tokens
-        await using var stream = await response!.Content.ReadAsStreamAsync(cancellationToken);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new System.IO.StreamReader(stream);
 
         while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)

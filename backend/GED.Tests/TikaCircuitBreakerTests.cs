@@ -9,6 +9,7 @@ using System.Net.Http;
 
 namespace GED.Tests;
 
+[Trait("Category", "Unit")]
 public class TikaCircuitBreakerTests
 {
     [Fact]

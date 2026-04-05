@@ -5,6 +5,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
+using GED.API.Models;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
@@ -26,7 +27,7 @@ public class DocumentsController : ControllerBase
     private readonly ILogger<DocumentsController> _logger;
     private readonly IDistributedCache _cache;
     private readonly IConfiguration _configuration;
-    private readonly AuthService _authService;
+    private readonly IAuthService _authService;
     private readonly IAuditService _auditService;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IPipelineEventService? _pipelineEventService;
@@ -48,7 +49,7 @@ public class DocumentsController : ControllerBase
         ILogger<DocumentsController> logger,
         IConfiguration configuration,
         IDistributedCache cache,
-        AuthService authService,
+        IAuthService authService,
         IAuditService auditService,
         IServiceScopeFactory scopeFactory,
         IPipelineEventService? pipelineEventService = null)
@@ -100,7 +101,7 @@ public async Task<ActionResult<Document>> UploadDocument(
     try
     {
         if (file == null || file.Length == 0)
-            return BadRequest(new { error = "No file uploaded" });
+            return BadRequest(ErrorResponse.Create("No file uploaded"));
 
         var maxSizeMb    = _configuration.GetValue<int>("Document:MaxUploadSizeMB", 100);
         var maxSizeBytes = (long)maxSizeMb * 1024 * 1024;
@@ -134,7 +135,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         }
 
         if (string.IsNullOrWhiteSpace(category))
-            return BadRequest(new { error = "Category is required. Please select a category for the document." });
+            return BadRequest(ErrorResponse.Create("Category is required. Please select a category for the document."));
 
         if (!AllowedCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
             return BadRequest(new
@@ -178,20 +179,30 @@ public async Task<ActionResult<Document>> UploadDocument(
         // Emit pipeline event: upload started
         if (_pipelineEventService != null)
         {
-            _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+            _ = Task.Run(async () =>
             {
-                PipelineStage = "upload",
-                DocumentId = "",
-                CorrelationId = correlationId,
-                Status = "started",
-                DurationMs = 0,
-                ServiceName = nameof(DocumentsController),
-                FileName = file.FileName,
-                FileSizeBytes = file.Length,
-                ContentType = file.ContentType,
-                Category = category,
-                UserId = userId
-            }));
+                try
+                {
+                    await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                    {
+                        PipelineStage = "upload",
+                        DocumentId = "",
+                        CorrelationId = correlationId,
+                        Status = "started",
+                        DurationMs = 0,
+                        ServiceName = nameof(DocumentsController),
+                        FileName = file.FileName,
+                        FileSizeBytes = file.Length,
+                        ContentType = file.ContentType,
+                        Category = category,
+                        UserId = userId
+                    });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Pipeline event emission failed for upload started");
+                }
+            });
         }
 
         // Sanitize filename to prevent path traversal attacks
@@ -217,7 +228,7 @@ public async Task<ActionResult<Document>> UploadDocument(
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var document = await _documentService.UploadDocumentAsync(
                 stream, sanitizedFileName, file.ContentType,
-                title ?? sanitizedFileName, metadata, priority);
+                title ?? sanitizedFileName, metadata, priority, username);
             stopwatch.Stop();
 
             _logger.LogInformation("Document uploaded with ID: {DocumentId}", document.Id);
@@ -225,20 +236,30 @@ public async Task<ActionResult<Document>> UploadDocument(
             // Emit pipeline event: upload completed
             if (_pipelineEventService != null)
             {
-                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                _ = Task.Run(async () =>
                 {
-                    PipelineStage = "upload",
-                    DocumentId = document.Id.ToString(),
-                    CorrelationId = correlationId,
-                    Status = "completed",
-                    DurationMs = stopwatch.ElapsedMilliseconds,
-                    ServiceName = nameof(DocumentsController),
-                    FileName = sanitizedFileName,
-                    FileSizeBytes = file.Length,
-                    ContentType = file.ContentType,
-                    Category = category,
-                    UserId = userId
-                }));
+                    try
+                    {
+                        await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                        {
+                            PipelineStage = "upload",
+                            DocumentId = document.Id.ToString(),
+                            CorrelationId = correlationId,
+                            Status = "completed",
+                            DurationMs = stopwatch.ElapsedMilliseconds,
+                            ServiceName = nameof(DocumentsController),
+                            FileName = sanitizedFileName,
+                            FileSizeBytes = file.Length,
+                            ContentType = file.ContentType,
+                            Category = category,
+                            UserId = userId
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Pipeline event emission failed for upload completed");
+                    }
+                });
             }
 
             if (_resourceSaverEnabled)
@@ -285,13 +306,18 @@ public async Task<ActionResult<Document>> UploadDocument(
                 }
                 return CreatedAtAction(nameof(GetDocument), new { id = document.Id }, document);
         }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Storage quota exceeded"))
+        {
+            var currentUser = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
+            _logger.LogWarning(ex, "Storage quota exceeded for user {User}", currentUser);
+            return StatusCode(403, ErrorResponse.Create(ex.Message));
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error uploading document: {FileName}", file?.FileName);
-            return StatusCode(500, new { 
-                error = "An error occurred while uploading the document.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while uploading the document.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -433,7 +459,7 @@ public async Task<ActionResult<Document>> UploadDocument(
                         await SendProgress("file_progress", new { fileIndex, stage = "processing", progress = 60 });
 
                         var document = await scopedDocumentService.UploadDocumentAsync(
-                            stream, sanitizedFileName, file.ContentType, title, metadata, filePriority, ct);
+                            stream, sanitizedFileName, file.ContentType, title, metadata, filePriority, username, ct);
 
                         var processingTime = DateTime.UtcNow - fileStartTime;
                         await SendProgress("file_complete", new
@@ -540,6 +566,11 @@ public async Task<ActionResult<Document>> UploadDocument(
         {
             _logger.LogWarning("Batch upload cancelled by client");
         }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Storage quota exceeded"))
+        {
+            _logger.LogWarning(ex, "Storage quota exceeded during batch upload");
+            await SendProgress("error", new { message = ex.Message, quotaExceeded = true });
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Batch upload stream error");
@@ -557,15 +588,16 @@ public async Task<ActionResult<Document>> UploadDocument(
         try
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
-            return document == null ? NotFound() : Ok(document);
+            if (document == null)
+                return NotFound(ErrorResponse.Create("Document not found", HttpContext.Items["CorrelationId"]?.ToString()));
+            return Ok(document);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while retrieving the document.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while retrieving the document.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -586,10 +618,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting processing history for document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while retrieving the processing history.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while retrieving the processing history.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -599,7 +630,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         try
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
-            if (document == null) return NotFound();
+            if (document == null) return NotFound(ErrorResponse.Create("Document not found"));
 
             var stream = await _documentService.GetDocumentContentAsync(id);
             return File(stream, document.ContentType, document.FileName);
@@ -607,10 +638,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error downloading document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while downloading the document.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while downloading the document.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -629,7 +659,7 @@ public async Task<ActionResult<Document>> UploadDocument(
             
             if (!marked && !searchDeleted)
             {
-                return NotFound(new { error = "Document not found", message = "Document does not exist in database or search index" });
+                return NotFound(ErrorResponse.Create("Document not found", "Document does not exist in database or search index"));
             }
             
             // Audit logging
@@ -640,10 +670,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error deleting document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while deleting the document.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while deleting the document.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -654,7 +683,7 @@ public async Task<ActionResult<Document>> UploadDocument(
     public async Task<IActionResult> BulkDeleteDocuments([FromBody] List<Guid> documentIds)
     {
         if (documentIds == null || !documentIds.Any())
-            return BadRequest(new { error = "No document IDs provided" });
+            return BadRequest(ErrorResponse.Create("No document IDs provided"));
 
         var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
         
@@ -725,7 +754,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         try
         {
             if (request.Priority < 0)
-                return BadRequest(new { error = "Priority must be a non-negative integer" });
+                return BadRequest(ErrorResponse.Create("Priority must be a non-negative integer"));
 
             // Find the outbox message for this document's OCR job
             var outboxMsg = await _db.OutboxMessages
@@ -735,7 +764,7 @@ public async Task<ActionResult<Document>> UploadDocument(
 
             if (outboxMsg == null)
             {
-                return NotFound(new { error = "Document not found or already processing" });
+                return NotFound(ErrorResponse.Create("Document not found or already processing"));
             }
 
             outboxMsg.Priority = request.Priority;
@@ -748,7 +777,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error updating priority for document {DocumentId}", id);
-            return StatusCode(500, new { error = "Failed to update priority", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("Failed to update priority", ex.Message));
         }
     }
 
@@ -759,7 +788,7 @@ public async Task<ActionResult<Document>> UploadDocument(
     public async Task<IActionResult> BulkUpdatePriority([FromBody] List<PriorityUpdate> updates)
     {
         if (updates == null || !updates.Any())
-            return BadRequest(new { error = "No priority updates provided" });
+            return BadRequest(ErrorResponse.Create("No priority updates provided"));
 
         try
         {
@@ -805,7 +834,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error bulk updating priorities");
-            return StatusCode(500, new { error = "Failed to update priorities", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("Failed to update priorities", ex.Message));
         }
     }
 
@@ -816,10 +845,10 @@ public async Task<ActionResult<Document>> UploadDocument(
     public async Task<IActionResult> BulkUpdateCategory([FromBody] BulkCategoryUpdateRequest request)
     {
         if (request.DocumentIds == null || !request.DocumentIds.Any())
-            return BadRequest(new { error = "No document IDs provided" });
+            return BadRequest(ErrorResponse.Create("No document IDs provided"));
 
         if (string.IsNullOrWhiteSpace(request.Category))
-            return BadRequest(new { error = "Category is required" });
+            return BadRequest(ErrorResponse.Create("Category is required"));
 
         var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
         var results = new List<dynamic>();
@@ -874,7 +903,7 @@ public async Task<ActionResult<Document>> UploadDocument(
         try
         {
             if (id != document.Id)
-                return BadRequest(new { error = "ID mismatch" });
+                return BadRequest(ErrorResponse.Create("ID mismatch"));
 
             var updated = await _documentService.UpdateDocumentAsync(id, document);
             await _searchService.UpdateDocumentIndexAsync(updated);
@@ -883,10 +912,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error updating document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while updating the document.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while updating the document.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -916,7 +944,7 @@ public async Task<ActionResult<Document>> UploadDocument(
                 .FirstOrDefaultAsync(d => d.Id == id);
 
             if (entity == null)
-                return NotFound(new { error = $"Document {id} not found" });
+                return NotFound(ErrorResponse.Create($"Document {id} not found"));
 
             var ocrJob = new OcrJob
             {
@@ -1000,10 +1028,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting OCR status for document {DocumentId}", id);
-            return StatusCode(500, new { 
-                error = "An error occurred while getting OCR status.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while getting OCR status.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 
@@ -1219,10 +1246,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error retrying OCR");
-            return StatusCode(500, new { 
-                error = "An error occurred while retrying OCR.",
-                reference = HttpContext.Items["CorrelationId"]
-            });
+            return StatusCode(500, ErrorResponse.Create(
+                "An error occurred while retrying OCR.",
+                HttpContext.Items["CorrelationId"]?.ToString()));
         }
     }
 

@@ -9,6 +9,7 @@ using Moq;
 
 namespace GED.Tests;
 
+[Trait("Category", "Unit")]
 public class AuthServiceTests
 {
     private readonly Mock<ILogger<AuthService>> _mockLogger;

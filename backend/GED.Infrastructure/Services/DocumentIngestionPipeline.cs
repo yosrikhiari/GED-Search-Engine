@@ -71,15 +71,10 @@ public class DocumentIngestionPipeline
     /// <param name="textExtractor">Service for extracting text from documents.</param>
     /// <param name="logger">Logger for pipeline events.</param>
     /// <param name="pipelineEventService">Optional pipeline event service for tracing.</param>
-    /// <param name="dateExtractor">
-    ///   (Deprecated) Kept for DI compatibility. Date extraction is now handled
-    ///   asynchronously by <see cref="OcrWorkerService"/>.
-    /// </param>
     public DocumentIngestionPipeline(
         ITextExtractionService textExtractor,
         ILogger<DocumentIngestionPipeline> logger,
-        IPipelineEventService? pipelineEventService = null,
-        DocumentDateExtractor? dateExtractor = null)
+        IPipelineEventService? pipelineEventService = null)
     {
         _textExtractor = textExtractor;
         _logger        = logger;
@@ -153,15 +148,25 @@ public class DocumentIngestionPipeline
         if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
         {
             _logger.LogInformation("[PipelineEvent] About to emit ingestion started");
-            _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+            _ = Task.Run(async () =>
             {
-                PipelineStage = "ingestion",
-                DocumentId = documentId ?? "",
-                CorrelationId = correlationId,
-                Status = "started",
-                DurationMs = 0,
-                ServiceName = nameof(DocumentIngestionPipeline)
-            }));
+                try
+                {
+                    await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                    {
+                        PipelineStage = "ingestion",
+                        DocumentId = documentId ?? "",
+                        CorrelationId = correlationId,
+                        Status = "started",
+                        DurationMs = 0,
+                        ServiceName = nameof(DocumentIngestionPipeline)
+                    });
+                }
+                catch (Exception emitEx)
+                {
+                    _logger.LogWarning(emitEx, "Pipeline event emission failed for ingestion started");
+                }
+            });
             _logger.LogInformation("[PipelineEvent] Emit dispatched for ingestion started");
         }
 
@@ -196,18 +201,28 @@ public class DocumentIngestionPipeline
             if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
             {
                 _logger.LogInformation("[PipelineEvent] About to emit ingestion completed");
-                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                _ = Task.Run(async () =>
                 {
-                    PipelineStage = "ingestion",
-                    DocumentId = documentId ?? "",
-                    CorrelationId = correlationId,
-                    Status = "completed",
-                    DurationMs = stopwatch.ElapsedMilliseconds,
-                    ServiceName = nameof(DocumentIngestionPipeline),
-                    TextLengthChars = extractedText?.Length ?? 0,
-                    ExtractionMethod = extractionMethod,
-                    DescriptionSource = descriptionSource
-                }));
+                    try
+                    {
+                        await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                        {
+                            PipelineStage = "ingestion",
+                            DocumentId = documentId ?? "",
+                            CorrelationId = correlationId,
+                            Status = "completed",
+                            DurationMs = stopwatch.ElapsedMilliseconds,
+                            ServiceName = nameof(DocumentIngestionPipeline),
+                            TextLengthChars = extractedText?.Length ?? 0,
+                            ExtractionMethod = extractionMethod,
+                            DescriptionSource = descriptionSource
+                        });
+                    }
+                    catch (Exception emitEx)
+                    {
+                        _logger.LogWarning(emitEx, "Pipeline event emission failed for ingestion completed");
+                    }
+                });
                 _logger.LogInformation("[PipelineEvent] Emit dispatched for ingestion completed");
             }
 
@@ -217,17 +232,27 @@ public class DocumentIngestionPipeline
         {
             if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
             {
-                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                _ = Task.Run(async () =>
                 {
-                    PipelineStage = "ingestion",
-                    DocumentId = documentId ?? "",
-                    CorrelationId = correlationId,
-                    Status = "failed",
-                    DurationMs = stopwatch.ElapsedMilliseconds,
-                    ServiceName = nameof(DocumentIngestionPipeline),
-                    ErrorType = ex.GetType().Name,
-                    ErrorMessage = ex.Message
-                }));
+                    try
+                    {
+                        await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                        {
+                            PipelineStage = "ingestion",
+                            DocumentId = documentId ?? "",
+                            CorrelationId = correlationId,
+                            Status = "failed",
+                            DurationMs = stopwatch.ElapsedMilliseconds,
+                            ServiceName = nameof(DocumentIngestionPipeline),
+                            ErrorType = ex.GetType().Name,
+                            ErrorMessage = ex.Message
+                        });
+                    }
+                    catch (Exception emitEx)
+                    {
+                        _logger.LogWarning(emitEx, "Pipeline event emission failed for ingestion failed event");
+                    }
+                });
             }
             throw;
         }

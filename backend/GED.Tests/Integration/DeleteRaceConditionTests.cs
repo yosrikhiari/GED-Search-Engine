@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Integration;
 
+[Trait("Category", "Unit")]
 public class DeleteRaceConditionTests
 {
     [Fact]

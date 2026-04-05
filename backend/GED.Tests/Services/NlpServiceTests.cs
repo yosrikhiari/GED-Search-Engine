@@ -6,6 +6,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class NlpServiceTests
 {
     private readonly NlpService _service;

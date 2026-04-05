@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Services;
+using GED.API.Models;
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -19,13 +20,13 @@ namespace GED.API.Controllers;
 [Authorize]
 public class RagController : ControllerBase
 {
-    private readonly IRagService            _ragService;
-    private readonly AuthService            _authService;
+    private readonly IRagService             _ragService;
+    private readonly IAuthService          _authService;
     private readonly ILogger<RagController> _logger;
 
     public RagController(
         IRagService            ragService,
-        AuthService            authService,
+        IAuthService           authService,
         ILogger<RagController> logger)
     {
         _ragService  = ragService;
@@ -68,7 +69,7 @@ public class RagController : ControllerBase
         try
         {
             if (string.IsNullOrWhiteSpace(request?.Query))
-                return BadRequest(new { error = "Query is required." });
+                return BadRequest(ErrorResponse.Create("Query is required."));
 
             // ── NEW ──────────────────────────────────────────────────────────
             InjectUserContext(request);
@@ -86,7 +87,7 @@ public class RagController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing RAG request");
-            return StatusCode(500, new { error = "RAG processing failed", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("RAG processing failed", ex.Message));
         }
     }
 
@@ -137,7 +138,7 @@ public class RagController : ControllerBase
             _logger.LogWarning("RAG stream timed out after {Seconds}s", StreamTimeoutSeconds);
             try
             {
-                var timeoutMsg = JsonSerializer.Serialize(new { error = "Stream timed out", timedOut = true });
+                var timeoutMsg = JsonSerializer.Serialize(ErrorResponse.Create("Stream timed out", "timedOut: true"));
                 await Response.WriteAsync($"data: {timeoutMsg}\n\n", CancellationToken.None);
                 await Response.Body.FlushAsync(CancellationToken.None);
             }
@@ -148,7 +149,7 @@ public class RagController : ControllerBase
             _logger.LogError(ex, "Error processing RAG stream request");
             try
             {
-                var error = JsonSerializer.Serialize(new { error = "RAG processing failed" });
+                var error = JsonSerializer.Serialize(ErrorResponse.Create("RAG processing failed"));
                 await Response.WriteAsync($"data: {error}\n\n", CancellationToken.None);
                 await Response.Body.FlushAsync(CancellationToken.None);
             }

@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Models;
 
+[Trait("Category", "Unit")]
 public class WebhookModelTests
 {
     [Fact]

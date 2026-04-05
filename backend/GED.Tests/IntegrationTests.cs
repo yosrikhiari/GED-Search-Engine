@@ -8,6 +8,7 @@ using Moq;
 
 namespace GED.Tests;
 
+[Trait("Category", "Unit")]
 public class IntegrationTests
 {
     [Fact]

@@ -271,7 +271,7 @@ public class OcrmyPdfOcrService : IOcrService
     /// <param name="args">Command line arguments.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>Tuple of exit code, stdout, and stderr.</returns>
-    private static async Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
+    private async Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
         string exe, string args, CancellationToken ct)
     {
         using var process = new Process
@@ -301,7 +301,11 @@ public class OcrmyPdfOcrService : IOcrService
         }
         catch (OperationCanceledException)
         {
-            try { process.Kill(entireProcessTree: true); } catch { }
+            try { process.Kill(entireProcessTree: true); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to kill ocrmypdf process on cancellation");
+            }
             throw;
         }
 

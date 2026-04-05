@@ -348,7 +348,7 @@ public partial class OcrWorkerService : BackgroundService
                                     CorrelationId = correlationId,
                                     DocumentId = msg.DocumentId.ToString()
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt);
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt) ?? Task.CompletedTask;
 
                                 await ProcessOcrJobAsync(msg, stoppingToken);
                                 sw.Stop();
@@ -362,7 +362,7 @@ public partial class OcrWorkerService : BackgroundService
                                     DocumentId = msg.DocumentId.ToString(),
                                     DurationMs = sw.ElapsedMilliseconds
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt);
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt) ?? Task.CompletedTask;
 
                                 ackSent = await SafeAckAsync(channel, deliveryTag, ackSent);
 
@@ -391,7 +391,7 @@ public partial class OcrWorkerService : BackgroundService
                                     ErrorMessage = ex.Message,
                                     ErrorType = ex.GetType().Name
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt);
+                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt) ?? Task.CompletedTask;
 
                                 // Nack first — if the DB call below also fails we still want
                                 // the message dead-lettered rather than stuck unacked
@@ -545,10 +545,13 @@ public partial class OcrWorkerService : BackgroundService
 
         if (hasNativeText && document.ContentType == "application/pdf")
         {
+            if (document.ExtractedText is null)
+                throw new InvalidOperationException("ExtractedText expected but was null when hasNativeText is true.");
+            
             // Native text available — index immediately and enrich asynchronously
             _logger.LogInformation(
                 "📄 PDF {DocId} has {Chars} chars of native text — skipping Tesseract",
-                document.Id, document.ExtractedText!.Length);
+                document.Id, document.ExtractedText.Length);
 
             document.IsOcrProcessed = true;
             document.ModifiedAt     = DateTime.UtcNow;
@@ -574,7 +577,11 @@ public partial class OcrWorkerService : BackgroundService
                 ? enricher.EnrichAsync(document.ExtractedText!, document.FileName, document.Category ?? "Other", ct)
                 : Task.FromResult<OcrMetadataEnrichmentService.EnrichmentResult?>(null);
 
-            try { await Task.WhenAll(nativeDateTask, nativeEnrichTask); } catch { }
+            try { await Task.WhenAll(nativeDateTask, nativeEnrichTask); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Background enrichment tasks failed for document {DocId}", document.Id);
+            }
             if (nativeDateTask.IsCompletedSuccessfully)    nativeDateInfo    = nativeDateTask.Result;
             if (nativeEnrichTask.IsCompletedSuccessfully) nativeEnrichResult = nativeEnrichTask.Result;
 
@@ -618,7 +625,11 @@ public partial class OcrWorkerService : BackgroundService
                     message.DocumentId, File.OpenRead(processedPdfPath), message.Language ?? "eng", ct);
                 
                 // Clean up temp PDF
-                try { File.Delete(processedPdfPath); } catch { }
+                try { File.Delete(processedPdfPath); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to cleanup temp PDF: {Path}", processedPdfPath);
+                }
             }
             else
             {
@@ -759,9 +770,10 @@ public partial class OcrWorkerService : BackgroundService
         {
             if (textCleaner != null)
             {
+                var extractedLength = ocrResult.ExtractedText?.Length ?? 0;
                 _logger.LogInformation("🧹 Sending {Chars} chars to Ollama for cleaning…",
-                    ocrResult.ExtractedText!.Length);
-                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText, ct);
+                    extractedLength);
+                cleanedText = await textCleaner.CleanOcrTextAsync(ocrResult.ExtractedText ?? string.Empty, ct);
             }
         }
         catch (Exception ex)

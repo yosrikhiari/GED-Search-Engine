@@ -5,6 +5,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
+using GED.API.Models;
 using System.Security.Claims;
 
 namespace GED.API.Controllers;
@@ -22,14 +23,14 @@ namespace GED.API.Controllers;
 public class DocumentAclController : ControllerBase
 {
     private readonly GedDbContext                       _db;
-    private readonly AuthService                        _authService;
+    private readonly IAuthService                       _authService;
     private readonly ISearchService                     _searchService;
     private readonly IDocumentService                   _documentService;
     private readonly ILogger<DocumentAclController>     _logger;
 
     public DocumentAclController(
         GedDbContext                   db,
-        AuthService                    authService,
+        IAuthService                   authService,
         ISearchService                 searchService,
         IDocumentService               documentService,
         ILogger<DocumentAclController>  logger)
@@ -84,7 +85,7 @@ public class DocumentAclController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         if (request.ExpiresAt.HasValue && request.ExpiresAt.Value <= DateTime.UtcNow)
-            return BadRequest(new { error = "ExpiresAt must be in the future." });
+            return BadRequest(ErrorResponse.Create("ExpiresAt must be in the future."));
 
         var existing = await _db.DocumentAcls
             .FirstOrDefaultAsync(a => a.DocumentId == documentId && a.UserId == request.UserId);
@@ -152,7 +153,7 @@ public class DocumentAclController : ControllerBase
         var acl = await _db.DocumentAcls
             .FirstOrDefaultAsync(a => a.Id == aclId && a.DocumentId == documentId);
 
-        if (acl == null) return NotFound();
+        if (acl == null) return NotFound(ErrorResponse.Create("ACL entry not found"));
 
         _db.DocumentAcls.Remove(acl);
         await _db.SaveChangesAsync();
@@ -168,7 +169,7 @@ public class DocumentAclController : ControllerBase
         }
 
         _logger.LogInformation("ACL entry {AclId} revoked for document {DocId}", aclId, documentId);
-        return Ok(new { message = "Access revoked." });
+        return Ok(ErrorResponse.Create("Access revoked."));
     }
 
     // ── User: list my accessible documents ────────────────────────────────────
@@ -229,31 +230,42 @@ public class DocumentAclController : ControllerBase
 
         if ((request.DocumentIds == null || !request.DocumentIds.Any()) &&
             (request.UserIds == null || !request.UserIds.Any()))
-            return BadRequest(new { error = "Provide at least documentIds or userIds." });
-
-        var results = new BatchAclResult { TotalRequested = 0, Succeeded = 0, Failed = 0 };
-        var tasks = new List<Task>();
+            return BadRequest(ErrorResponse.Create("Provide at least documentIds or userIds."));
 
         // Cross-product: grant every user access to every document
         var docIds = request.DocumentIds?.Distinct().ToList() ?? new List<Guid>();
         var userIds = request.UserIds?.Distinct().ToList() ?? new List<Guid>();
 
         if (docIds.Count == 0 || userIds.Count == 0)
-            return BadRequest(new { error = "Both documentIds and userIds must be provided for batch grant." });
+            return BadRequest(ErrorResponse.Create("Both documentIds and userIds must be provided for batch grant."));
 
         if (docIds.Count * userIds.Count > 500)
-            return BadRequest(new { error = "Maximum 500 access grants per request." });
+            return BadRequest(ErrorResponse.Create("Maximum 500 access grants per request."));
+
+        var totalRequested = docIds.Count * userIds.Count;
+        var tasks = new List<Task<SingleAclResult>>();
+        var affectedDocIds = new HashSet<Guid>();
 
         foreach (var docId in docIds)
         {
             foreach (var userId in userIds)
             {
-                results.TotalRequested++;
-                tasks.Add(GrantSingleAclAsync(docId, userId, request.Permission, request.ExpiresAt, adminId.Value, results));
+                tasks.Add(GrantSingleAclAsync(docId, userId, request.Permission, request.ExpiresAt, adminId.Value, affectedDocIds));
             }
         }
 
-        await Task.WhenAll(tasks);
+        var taskResults = await Task.WhenAll(tasks);
+
+        // Batch re-index all affected documents (N+1 fix)
+        await ReindexDocumentsAsync(affectedDocIds);
+
+        var results = new BatchAclResult 
+        { 
+            TotalRequested = totalRequested, 
+            Succeeded = taskResults.Count(r => r.Succeeded), 
+            Failed = taskResults.Count(r => !r.Succeeded),
+            Errors = taskResults.Where(r => !r.Succeeded && r.Error != null).Select(r => r.Error!).ToList()
+        };
 
         _logger.LogInformation(
             "Batch ACL grant: {Total} operations, {Succeeded} succeeded, {Failed} failed",
@@ -274,10 +286,10 @@ public class DocumentAclController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         if (request.AclIds == null || !request.AclIds.Any())
-            return BadRequest(new { error = "Provide ACL entry IDs to revoke." });
+            return BadRequest(ErrorResponse.Create("Provide ACL entry IDs to revoke."));
 
         if (request.AclIds.Count > 500)
-            return BadRequest(new { error = "Maximum 500 revocations per request." });
+            return BadRequest(ErrorResponse.Create("Maximum 500 revocations per request."));
 
         var results = new BatchAclResult { TotalRequested = request.AclIds.Count, Succeeded = 0, Failed = 0 };
         var revokedDocIds = new HashSet<Guid>();
@@ -334,21 +346,26 @@ public class DocumentAclController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         if (request.UserIds == null || !request.UserIds.Any())
-            return BadRequest(new { error = "Provide user IDs." });
+            return BadRequest(ErrorResponse.Create("Provide user IDs."));
 
         if (request.UserIds.Count > 100)
-            return BadRequest(new { error = "Maximum 100 users per request." });
+            return BadRequest(ErrorResponse.Create("Maximum 100 users per request."));
 
-        var results = new BatchAclResult { TotalRequested = request.UserIds.Count, Succeeded = 0, Failed = 0 };
+        var affectedDocIds = new HashSet<Guid> { documentId };
+        var tasks = request.UserIds.Select(userId => 
+            GrantSingleAclAsync(documentId, userId, request.Permission, request.ExpiresAt, adminId.Value, affectedDocIds));
+        var taskResults = await Task.WhenAll(tasks);
 
-        foreach (var userId in request.UserIds)
-        {
-            await GrantSingleAclAsync(documentId, userId, request.Permission, request.ExpiresAt, adminId.Value, results);
-        }
+        // Batch re-index (N+1 fix)
+        await ReindexDocumentsAsync(affectedDocIds);
 
-        // Re-index document after all grants
-        var doc = await _documentService.GetDocumentByIdAsync(documentId);
-        if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+        var results = new BatchAclResult 
+        { 
+            TotalRequested = request.UserIds.Count, 
+            Succeeded = taskResults.Count(r => r.Succeeded), 
+            Failed = taskResults.Count(r => !r.Succeeded),
+            Errors = taskResults.Where(r => !r.Succeeded && r.Error != null).Select(r => r.Error!).ToList()
+        };
 
         return Ok(results);
     }
@@ -384,11 +401,8 @@ public class DocumentAclController : ControllerBase
         _db.DocumentAcls.RemoveRange(toRemove);
         await _db.SaveChangesAsync();
 
-        foreach (var docId in docIds)
-        {
-            var doc = await _documentService.GetDocumentByIdAsync(docId);
-            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
-        }
+        // Batch re-index all affected documents (N+1 fix)
+        await ReindexDocumentsAsync(docIds);
 
         return Ok(new BatchAclResult
         {
@@ -398,8 +412,8 @@ public class DocumentAclController : ControllerBase
         });
     }
 
-    private async Task GrantSingleAclAsync(
-        Guid docId, Guid userId, int permission, DateTime? expiresAt, Guid adminId, BatchAclResult results)
+    private async Task<SingleAclResult> GrantSingleAclAsync(
+        Guid docId, Guid userId, int permission, DateTime? expiresAt, Guid adminId, HashSet<Guid> affectedDocIds)
     {
         try
         {
@@ -436,17 +450,29 @@ public class DocumentAclController : ControllerBase
             }
 
             await _db.SaveChangesAsync();
+            affectedDocIds.Add(docId);
 
-            // Re-index document
-            var doc = await _documentService.GetDocumentByIdAsync(docId);
-            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
-
-            results.Succeeded++;
+            return new SingleAclResult { Succeeded = true };
         }
         catch (Exception ex)
         {
-            results.Failed++;
-            results.Errors.Add($"Doc {docId} / User {userId}: {ex.Message}");
+            return new SingleAclResult 
+            { 
+                Succeeded = false, 
+                Error = $"Doc {docId} / User {userId}: {ex.Message}" 
+            };
+        }
+    }
+
+    private async Task ReindexDocumentsAsync(HashSet<Guid> docIds)
+    {
+        if (docIds.Count == 0) return;
+
+        var documents = await _documentService.GetDocumentsByIdsAsync(docIds);
+        if (documents.Count != 0)
+        {
+            await _searchService.BulkIndexDocumentsAsync(documents);
+            _logger.LogInformation("Re-indexed {Count} documents after ACL changes", documents.Count);
         }
     }
 
@@ -494,4 +520,10 @@ public class BulkRevokeByFilterRequest
     public List<Guid>? DocumentIds { get; set; }
     public List<Guid>? UserIds { get; set; }
     public bool? ExpiredOnly { get; set; }
+}
+
+public class SingleAclResult
+{
+    public bool Succeeded { get; set; }
+    public string? Error { get; set; }
 }

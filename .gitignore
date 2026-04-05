@@ -148,3 +148,7 @@ test-docs/test-unique-2.pdf
 test-docs/test-unique-3.pdf
 test-docs/test-unique-4.pdf
 .gitignore
+AGENTS.md
+cookies3.txt
+test_document.txt
+test_doc.txt

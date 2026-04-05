@@ -4,6 +4,7 @@ using GED.Infrastructure.Services;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class ChunkSearchTests
 {
     #region Chunk Search Hit Tests

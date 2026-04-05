@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Rag;
 
+[Trait("Category", "Unit")]
 public class RagRequestTests
 {
     [Fact]

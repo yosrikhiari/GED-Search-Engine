@@ -76,6 +76,44 @@ def create_bar_vis(title, vis_id, index_id, query, time_field="timestamp"):
                     {"query": {"language": "kuery", "query": query}, "filter": []}, index_id)
 
 
+def create_stacked_bar_vis(title, vis_id, index_id, query, time_field="timestamp", split_field="createdByUserId", split_size=5):
+    vis_state = {
+        "title": title,
+        "type": "histogram",
+        "params": {
+            "type": "histogram",
+            "grid": {"categoryLines": False},
+            "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom", "show": True,
+                               "style": {}, "scale": {"type": "linear"},
+                               "labels": {"show": True, "filter": True, "truncate": 100}, "title": {}}],
+            "valueAxes": [{"id": "ValueAxis-1", "name": "LeftAxis-1", "type": "value", "position": "left",
+                            "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"},
+                            "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                            "title": {"text": "Count"}}],
+            "seriesParams": [{"show": True, "type": "histogram", "mode": "stacked",
+                               "data": {"label": "Count", "id": "1"}, "valueAxis": "ValueAxis-1",
+                               "drawLinesBetweenPoints": True, "lineWidth": 2, "showCircles": True}],
+            "addTooltip": True, "addLegend": True, "legendPosition": "right",
+            "times": [], "addTimeMarker": False,
+            "thresholdLine": {"show": False, "value": 10, "width": 1, "style": "full", "color": "#E7664C"},
+            "labels": {},
+        },
+        "aggs": [
+            {"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}},
+            {"id": "2", "enabled": True, "type": "date_histogram", "schema": "segment",
+             "params": {"field": time_field, "useNormalizedOpenSearchInterval": True,
+                        "scaleMetricValues": False, "interval": "auto", "drop_partials": False,
+                        "min_doc_count": 1, "extended_bounds": {}}},
+            {"id": "3", "enabled": True, "type": "terms", "schema": "group",
+             "params": {"field": split_field, "orderBy": "1", "order": "desc", "size": split_size,
+                        "otherBucket": True, "otherBucketLabel": "Other",
+                        "missingBucket": True, "missingBucketLabel": "Unknown"}},
+        ],
+    }
+    return make_obj("visualization", vis_id, title, vis_state,
+                    {"query": {"language": "kuery", "query": query}, "filter": []}, index_id)
+
+
 def create_line_vis(vis_id, index_id):
     title = "Stage latency"
     vis_state = {
@@ -106,10 +144,10 @@ def create_line_vis(vis_id, index_id):
              "params": {"field": "timestamp", "useNormalizedOpenSearchInterval": True,
                         "scaleMetricValues": False, "interval": "auto", "drop_partials": False,
                         "min_doc_count": 1, "extended_bounds": {}}},
-            {"id": "3", "enabled": True, "type": "terms", "schema": "group",
-             "params": {"field": "pipelineStage.keyword", "orderBy": "1", "order": "desc", "size": 10,
-                        "otherBucket": False, "otherBucketLabel": "Other",
-                        "missingBucket": False, "missingBucketLabel": "Missing"}},
+             {"id": "3", "enabled": True, "type": "terms", "schema": "group",
+              "params": {"field": "pipelineStage.keyword", "orderBy": "1", "order": "desc", "size": 10,
+                         "otherBucket": False, "otherBucketLabel": "Other",
+                         "missingBucket": False, "missingBucketLabel": "Missing"}},
         ],
     }
     return make_obj("visualization", vis_id, title, vis_state,
@@ -137,8 +175,8 @@ def create_pie_vis(title, vis_id, index_id, query, split_field):
                     {"query": {"language": "kuery", "query": query}, "filter": []}, index_id)
 
 
-def create_metric_vis(vis_id, index_id):
-    title = "Pipeline success rate"
+def create_ocr_confidence_vis(vis_id, index_id):
+    title = "OCR processed documents"
     vis_state = {
         "title": title,
         "type": "metric",
@@ -149,11 +187,91 @@ def create_metric_vis(vis_id, index_id):
                 "colorSchema": "Green to Red", "metricColorMode": "None",
                 "colorsRange": [{"from": 0, "to": 10000}],
                 "labels": {"show": True}, "invertColors": False,
-                "style": {"bgFill": "#000", "bgColor": False, "labelColor": False, "subText": "", "fontSize": 60},
+                "style": {"bgFill": "#000", "bgColor": False, "labelColor": False, "subText": "OCR processed", "fontSize": 60},
             },
         },
         "aggs": [
-            {"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}}
+            {"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}},
+        ],
+    }
+    return make_obj("visualization", vis_id, title, vis_state,
+                    {"query": {"language": "kuery", "query": "isOcrProcessed:true"}, "filter": []}, index_id)
+
+
+def create_retry_vis(vis_id, index_id):
+    title = "Retry count by queue"
+    vis_state = {
+        "title": title,
+        "type": "histogram",
+        "params": {
+            "type": "histogram",
+            "grid": {"categoryLines": False},
+            "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom", "show": True,
+                               "style": {}, "scale": {"type": "linear"},
+                               "labels": {"show": True, "filter": True, "truncate": 100}, "title": {"text": "Queue"}}],
+            "valueAxes": [{"id": "ValueAxis-1", "name": "LeftAxis-1", "type": "value", "position": "left",
+                            "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"},
+                            "labels": {"show": True, "rotate": 0, "filter": False, "truncate": 100},
+                            "title": {"text": "Total retries"}}],
+            "seriesParams": [{"show": True, "type": "histogram", "mode": "normal",
+                               "data": {"label": "Total retries", "id": "1"}, "valueAxis": "ValueAxis-1",
+                               "drawLinesBetweenPoints": True, "lineWidth": 2, "showCircles": True}],
+            "addTooltip": True, "addLegend": False,
+            "times": [], "addTimeMarker": False,
+            "thresholdLine": {"show": False, "value": 10, "width": 1, "style": "full", "color": "#E7664C"},
+            "labels": {},
+        },
+        "aggs": [
+            {"id": "1", "enabled": True, "type": "sum", "schema": "metric", "params": {"field": "retryCount"}},
+            {"id": "2", "enabled": True, "type": "terms", "schema": "segment",
+             "params": {"field": "queueName.keyword", "orderBy": "1", "order": "desc", "size": 10,
+                        "otherBucket": True, "otherBucketLabel": "Other",
+                        "missingBucket": True, "missingBucketLabel": "N/A"}},
+        ],
+    }
+    return make_obj("visualization", vis_id, title, vis_state,
+                    {"query": {"language": "kuery", "query": "*"}, "filter": []}, index_id)
+
+
+def create_doc_status_vis(vis_id, index_id):
+    title = "Document status distribution"
+    vis_state = {
+        "title": title,
+        "type": "pie",
+        "params": {
+            "type": "pie",
+            "addTooltip": True, "addLegend": True, "legendPosition": "right", "isDonut": True,
+            "labels": {"show": True, "values": True, "last_level": True, "truncate": 100},
+        },
+        "aggs": [
+            {"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}},
+             {"id": "2", "enabled": True, "type": "terms", "schema": "segment",
+             "params": {"field": "status", "orderBy": "1", "order": "desc", "size": 10,
+                        "otherBucket": False, "otherBucketLabel": "Other",
+                        "missingBucket": False, "missingBucketLabel": "Missing"}},
+        ],
+    }
+    return make_obj("visualization", vis_id, title, vis_state,
+                    {"query": {"language": "kuery", "query": "*"}, "filter": []}, index_id)
+
+
+def create_metric_vis(vis_id, index_id):
+    title = "Completed pipeline events"
+    vis_state = {
+        "title": title,
+        "type": "metric",
+        "params": {
+            "addTooltip": True, "addLegend": False, "type": "metric",
+            "metric": {
+                "percentageMode": False, "useRanges": False,
+                "colorSchema": "Green to Red", "metricColorMode": "None",
+                "colorsRange": [{"from": 0, "to": 10000}],
+                "labels": {"show": True}, "invertColors": False,
+                "style": {"bgFill": "#000", "bgColor": False, "labelColor": False, "subText": "Completed", "fontSize": 60},
+            },
+        },
+        "aggs": [
+            {"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}},
         ],
     }
     return make_obj("visualization", vis_id, title, vis_state,
@@ -198,10 +316,13 @@ def create_dashboard():
         {"panelIndex": "3", "gridData": {"x": 0,  "y": 30, "w": 16, "h": 15, "i": "3"}, "version": "7.10.0", "type": "visualization", "id": "documents-by-category"},
         {"panelIndex": "4", "gridData": {"x": 16, "y": 30, "w": 16, "h": 15, "i": "4"}, "version": "7.10.0", "type": "visualization", "id": "duplicate-detection"},
         {"panelIndex": "5", "gridData": {"x": 32, "y": 30, "w": 16, "h": 15, "i": "5"}, "version": "7.10.0", "type": "visualization", "id": "ocr-vs-native"},
-        {"panelIndex": "6", "gridData": {"x": 0,  "y": 45, "w": 24, "h": 15, "i": "6"}, "version": "7.10.0", "type": "visualization", "id": "stage-error-breakdown"},
-        {"panelIndex": "7", "gridData": {"x": 24, "y": 45, "w": 24, "h": 15, "i": "7"}, "version": "7.10.0", "type": "visualization", "id": "processing-time-dist"},
-        {"panelIndex": "8", "gridData": {"x": 0,  "y": 60, "w": 48, "h": 15, "i": "8"}, "version": "7.10.0", "type": "visualization", "id": "failed-events"},
-        {"panelIndex": "9", "gridData": {"x": 0,  "y": 75, "w": 48, "h": 15, "i": "9"}, "version": "7.10.0", "type": "visualization", "id": "user-upload-activity"},
+        {"panelIndex": "10", "gridData": {"x": 0,  "y": 45, "w": 16, "h": 15, "i": "10"}, "version": "7.10.0", "type": "visualization", "id": "document-status"},
+        {"panelIndex": "6", "gridData": {"x": 16, "y": 45, "w": 16, "h": 15, "i": "6"}, "version": "7.10.0", "type": "visualization", "id": "stage-error-breakdown"},
+        {"panelIndex": "7", "gridData": {"x": 32, "y": 45, "w": 16, "h": 15, "i": "7"}, "version": "7.10.0", "type": "visualization", "id": "processing-time-dist"},
+        {"panelIndex": "8", "gridData": {"x": 0,  "y": 60, "w": 24, "h": 15, "i": "8"}, "version": "7.10.0", "type": "visualization", "id": "failed-events"},
+        {"panelIndex": "11", "gridData": {"x": 24, "y": 60, "w": 24, "h": 15, "i": "11"}, "version": "7.10.0", "type": "visualization", "id": "ocr-confidence"},
+        {"panelIndex": "12", "gridData": {"x": 0,  "y": 75, "w": 24, "h": 15, "i": "12"}, "version": "7.10.0", "type": "visualization", "id": "retry-by-queue"},
+        {"panelIndex": "9", "gridData": {"x": 24, "y": 75, "w": 24, "h": 15, "i": "9"}, "version": "7.10.0", "type": "visualization", "id": "user-upload-activity"},
     ]
     return {
         "type": "dashboard",
@@ -228,6 +349,9 @@ def create_dashboard():
             {"name": "panel_7", "type": "visualization", "id": "processing-time-dist"},
             {"name": "panel_8", "type": "visualization", "id": "failed-events"},
             {"name": "panel_9", "type": "visualization", "id": "user-upload-activity"},
+            {"name": "panel_10", "type": "visualization", "id": "document-status"},
+            {"name": "panel_11", "type": "visualization", "id": "ocr-confidence"},
+            {"name": "panel_12", "type": "visualization", "id": "retry-by-queue"},
         ],
     }
 
@@ -235,16 +359,20 @@ def create_dashboard():
 def main():
     objects = [
         # Bar charts — ged-pipeline-events uses "timestamp"; ged-documents uses "createdAt"
-        create_bar_vis("Upload volume over time",      "upload-volume",        PIPELINE_EVENTS_ID, "pipelineStage:upload AND status.keyword:completed", time_field="timestamp"),
-        create_bar_vis("Processing time distribution", "processing-time-dist", PIPELINE_EVENTS_ID, "pipelineStage:ocr_worker",                          time_field="timestamp"),
-        create_bar_vis("User upload activity",         "user-upload-activity", DOCUMENTS_ID,       "*",                                                 time_field="createdAt"),
+        create_bar_vis("Upload volume over time",      "upload-volume",        PIPELINE_EVENTS_ID, "pipelineStage.keyword:upload AND status.keyword:completed", time_field="timestamp"),
+        create_bar_vis("Processing time distribution", "processing-time-dist", PIPELINE_EVENTS_ID, "pipelineStage.keyword:ocr_worker",                          time_field="timestamp"),
+        create_stacked_bar_vis("User upload activity", "user-upload-activity", DOCUMENTS_ID,       "*",                                                 time_field="createdAt", split_field="createdByUserId", split_size=5),
         # Line
         create_line_vis("stage-latency", PIPELINE_EVENTS_ID),
         # Pies
         create_pie_vis("Documents by category",    "documents-by-category", DOCUMENTS_ID,       "*",                         "category.keyword"),
-        create_pie_vis("Duplicate detection rate", "duplicate-detection",   PIPELINE_EVENTS_ID, "pipelineStage:file_storage", "duplicateDetected"),
-        create_pie_vis("OCR vs native text",       "ocr-vs-native",         PIPELINE_EVENTS_ID, "pipelineStage:ocr_worker",   "extractionMethod.keyword"),
+        create_pie_vis("Duplicate detection rate", "duplicate-detection",   PIPELINE_EVENTS_ID, "pipelineStage.keyword:file_storage", "duplicateDetected"),
+        create_pie_vis("OCR vs native text",       "ocr-vs-native",         PIPELINE_EVENTS_ID, "pipelineStage.keyword:ocr_worker",   "extractionMethod.keyword"),
         create_pie_vis("Stage error breakdown",    "stage-error-breakdown", PIPELINE_EVENTS_ID, "status.keyword:failed",      "pipelineStage.keyword"),
+        create_doc_status_vis("document-status",   DOCUMENTS_ID),
+        # Histograms
+        create_ocr_confidence_vis("ocr-confidence", DOCUMENTS_ID),
+        create_retry_vis("retry-by-queue",         PIPELINE_EVENTS_ID),
         # Metric + table
         create_metric_vis("pipeline-success-rate", PIPELINE_EVENTS_ID),
         create_table_vis("failed-events",          PIPELINE_EVENTS_ID),
@@ -270,10 +398,10 @@ def main():
         print("Import result:", json.dumps(result, indent=2))
 
         if result.get("success"):
-            print("\n✅  Dashboard created successfully!")
-            print("👉  http://localhost:5601/app/dashboards#/view/ged-pipeline-monitor")
+            print("\nDashboard created successfully!")
+            print("Open: http://localhost:5601/app/dashboards#/view/ged-pipeline-monitor")
         else:
-            print("\n❌  Import finished with errors:")
+            print("\nImport finished with errors:")
             for err in result.get("errors", []):
                 print(" -", err)
     finally:

@@ -5,6 +5,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Data;
 using GED.Infrastructure.Services;
+using GED.API.Models;
 using System.Security.Claims;
 
 namespace GED.API.Controllers;
@@ -22,14 +23,14 @@ namespace GED.API.Controllers;
 public class DocumentGroupController : ControllerBase
 {
     private readonly GedDbContext                       _db;
-    private readonly AuthService                        _authService;
+    private readonly IAuthService                       _authService;
     private readonly IDocumentService                   _documentService;
     private readonly ISearchService                     _searchService;
     private readonly ILogger<DocumentGroupController>   _logger;
 
     public DocumentGroupController(
         GedDbContext                  db,
-        AuthService                   authService,
+        IAuthService                  authService,
         IDocumentService              documentService,
         ISearchService                searchService,
         ILogger<DocumentGroupController> logger)
@@ -156,7 +157,7 @@ public class DocumentGroupController : ControllerBase
     public async Task<ActionResult<DocumentGroupDto>> GetGroup(Guid id)
     {
         var group = await _db.DocumentGroups.FindAsync(id);
-        if (group == null || !group.IsActive) return NotFound();
+        if (group == null || !group.IsActive) return NotFound(ErrorResponse.Create("Group not found"));
 
         var members = await _db.DocumentGroupMembers
             .Where(m => m.GroupId == id).ToListAsync();
@@ -225,7 +226,7 @@ public class DocumentGroupController : ControllerBase
     public async Task<IActionResult> UpdateGroup(Guid id, [FromBody] UpdateGroupRequest req)
     {
         var group = await _db.DocumentGroups.FindAsync(id);
-        if (group == null || !group.IsActive) return NotFound();
+        if (group == null || !group.IsActive) return NotFound(ErrorResponse.Create("Group not found"));
 
         if (req.Name        != null) group.Name        = req.Name;
         if (req.Description != null) group.Description = req.Description;
@@ -244,7 +245,7 @@ public class DocumentGroupController : ControllerBase
     public async Task<IActionResult> DeleteGroup(Guid id)
     {
         var group = await _db.DocumentGroups.FindAsync(id);
-        if (group == null) return NotFound();
+        if (group == null) return NotFound(ErrorResponse.Create("Group not found"));
 
         group.IsActive  = false;
         group.UpdatedAt = DateTime.UtcNow;
@@ -263,7 +264,7 @@ public class DocumentGroupController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         var group = await _db.DocumentGroups.FindAsync(id);
-        if (group == null || !group.IsActive) return NotFound();
+        if (group == null || !group.IsActive) return NotFound(ErrorResponse.Create("Group not found"));
 
         var existingDocIds = await _db.DocumentGroupMembers
             .Where(m => m.GroupId == id)
@@ -319,7 +320,7 @@ public class DocumentGroupController : ControllerBase
     {
         var member = await _db.DocumentGroupMembers
             .FirstOrDefaultAsync(m => m.Id == memberId && m.GroupId == id);
-        if (member == null) return NotFound();
+        if (member == null) return NotFound(ErrorResponse.Create("Document member not found"));
 
         _db.DocumentGroupMembers.Remove(member);
 
@@ -352,13 +353,13 @@ public class DocumentGroupController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         if (req.ExpiresAt.HasValue && req.ExpiresAt.Value <= DateTime.UtcNow)
-            return BadRequest(new { error = "ExpiresAt must be in the future." });
+            return BadRequest(ErrorResponse.Create("ExpiresAt must be in the future."));
 
         var group = await _db.DocumentGroups.FindAsync(id);
-        if (group == null || !group.IsActive) return NotFound();
+        if (group == null || !group.IsActive) return NotFound(ErrorResponse.Create("Group not found"));
 
         var user = _authService.GetUserById(req.UserId);
-        if (user == null) return BadRequest(new { error = "User not found." });
+        if (user == null) return BadRequest(ErrorResponse.Create("User not found."));
 
         var existing = await _db.UserGroupAssignments
             .FirstOrDefaultAsync(a => a.GroupId == id && a.UserId == req.UserId);
@@ -453,7 +454,7 @@ public class DocumentGroupController : ControllerBase
     {
         var assignment = await _db.UserGroupAssignments
             .FirstOrDefaultAsync(a => a.Id == assignmentId && a.GroupId == id);
-        if (assignment == null) return NotFound();
+        if (assignment == null) return NotFound(ErrorResponse.Create("Group assignment not found"));
 
         var docIds = await _db.DocumentGroupMembers
             .Where(m => m.GroupId == id).Select(m => m.DocumentId).ToListAsync();
@@ -551,7 +552,7 @@ public class DocumentGroupController : ControllerBase
     public async Task<ActionResult<UserAccessSummaryDto>> GetUserAccess(Guid userId)
     {
         var user = _authService.GetUserById(userId);
-        if (user == null) return NotFound();
+        if (user == null) return NotFound(ErrorResponse.Create("User not found"));
 
         var assignments = await _db.UserGroupAssignments
             .Where(a => a.UserId == userId).ToListAsync();
@@ -609,10 +610,10 @@ public class DocumentGroupController : ControllerBase
         if (adminId == null) return Unauthorized();
 
         if (userId == adminId && req.Role != UserRole.Admin)
-            return BadRequest(new { error = "You cannot change your own role." });
+            return BadRequest(ErrorResponse.Create("You cannot change your own role."));
 
         var user = _authService.GetUserById(userId);
-        if (user == null) return NotFound();
+        if (user == null) return NotFound(ErrorResponse.Create("User not found"));
 
         var updateReq = new RegisterRequest
         {
@@ -625,7 +626,7 @@ public class DocumentGroupController : ControllerBase
         };
 
         var (success, error) = _authService.UpdateUser(userId, updateReq);
-        if (!success) return BadRequest(new { error });
+        if (!success) return BadRequest(ErrorResponse.Create(error ?? "Update failed"));
 
         _logger.LogInformation("Admin {Admin} changed role of user {User} to {Role}",
             adminId, userId, req.Role);

@@ -1,5 +1,6 @@
 using OpenSearch.Client;
 using GED.Core.Models;
+using GED.Infrastructure.Constants;
 using CoreSearchRequest = GED.Core.Models.SearchRequest;
 
 namespace GED.Infrastructure.Services.Search;
@@ -53,27 +54,5 @@ public class SearchQueryBuilder
     /// Expands category aliases (FR/AR → English).
     /// </summary>
     private static List<string> ExpandCategoryAliases(string query)
-    {
-        var expanded = new List<string>();
-        var lowerQuery = query.ToLower();
-
-        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            { "contrat", "Contract" }, { "contrats", "Contract" },
-            { "facture", "Invoice" }, { "factures", "Invoice" },
-            { "rapport", "Report" }, { "rapports", "Report" },
-            { "lettre", "Letter" }, { "lettres", "Letter" },
-            { "devis", "Invoice" },
-            { "note", "Memo" },
-            { "présentation", "Presentation" }, { "presentation", "Presentation" }
-        };
-
-        foreach (var (alias, english) in aliases)
-        {
-            if (lowerQuery.Contains(alias))
-                expanded.Add(english);
-        }
-
-        return expanded;
-    }
+        => CategoryAliases.ExpandFromQuery(query).ToList();
 }

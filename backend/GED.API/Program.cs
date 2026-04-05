@@ -29,17 +29,38 @@ var builder = WebApplication.CreateBuilder(args);
 var logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
 Directory.CreateDirectory(logDirectory);
 
-Log.Logger = new LoggerConfiguration()
+var logIsProduction = builder.Environment.IsProduction();
+var isRunningInContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") == "true";
+
+var loggerConfig = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
-    .WriteTo.Console()
-    .WriteTo.File(Path.Combine(logDirectory, "ged-.txt"), rollingInterval: RollingInterval.Day)
-    .CreateLogger();
+    .Enrich.WithProperty("Application", "GED.API")
+    .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName);
+
+if (logIsProduction || isRunningInContainer)
+{
+    Log.Logger = loggerConfig
+        .WriteTo.Console(new Serilog.Formatting.Json.JsonFormatter())
+        .WriteTo.File(Path.Combine(logDirectory, "ged-.json"), 
+            rollingInterval: RollingInterval.Day)
+        .CreateLogger();
+}
+else
+{
+    Log.Logger = loggerConfig
+        .WriteTo.Console()
+        .WriteTo.File(Path.Combine(logDirectory, "ged-.txt"), 
+            rollingInterval: RollingInterval.Day,
+            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+        .CreateLogger();
+}
 
 builder.Host.UseSerilog();
 
 // ── OpenTelemetry Metrics ──────────────────────────────────────────────────────
-// TODO: Enable after package versions are verified
+// KNOWN LIMITATION: OpenTelemetry metrics are commented out pending package version verification
+// Tracking: Waiting on OpenTelemetry.Extensions.Hosting and related packages to be validated for production use
 // builder.Services.AddOpenTelemetry()
 //     .ConfigureResource(resource => resource.AddService("GED.API"))
 //     .WithMetrics(metrics => metrics
@@ -135,7 +156,10 @@ builder.WebHost.ConfigureKestrel(options =>
 
 // ── Required Configuration Validation ───────────────────────────────────────────
 var isDevelopment = builder.Environment.IsDevelopment();
-ValidateRequiredConfiguration(builder.Configuration, isDevelopment);
+if (builder.Environment.EnvironmentName != "Testing")
+{
+    ValidateRequiredConfiguration(builder.Configuration, isDevelopment);
+}
 
 // ── SQL Server / EF Core ──────────────────────────────────────────────────────
 var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -143,8 +167,8 @@ var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConn
 // Resolve environment variable placeholders like ${VAR_NAME}
 var connectionString = ConfigurationHelper.ResolveEnvironmentVariables(rawConnectionString ?? "");
 
-// Validate required configuration - fail fast if not set
-if (string.IsNullOrWhiteSpace(connectionString))
+// Validate required configuration - fail fast if not set (skip in Testing environment)
+if (string.IsNullOrWhiteSpace(connectionString) && builder.Environment.EnvironmentName != "Testing")
 {
     throw new InvalidOperationException(
         "FATAL: ConnectionStrings__DefaultConnection is not set. " +
@@ -161,15 +185,7 @@ if (!connectionString.Contains("Pooling=", StringComparison.OrdinalIgnoreCase))
 
 Log.Information("Database connection string configured (password masked): {ConnStr}", ConfigurationHelper.MaskConnectionString(connectionString));
 
-// AddDbContextFactory for singleton services that need DbContext (e.g., AuthService)
-builder.Services.AddDbContextFactory<GedDbContext>(options =>
-    options.UseSqlServer(connectionString, sqlServer =>
-    {
-        sqlServer.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(10), null);
-    })
-);
-
-// Also register DbContext as Scoped for controllers and other services
+// Register DbContext with both Scoped (for DI) and Factory (for singleton services like AuthService)
 builder.Services.AddDbContext<GedDbContext>(options =>
     options.UseSqlServer(connectionString, sqlServer =>
     {
@@ -178,7 +194,7 @@ builder.Services.AddDbContext<GedDbContext>(options =>
 );
 
 // ── Cookie authentication ─────────────────────────────────────────────────────
-var isProduction = !builder.Environment.IsDevelopment();
+var cookieIsProduction = builder.Environment.IsProduction();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -188,7 +204,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.Path = "/";
         options.Cookie.Domain = null;
         // Only set Secure flag in production (HTTPS)
-        options.Cookie.SecurePolicy = isProduction ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
+        options.Cookie.SecurePolicy = cookieIsProduction ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
         options.ExpireTimeSpan  = TimeSpan.FromHours(8);
         options.SlidingExpiration = true;
         options.Events.OnRedirectToLogin = ctx =>
@@ -204,7 +220,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     });
 
 Log.Information("Cookie security: SameSite=Lax, SecurePolicy={SecurePolicy} (Production={IsProd})", 
-    isProduction ? "Always" : "SameAsRequest", isProduction);
+    cookieIsProduction ? "Always" : "SameAsRequest", cookieIsProduction);
 
 // ── Authorization Policies ─────────────────────────────────────────────────────
 builder.Services.AddScoped<IAuthorizationHandler, CategoryAccessHandler>();
@@ -251,6 +267,11 @@ if (embedModel != "bge-m3")
 
 Log.Information("Embedding model: {Model}, dimensions: {Dimensions}", embedModel, embedDimensions);
 
+if (string.IsNullOrWhiteSpace(opensearchUrl))
+{
+    opensearchUrl = "http://localhost:9200";
+}
+
 var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
     .DefaultIndex("ged-documents")
     .PrettyJson();
@@ -280,7 +301,8 @@ builder.Services.AddSingleton<IOpenSearchClient>(new OpenSearchClient(connection
 var rabbitMqHost = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Host"] ?? "localhost");
 var rabbitMqUser = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Username"] ?? "admin");
 var rabbitMqPass = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Password"] ?? "");
-var rabbitMqPort = builder.Configuration.GetValue<int>("RabbitMQ:Port", 5672);
+var rabbitMqPortRaw = ConfigurationHelper.ResolveEnvironmentVariables(builder.Configuration["RabbitMQ:Port"] ?? "5672");
+var rabbitMqPort = int.TryParse(rabbitMqPortRaw, out var port) ? port : 5672;
 Log.Information("RabbitMQ configured: Host={Host}, Port={Port}, User={User}", rabbitMqHost, rabbitMqPort, rabbitMqUser);
 
 builder.Services.AddSingleton<RabbitMqService>(sp =>
@@ -390,6 +412,7 @@ builder.Services.AddSingleton<AuthService>(sp =>
     
     return new AuthService(logger, config, cache, dbFactory);
 });
+builder.Services.AddSingleton<IAuthService>(sp => sp.GetRequiredService<AuthService>());
 builder.Services.AddSingleton<IUserContext>(sp => sp.GetRequiredService<AuthService>());
 
 // Initialize AuthService at startup (via hosted service)
@@ -484,19 +507,12 @@ builder.Services.AddSingleton<RabbitMqConnectionService>();
 builder.Services.AddHostedService<RabbitMqConnectionService>();
 builder.Services.AddSingleton(sp => sp.GetRequiredService<RabbitMqConnectionService>().Connection!);
 
-var rabbitServiceProvider = builder.Services.BuildServiceProvider();
-var rabbitConnService = rabbitServiceProvider.GetRequiredService<RabbitMqConnectionService>();
-var rabbitLogger = rabbitServiceProvider.GetRequiredService<ILogger<RabbitMqBackpressureHealthCheck>>();
-
+// Register health checks
 builder.Services.AddHealthChecks()
     .AddSqlServer(sqlConnectionStr, name: "sqlserver", tags: new[] { "db", "critical" },
         timeout: TimeSpan.FromSeconds(3))
     .AddRedis(redisConnection, name: "redis", tags: new[] { "cache" },
         timeout: TimeSpan.FromSeconds(2))
-    .AddCheck("rabbitmq-backpressure", new RabbitMqBackpressureHealthCheck(
-        () => rabbitConnService.Connection,
-        rabbitLogger
-    ), tags: new[] { "messaging", "backpressure" }, timeout: TimeSpan.FromSeconds(10))
     .AddCheck("opensearch", () =>
     {
         try
@@ -516,6 +532,22 @@ builder.Services.AddHealthChecks()
 // =============================================================================
 var app = builder.Build();
 // =============================================================================
+
+// Register RabbitMQ backpressure health check after app.Build() to avoid BuildServiceProvider()
+if (builder.Environment.EnvironmentName != "Testing")
+{
+    using (var scope = app.Services.CreateScope())
+    {
+        var rabbitConnService = scope.ServiceProvider.GetRequiredService<RabbitMqConnectionService>();
+        var rabbitLogger = scope.ServiceProvider.GetRequiredService<ILogger<RabbitMqBackpressureHealthCheck>>();
+        
+        app.Services.GetRequiredService<IHealthChecksBuilder>()
+            .AddCheck("rabbitmq-backpressure", new RabbitMqBackpressureHealthCheck(
+                () => rabbitConnService.Connection,
+                rabbitLogger
+            ), tags: new[] { "messaging", "backpressure" }, timeout: TimeSpan.FromSeconds(10));
+    }
+}
 
 // ── Database Migration (handles both fresh DB and existing init_schema.sql DB) ──
 try

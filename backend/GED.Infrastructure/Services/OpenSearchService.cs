@@ -2,6 +2,7 @@ using OpenSearch.Client;
 using OpenSearch.Net;
 using GED.Core.Interfaces;
 using GED.Core.Models;
+using GED.Infrastructure.Constants;
 using GED.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -90,31 +91,6 @@ public class OpenSearchService : ISearchService
     /// RRF k parameter for hybrid chunk search fusion.
     /// </summary>
     private readonly int _chunkRerankFusionK;
-
-    /// <summary>
-    /// Multilingual category aliases mapping FR/AR terms to English values.
-    /// Used to normalize category queries across languages.
-    /// </summary>
-    private static readonly Dictionary<string, string> CategoryAliases =
-        new(StringComparer.OrdinalIgnoreCase)
-    {
-        // French aliases
-        { "contrat",      "Contract"     }, { "contrats",     "Contract"     },
-        { "facture",      "Invoice"      }, { "factures",     "Invoice"      },
-        { "rapport",      "Report"       }, { "rapports",     "Report"       },
-        { "lettre",       "Letter"       }, { "lettres",      "Letter"       },
-        { "courrier",     "Letter"       },
-        { "devis",        "Invoice"      },
-        { "note",         "Memo"         },
-        { "présentation", "Presentation" }, { "presentation", "Presentation" },
-        // Arabic aliases
-        { "عقد",          "Contract"     }, { "عقود",         "Contract"     },
-        { "فاتورة",       "Invoice"      }, { "فواتير",       "Invoice"      },
-        { "تقرير",        "Report"       }, { "تقارير",       "Report"       },
-        { "رسالة",        "Letter"       }, { "رسائل",        "Letter"       },
-        { "مذكرة",        "Memo"         },
-        { "عرض",          "Presentation" },
-    };
 
     /// <summary>
     /// Initializes a new instance of <see cref="OpenSearchService"/>.
@@ -1516,7 +1492,7 @@ public class OpenSearchService : ISearchService
 
             // Add category aliases
             foreach (var token in cleanQuery.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (CategoryAliases.TryGetValue(token, out var aliasedCategory))
+                if (CategoryAliases.TryGetEnglish(token, out var aliasedCategory))
                     variations.Add(aliasedCategory);
 
             // Exact phrase match on title (highest boost)
@@ -1560,7 +1536,7 @@ public class OpenSearchService : ISearchService
                     }
 
                     var kwVariations = GenerateQueryVariations(kw);
-                    if (CategoryAliases.TryGetValue(kw, out var kwAlias))
+                    if (CategoryAliases.TryGetEnglish(kw, out var kwAlias))
                         kwVariations.Add(kwAlias);
 
                     foreach (var v in kwVariations)

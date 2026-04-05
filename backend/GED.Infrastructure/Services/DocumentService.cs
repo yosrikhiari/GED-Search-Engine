@@ -75,6 +75,8 @@ public class DocumentService : IDocumentService
     /// Read from configuration (OCR:DateConfidenceThreshold), defaults to 0.7.
     /// </summary>
     private readonly float _dateConfidenceThreshold;
+    private readonly long _maxStorageBytesPerUser;
+    private readonly bool _quotaEnforcementEnabled;
 
     /// <summary>
     /// Initializes a new instance of <see cref="DocumentService"/>.
@@ -105,6 +107,8 @@ public class DocumentService : IDocumentService
         _db = db;
         _dateExtractor = dateExtractor;
         _dateConfidenceThreshold = configuration?.GetValue<float>("OCR:DateConfidenceThreshold", 0.7f) ?? 0.7f;
+        _maxStorageBytesPerUser = configuration?.GetValue<long>("Storage:MaxStorageBytesPerUser", 10737418240) ?? 10737418240;
+        _quotaEnforcementEnabled = configuration?.GetValue<bool>("Storage:QuotaEnforcementEnabled", true) ?? true;
     }
 
     /// <inheritdoc />
@@ -157,6 +161,7 @@ public class DocumentService : IDocumentService
         string? title = null,
         Dictionary<string, object>? metadata = null,
         int? priority = null,
+        string? createdBy = null,
         CancellationToken cancellationToken = default)
     {
         var documentId = Guid.NewGuid();
@@ -170,6 +175,23 @@ public class DocumentService : IDocumentService
         try
         {
             storedFile = await _documentStorage.StageFileAsync(fileStream, documentId, fileExtension, correlationId, cancellationToken);
+
+            // ── 1a. Check storage quota ────────────────────────────────────────────
+            if (_quotaEnforcementEnabled && !string.IsNullOrEmpty(createdBy))
+            {
+                var currentUsage = await _db.Documents
+                    .Where(d => d.CreatedBy == createdBy && d.Status != DocumentStatus.Deleted)
+                    .SumAsync(d => d.FileSize, cancellationToken);
+
+                if (currentUsage + storedFile.FileSize > _maxStorageBytesPerUser)
+                {
+                    await _documentStorage.CleanupTempFileAsync(storedFile.TempPath, cancellationToken);
+                    throw new InvalidOperationException(
+                        $"Storage quota exceeded. Current usage: {currentUsage / (1024 * 1024):F2}MB, " +
+                        $"Max: {_maxStorageBytesPerUser / (1024 * 1024):F2}MB, " +
+                        $"File size: {storedFile.FileSize / (1024 * 1024):F2}MB");
+                }
+            }
 
             // ── 1b. Check for duplicate based on file hash ─────────────────────────
             var existingDoc = await _db.Documents
@@ -212,8 +234,6 @@ public class DocumentService : IDocumentService
                 await _documentStorage.CleanupTempFileAsync(storedFile.TempPath, cancellationToken);
                 throw;
             }
-
-            // ── 3. MERGE PIPELINE METADATA WITH CALLER-SUPPLIED METADATA ─────
 
             // ── 3. MERGE PIPELINE METADATA WITH CALLER-SUPPLIED METADATA ─────
             var mergedMetadata = metadata ?? new Dictionary<string, object>();
@@ -266,7 +286,7 @@ public class DocumentService : IDocumentService
                 FileSize      = storedFile.FileSize,
                 FileHash      = storedFile.FileHash,
                 CreatedAt     = uploadTime,
-                CreatedBy     = "system",
+                CreatedBy     = createdBy ?? "system",
                 ModifiedAt    = uploadTime,
                 ModifiedBy    = "system",
                 DocumentDate  = documentDate,
@@ -312,16 +332,26 @@ public class DocumentService : IDocumentService
             _logger.LogInformation("[PipelineEvent] About to emit db_persist completed, corrId={CorrId}, serviceNull={IsNull}", correlationId, _pipelineEventService is null);
             if (_pipelineEventService != null && !string.IsNullOrEmpty(correlationId))
             {
-                _ = Task.Run(() => _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                _ = Task.Run(async () =>
                 {
-                    PipelineStage = "db_persist",
-                    DocumentId = documentId.ToString(),
-                    CorrelationId = correlationId,
-                    Status = "completed",
-                    DurationMs = 0,
-                    ServiceName = nameof(DocumentService),
-                    Category = category
-                }));
+                    try
+                    {
+                        await _pipelineEventService.EmitPipelineEventAsync(new PipelineEvent
+                        {
+                            PipelineStage = "db_persist",
+                            DocumentId = documentId.ToString(),
+                            CorrelationId = correlationId,
+                            Status = "completed",
+                            DurationMs = 0,
+                            ServiceName = nameof(DocumentService),
+                            Category = category
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Pipeline event emission failed for document {DocumentId}", documentId);
+                    }
+                });
                 _logger.LogInformation("[PipelineEvent] Emit dispatched for db_persist completed");
             }
 

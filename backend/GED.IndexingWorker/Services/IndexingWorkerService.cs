@@ -149,7 +149,7 @@ public class IndexingWorkerService : BackgroundService
                             {
                                 ["x-dead-letter-exchange"]    = DlxName,
                                 ["x-dead-letter-routing-key"] = QueueName,
-                                ["x-max-length"] = 10000,
+                                ["x-max-length"] = 1000,
                                 ["x-message-ttl"] = 3600000
                             },
                             cancellationToken: stoppingToken);
@@ -219,7 +219,8 @@ public class IndexingWorkerService : BackgroundService
                                     CorrelationId = correlationId,
                                     DocumentId = documentId.ToString()
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt);
+                                if (_pipelineEventService != null)
+                                    _ = _pipelineEventService.EmitPipelineEventAsync(startEvt);
 
                                 await ProcessIndexingJobAsync(message, stoppingToken);
 
@@ -235,7 +236,8 @@ public class IndexingWorkerService : BackgroundService
                                     EmbeddingModel = "bge-m3",
                                     EmbeddingDimension = 1024
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt);
+                                if (_pipelineEventService != null)
+                                    _ = _pipelineEventService.EmitPipelineEventAsync(completedEvt);
 
                                 await UpdateOutboxAcknowledgedAsync(documentId, stoppingToken);
 
@@ -263,11 +265,16 @@ public class IndexingWorkerService : BackgroundService
                                     ErrorMessage = ex.Message,
                                     ErrorType = ex.GetType().Name
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt);
+                                if (_pipelineEventService != null)
+                                    _ = _pipelineEventService.EmitPipelineEventAsync(failedEvt);
 
                                 await SafeNackAsync(channel, deliveryTag, requeue: false);
 
-                                try { await connection.CloseAsync(); } catch { }
+                                try { await connection.CloseAsync(); }
+                                catch (Exception closeEx)
+                                {
+                                    _logger.LogWarning(closeEx, "Failed to close RabbitMQ connection");
+                                }
                             }
                         };
 

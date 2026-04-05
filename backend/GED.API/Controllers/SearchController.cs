@@ -5,6 +5,7 @@ using GED.Core.Interfaces;
 using GED.Core.Models;
 using GED.Infrastructure.Services;
 using GED.Infrastructure.Data;
+using GED.API.Models;
 using System.Security.Claims;
 
 namespace GED.API.Controllers;
@@ -23,13 +24,13 @@ public class SearchController : ControllerBase
 {
     private readonly ISearchService              _searchService;
     private readonly INlpService                _nlpService;
-    private readonly AuthService                _authService;
-    private readonly ILogger<SearchController>  _logger;
+    private readonly IAuthService               _authService;
+    private readonly ILogger<SearchController>   _logger;
 
     public SearchController(
         ISearchService            searchService,
-        INlpService               nlpService,
-        AuthService               authService,
+        INlpService              nlpService,
+        IAuthService             authService,
         ILogger<SearchController> logger)
     {
         _searchService = searchService;
@@ -49,7 +50,7 @@ public class SearchController : ControllerBase
     public async Task<ActionResult<SearchResult>> Search([FromBody] SearchRequest request)
     {
         if (request == null)
-            return BadRequest(new { error = "Request body is required." });
+            return BadRequest(ErrorResponse.Create("Request body is required."));
 
         var username = User.FindFirst(ClaimTypes.Name)?.Value;
         var role     = User.FindFirst(ClaimTypes.Role)?.Value;
@@ -71,7 +72,7 @@ public class SearchController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error performing search for query '{Query}'", request.Query);
-            return StatusCode(500, new { error = "Search failed", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("Search failed", ex.Message));
         }
     }
 
@@ -84,7 +85,7 @@ public class SearchController : ControllerBase
     public async Task<ActionResult<List<string>>> GetQuerySuggestions([FromQuery] string? q)
     {
         if (string.IsNullOrWhiteSpace(q) || q.Length < 2)
-            return Ok(new List<string>());
+            return BadRequest(ErrorResponse.Create("Query must be at least 2 characters"));
 
         try
         {
@@ -115,7 +116,7 @@ public class SearchController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting suggestions for document {Id}", documentId);
-            return StatusCode(500, new { error = "Failed to get suggestions", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("Failed to get suggestions", ex.Message));
         }
     }
 
@@ -178,7 +179,7 @@ public class SearchController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during manual reindex");
-            return StatusCode(500, new { error = "Reindex failed", message = ex.Message });
+            return StatusCode(500, ErrorResponse.Create("Reindex failed", ex.Message));
         }
     }
 }

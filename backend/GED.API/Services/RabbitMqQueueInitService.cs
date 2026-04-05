@@ -150,8 +150,22 @@ public class RabbitMqQueueInitService : IHostedService
     {
         if (_connection != null)
         {
-            await _connection.CloseAsync(cancellationToken);
-            _connection.Dispose();
+            try
+            {
+                await _connection.CloseAsync(cancellationToken);
+            }
+            catch
+            {
+                // Swallow all exceptions during shutdown — connection is being disposed anyway
+            }
+            try
+            {
+                _connection.Dispose();
+            }
+            catch
+            {
+                // Swallow disposal exceptions
+            }
         }
     }
 }

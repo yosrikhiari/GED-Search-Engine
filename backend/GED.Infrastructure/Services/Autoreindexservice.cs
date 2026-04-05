@@ -186,7 +186,7 @@ public class AutoReindexService : BackgroundService
                 if (d.Metadata == null) return true;
                 if (!d.Metadata.TryGetValue("last_indexed_at", out var val)) return true;
                 if (!DateTime.TryParse(val?.ToString(), out var lastIndexed)) return true;
-                return d.ModifiedAt!.Value > lastIndexed;
+                return (d.ModifiedAt ?? DateTime.MinValue) > lastIndexed;
             }).Take(_batchSize).ToList();
 
             if (!stale.Any())

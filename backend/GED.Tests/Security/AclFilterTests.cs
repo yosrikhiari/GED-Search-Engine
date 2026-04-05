@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Security;
 
+[Trait("Category", "Unit")]
 public class AclFilterConstructionTests
 {
     [Theory]

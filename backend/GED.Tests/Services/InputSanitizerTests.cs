@@ -3,6 +3,7 @@ using GED.Infrastructure.Services;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class InputSanitizerTests
 {
     [Fact]

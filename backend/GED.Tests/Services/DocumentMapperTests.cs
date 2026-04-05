@@ -7,6 +7,7 @@ using FluentAssertions;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class DocumentMapperTests
 {
     private readonly DocumentMapper _mapper;
@@ -219,6 +220,7 @@ public class DocumentMapperTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class DocumentMapperExtensionsTests
 {
     [Fact]
@@ -298,6 +300,7 @@ public class DocumentMapperExtensionsTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class IndexingJobMessageTests
 {
     [Fact]

@@ -1,7 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using GED.Core.Models;
-using GED.Infrastructure.Services;
+using GED.Core.Interfaces;
+using GED.API.Models;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -18,10 +19,10 @@ namespace GED.API.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private readonly AuthService _authService;
+    private readonly IAuthService _authService;
     private readonly ILogger<AuthController> _logger;
 
-    public AuthController(AuthService authService, ILogger<AuthController> logger)
+    public AuthController(IAuthService authService, ILogger<AuthController> logger)
     {
         _authService = authService;
         _logger      = logger;
@@ -33,16 +34,18 @@ public class AuthController : ControllerBase
 [AllowAnonymous]
 public async Task<IActionResult> Login([FromBody] LoginRequest request)
 {
-    var result = _authService.Login(request);
+    var clientIp = GetClientIpAddress();
+    var result = _authService.Login(request, clientIp);
     if (result == null)
-        return Unauthorized(new { error = "Invalid username or password." });
+        return Unauthorized(ErrorResponse.Create("Invalid username or password."));
 
     var claims = new List<Claim>
     {
         new(ClaimTypes.NameIdentifier, result.UserId.ToString()),
         new(ClaimTypes.Name,           result.Username),
         new(ClaimTypes.Role,           result.Role.ToString()),
-        new("fullName",                result.FullName ?? result.Username)
+        new("fullName",                result.FullName ?? result.Username),
+        new("sessionToken",            result.Token)
     };
     var identity  = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
     var principal = new ClaimsPrincipal(identity);
@@ -61,6 +64,13 @@ public async Task<IActionResult> Login([FromBody] LoginRequest request)
 [Authorize]
 public async Task<IActionResult> Logout()
 {
+    var sessionToken = User.FindFirst("sessionToken")?.Value;
+    if (!string.IsNullOrEmpty(sessionToken))
+    {
+        _authService.Logout(sessionToken);
+        _logger.LogDebug("Session {Token} invalidated on logout", sessionToken[..Math.Min(8, sessionToken.Length)]);
+    }
+    
     await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
     return Ok();
 }
@@ -89,7 +99,7 @@ public async Task<IActionResult> Logout()
     public IActionResult Register([FromBody] RegisterRequest request)
     {
         var (success, error) = _authService.Register(request);
-        if (!success) return BadRequest(new { error });
+        if (!success) return BadRequest(ErrorResponse.Create(error ?? "Registration failed"));
 
         return Ok(new { message = $"User '{request.Username}' created successfully." });
     }
@@ -112,7 +122,9 @@ public async Task<IActionResult> Logout()
     public ActionResult<UserDto> GetUser(Guid id)
     {
         var user = _authService.GetUserById(id);
-        return user == null ? NotFound() : Ok(user);
+        if (user == null)
+            return NotFound(ErrorResponse.Create("User not found", HttpContext.Items["CorrelationId"]?.ToString()));
+        return Ok(user);
     }
 
     /// <summary>
@@ -123,7 +135,7 @@ public async Task<IActionResult> Logout()
     public IActionResult UpdateUser(Guid id, [FromBody] RegisterRequest request)
     {
         var (success, error) = _authService.UpdateUser(id, request);
-        if (!success) return BadRequest(new { error });
+        if (!success) return BadRequest(ErrorResponse.Create(error ?? "Update failed"));
         return Ok(new { message = "User updated." });
     }
 
@@ -135,6 +147,21 @@ public async Task<IActionResult> Logout()
     public IActionResult DeactivateUser(Guid id)
     {
         var ok = _authService.DeactivateUser(id);
-        return ok ? Ok(new { message = "User deactivated." }) : NotFound();
+        if (!ok)
+            return NotFound(ErrorResponse.Create("User not found", HttpContext.Items["CorrelationId"]?.ToString()));
+        return Ok(new { message = "User deactivated." });
+    }
+
+    private string? GetClientIpAddress()
+    {
+        var forwardedFor = HttpContext.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(forwardedFor))
+        {
+            var ip = forwardedFor.Split(',').First().Trim();
+            if (!string.IsNullOrEmpty(ip))
+                return ip;
+        }
+        
+        return HttpContext.Connection.RemoteIpAddress?.ToString();
     }
 }

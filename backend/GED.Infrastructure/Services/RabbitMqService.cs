@@ -183,17 +183,15 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
     /// <inheritdoc />
     /// <remarks>
     /// Note: Subscription is handled by OcrWorkerService, not this service.
-    /// This is a no-op that logs a warning if called.
+    /// This method throws NotSupportedException to enforce proper usage.
     /// </remarks>
     public Task SubscribeAsync<T>(
         string queueName,
         Func<T, Task> handler,
         CancellationToken cancellationToken = default)
     {
-        _logger.LogWarning(
-            "SubscribeAsync called on RabbitMqService — use OcrWorkerService for consuming");
-
-        return Task.CompletedTask;
+        throw new NotSupportedException(
+            "SubscribeAsync is not supported by RabbitMqService. Use OcrWorkerService for message consumption.");
     }
 
     // ── Connection management ─────────────────────────────────────────────────

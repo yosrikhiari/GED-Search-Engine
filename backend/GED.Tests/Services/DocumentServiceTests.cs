@@ -3,6 +3,7 @@ using GED.Core.Models;
 
 namespace GED.Tests.Services;
 
+[Trait("Category", "Unit")]
 public class DocumentServiceTests
 {
     #region Document Model Tests
