@@ -4514,6 +4514,13 @@ const seedInitialCompletionState = async (docs) => {
           completeCount++
           console.log(`[Polling] Initial: ${doc.id} already complete (status=${ocrData.status}, tags=${tagsCount})`)
         }
+      } else if (res.status === 404) {
+        // Document no longer exists — clean up cached state
+        delete docPipelineStatuses.value[doc.id]
+        delete docTagsUpdated.value[doc.id]
+        delete docCompletionMap.value[doc.id]
+        completeCount++ // treat as "complete" so it's excluded from pending
+        console.log(`[Polling] Initial: ${doc.id} not found (deleted), skipping`)
       }
     } catch (e) {
       console.warn('[Polling] Failed to seed', doc.id, e)
@@ -4557,6 +4564,33 @@ const startDocListPolling = async () => {
   
   console.log('[Polling] Starting polling for', docsToPoll.length, 'documents')
   
+  // Validate persisted documents — drop any that no longer exist (404)
+  const validDocs = []
+  for (const doc of docsToPoll) {
+    try {
+      const res = await fetch(`/api/documents/${doc.id}`, { headers: jsonHeaders() })
+      if (res.ok) {
+        validDocs.push(doc)
+      } else if (res.status === 404) {
+        console.log('[Polling] Startup validation: document not found, dropping:', doc.id)
+        delete docPipelineStatuses.value[doc.id]
+        delete docTagsUpdated.value[doc.id]
+        delete docCompletionMap.value[doc.id]
+      }
+    } catch (e) {
+      console.warn('[Polling] Startup validation: failed to check', doc.id, e)
+      validDocs.push(doc) // keep on error, let poller handle it
+    }
+  }
+  docsToPoll = validDocs
+  
+  if (!docsToPoll.length) {
+    console.log('[Polling] No valid documents after startup validation, skipping')
+    return
+  }
+  
+  console.log('[Polling] Startup validation: ', validDocs.length, '/', docsToPoll.length, 'documents valid')
+  
   // Seed initial state BEFORE starting polling
   await seedInitialCompletionState(docsToPoll)
   
@@ -4599,17 +4633,19 @@ const startDocListPolling = async () => {
           authFetch(`/api/documents/${doc.id}/ocr-status`)
         ])
         
-        // Only treat as deleted if explicitly confirmed (404 without auth issue)
-        // Auth failures (401/403) should NOT mark as deleted - session may have expired
+        // 404 is terminal — document was deleted or never existed
         if (docRes.status === 404) {
-          // Verify this is truly a "not found" vs auth issue by checking if we got a valid response
-          // If 404 is because document doesn't exist (not auth failure), log and potentially remove
-          // But first, let's check if it's really gone by using the search that we know works
-          console.log('[Polling] Document 404, checking if truly deleted...')
-          continue  // Don't remove - need to verify deletion properly
+          console.log('[Polling] Document confirmed deleted, removing from queue:', doc.id)
+          const idx = docsToPoll.findIndex(d => d.id === doc.id)
+          if (idx !== -1) docsToPoll.splice(idx, 1)
+          // Clean up any cached state for this document
+          delete docPipelineStatuses.value[doc.id]
+          delete docTagsUpdated.value[doc.id]
+          delete docCompletionMap.value[doc.id]
+          continue
         }
         
-        // Handle auth failures - don't treat as deleted, just log warning
+        // Handle auth failures — don't treat as deleted, just log warning
         if (docRes.status === 401 || docRes.status === 403) {
           console.warn('[Polling] Auth failed for document:', doc.id, '- status:', docRes.status)
           continue  // Don't remove documents on auth failure

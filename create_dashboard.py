@@ -356,26 +356,44 @@ def create_dashboard():
     }
 
 
+def resolve_index_pattern_id(title):
+    """Find the actual UUID of an index-pattern by its title."""
+    url = f"http://localhost:5601/api/saved_objects/_find?type=index-pattern&search={title}&search_fields=title"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("total", 0) == 0:
+        raise RuntimeError(f"Index-pattern '{title}' not found in OpenSearch Dashboards")
+    obj = data["saved_objects"][0]
+    print(f"  Resolved index-pattern '{title}' -> {obj['id']}")
+    return obj["id"]
+
+
 def main():
+    # Resolve actual UUIDs dynamically — they change after every docker compose down -v
+    print("Resolving index-pattern IDs...")
+    pipeline_events_id = resolve_index_pattern_id("ged-pipeline-events")
+    documents_id = resolve_index_pattern_id("ged-documents")
+
     objects = [
         # Bar charts — ged-pipeline-events uses "timestamp"; ged-documents uses "createdAt"
-        create_bar_vis("Upload volume over time",      "upload-volume",        PIPELINE_EVENTS_ID, "pipelineStage.keyword:upload AND status.keyword:completed", time_field="timestamp"),
-        create_bar_vis("Processing time distribution", "processing-time-dist", PIPELINE_EVENTS_ID, "pipelineStage.keyword:ocr_worker",                          time_field="timestamp"),
-        create_stacked_bar_vis("User upload activity", "user-upload-activity", DOCUMENTS_ID,       "*",                                                 time_field="createdAt", split_field="createdByUserId", split_size=5),
+        create_bar_vis("Upload volume over time",      "upload-volume",        pipeline_events_id, "pipelineStage.keyword:upload AND status.keyword:completed", time_field="timestamp"),
+        create_bar_vis("Processing time distribution", "processing-time-dist", pipeline_events_id, "pipelineStage.keyword:ocr_worker",                          time_field="timestamp"),
+        create_stacked_bar_vis("User upload activity", "user-upload-activity", documents_id,       "*",                                                 time_field="createdAt", split_field="createdByUserId", split_size=5),
         # Line
-        create_line_vis("stage-latency", PIPELINE_EVENTS_ID),
+        create_line_vis("stage-latency", pipeline_events_id),
         # Pies
-        create_pie_vis("Documents by category",    "documents-by-category", DOCUMENTS_ID,       "*",                         "category.keyword"),
-        create_pie_vis("Duplicate detection rate", "duplicate-detection",   PIPELINE_EVENTS_ID, "pipelineStage.keyword:file_storage", "duplicateDetected"),
-        create_pie_vis("OCR vs native text",       "ocr-vs-native",         PIPELINE_EVENTS_ID, "pipelineStage.keyword:ocr_worker",   "extractionMethod.keyword"),
-        create_pie_vis("Stage error breakdown",    "stage-error-breakdown", PIPELINE_EVENTS_ID, "status.keyword:failed",      "pipelineStage.keyword"),
-        create_doc_status_vis("document-status",   DOCUMENTS_ID),
+        create_pie_vis("Documents by category",    "documents-by-category", documents_id,       "*",                         "category.keyword"),
+        create_pie_vis("Duplicate detection rate", "duplicate-detection",   pipeline_events_id, "pipelineStage.keyword:file_storage", "duplicateDetected"),
+        create_pie_vis("OCR vs native text",       "ocr-vs-native",         pipeline_events_id, "pipelineStage.keyword:ocr_worker",   "extractionMethod.keyword"),
+        create_pie_vis("Stage error breakdown",    "stage-error-breakdown", pipeline_events_id, "status.keyword:failed",      "pipelineStage.keyword"),
+        create_doc_status_vis("document-status",   documents_id),
         # Histograms
-        create_ocr_confidence_vis("ocr-confidence", DOCUMENTS_ID),
-        create_retry_vis("retry-by-queue",         PIPELINE_EVENTS_ID),
+        create_ocr_confidence_vis("ocr-confidence", documents_id),
+        create_retry_vis("retry-by-queue",         pipeline_events_id),
         # Metric + table
-        create_metric_vis("pipeline-success-rate", PIPELINE_EVENTS_ID),
-        create_table_vis("failed-events",          PIPELINE_EVENTS_ID),
+        create_metric_vis("pipeline-success-rate", pipeline_events_id),
+        create_table_vis("failed-events",          pipeline_events_id),
         # Dashboard
         create_dashboard(),
     ]
@@ -400,6 +418,13 @@ def main():
         if result.get("success"):
             print("\nDashboard created successfully!")
             print("Open: http://localhost:5601/app/dashboards#/view/ged-pipeline-monitor")
+
+            # Save NDJSON for auto-restore (overwrites the committed file)
+            ndjson_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "opensearch_dashboards", "saved_objects.ndjson")
+            with open(ndjson_path, "w", encoding="utf-8") as out:
+                out.write(ndjson_content)
+            print(f"Saved NDJSON to {ndjson_path}")
         else:
             print("\nImport finished with errors:")
             for err in result.get("errors", []):
