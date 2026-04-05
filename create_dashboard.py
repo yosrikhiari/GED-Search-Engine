@@ -419,12 +419,30 @@ def main():
             print("\nDashboard created successfully!")
             print("Open: http://localhost:5601/app/dashboards#/view/ged-pipeline-monitor")
 
-            # Save NDJSON for auto-restore (overwrites the committed file)
+            # Export index-patterns + dashboard objects for auto-restore
+            # Fetch the actual index-pattern objects from Dashboards
+            ip_objects = []
+            for title, resolved_id in [("ged-pipeline-events", pipeline_events_id), ("ged-documents", documents_id)]:
+                resp = requests.get(f"http://localhost:5601/api/saved_objects/index-pattern/{resolved_id}")
+                if resp.ok:
+                    ip_obj = resp.json()
+                    ip_objects.append({
+                        "type": "index-pattern",
+                        "id": ip_obj["id"],
+                        "attributes": ip_obj["attributes"],
+                        "references": ip_obj.get("references", []),
+                        "migrationVersion": ip_obj.get("migrationVersion", {}),
+                    })
+
+            # Build complete NDJSON: index-patterns first, then visualizations + dashboard
+            all_objects = ip_objects + objects
+            ndjson_full = "\n".join(json.dumps(o, ensure_ascii=False) for o in all_objects)
+
             ndjson_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                        "opensearch_dashboards", "saved_objects.ndjson")
             with open(ndjson_path, "w", encoding="utf-8") as out:
-                out.write(ndjson_content)
-            print(f"Saved NDJSON to {ndjson_path}")
+                out.write(ndjson_full)
+            print(f"Saved NDJSON to {ndjson_path} ({len(all_objects)} objects)")
         else:
             print("\nImport finished with errors:")
             for err in result.get("errors", []):
