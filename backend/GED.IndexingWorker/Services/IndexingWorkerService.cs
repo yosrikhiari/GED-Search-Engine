@@ -98,7 +98,8 @@ public class IndexingWorkerService : BackgroundService
                         break;
                     }
 
-                    await Task.Delay(RetryDelayMs * attempt, stoppingToken);
+                    var delay = (int)Math.Min(RetryDelayMs * Math.Pow(2, attempt - 1), 60_000);
+                    await Task.Delay(delay, stoppingToken);
                 }
             }
 

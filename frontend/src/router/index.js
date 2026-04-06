@@ -43,18 +43,18 @@ router.beforeEach((to, _from, next) => {
   }
 
   if (to.name === 'Login' && isAuthenticated) {
-    next({ name: user.role === 'Admin' ? 'AdminDashboard' : 'UserHome' })
+    next({ name: user?.role === 'Admin' ? 'AdminDashboard' : 'UserHome' })
     return
   }
 
   // Redirect root path to correct dashboard based on role
-  if (to.path === '/' && user.role === 'Admin') {
+  if (to.path === '/' && user?.role === 'Admin') {
     next({ name: 'AdminDashboard' })
     return
   }
 
   if (to.meta.roles && isAuthenticated) {
-    if (!to.meta.roles.includes(user.role)) {
+    if (!to.meta.roles.includes(user?.role)) {
       if (user.role === 'Admin') {
         next({ name: 'AdminDashboard' })
       } else if (['Manager', 'User', 'ReadOnly'].includes(user.role)) {

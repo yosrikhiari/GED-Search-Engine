@@ -279,7 +279,7 @@ var connectionSettings = new ConnectionSettings(new Uri(opensearchUrl))
 // Configure authentication if security is enabled
 if (opensearchSecurityEnabled && !string.IsNullOrEmpty(opensearchUsername))
 {
-    connectionSettings.BasicAuthentication(opensearchUsername, "****"); // Don't log password
+    connectionSettings.BasicAuthentication(opensearchUsername, string.Empty); // Don't log password
     Log.Information("OpenSearch security enabled with user: {Username}", opensearchUsername);
 }
 else
@@ -824,6 +824,8 @@ if (app.Environment.IsDevelopment())
     });
 }
 
+app.UseIpRateLimiting();
+
 app.Use(async (context, next) =>
 {
     Log.Information("HTTP {Method} {Path}", context.Request.Method, context.Request.Path);
@@ -832,7 +834,6 @@ app.Use(async (context, next) =>
         context.Request.Method, context.Request.Path, context.Response.StatusCode);
 });
 
-app.UseIpRateLimiting();
 app.UseCors();
 app.UseGlobalExceptionHandler();
 

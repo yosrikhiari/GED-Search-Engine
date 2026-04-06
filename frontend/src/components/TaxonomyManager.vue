@@ -501,6 +501,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { apiFetch } from '@/api.js'
 
 const tabs = [
   { id: 'categories', label: 'Catégories', icon: '📁' },
@@ -508,7 +509,6 @@ const tabs = [
 ]
 
 const activeTab = ref('categories')
-const authHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('ged_token')}` })
 
 // ── Categories ────────────────────────────────────────────────────────────────
 const categories = ref([])
@@ -518,8 +518,8 @@ const categoryForm = ref({ name: '', description: '', icon: '📁', color: '#636
 
 const fetchCategories = async () => {
   try {
-    const res = await fetch('/api/taxonomy/categories', { headers: authHeaders() })
-    if (res.ok) categories.value = await res.json()
+    const data = await apiFetch('/api/taxonomy/categories')
+    categories.value = data || []
   } catch (e) { console.error('[Taxonomy] fetchCategories:', e) }
 }
 
@@ -536,19 +536,19 @@ const categoryTagCounts = computed(() => {
 const saveCategory = async () => {
   if (!categoryForm.value.name?.trim()) return
   try {
-    const url = editingCategory.value
-      ? `/api/taxonomy/categories/${editingCategory.value.id}`
-      : '/api/taxonomy/categories'
-    const method = editingCategory.value ? 'PUT' : 'POST'
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(categoryForm.value)
-    })
-    if (res.ok) {
-      await fetchCategories()
-      closeCategoryModal()
+    if (editingCategory.value) {
+      await apiFetch(`/api/taxonomy/categories/${editingCategory.value.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(categoryForm.value)
+      })
+    } else {
+      await apiFetch('/api/taxonomy/categories', {
+        method: 'POST',
+        body: JSON.stringify(categoryForm.value)
+      })
     }
+    await fetchCategories()
+    closeCategoryModal()
   } catch (e) { console.error('[Taxonomy] saveCategory:', e) }
 }
 
@@ -561,8 +561,7 @@ const editCategory = (cat) => {
 const deleteCategory = async (cat) => {
   if (!confirm(`Supprimer la catégorie "${cat.name}" ?`)) return
   try {
-    await fetch(`/api/taxonomy/categories/${cat.id}`, {
-      method: 'DELETE', headers: authHeaders() })
+    await apiFetch(`/api/taxonomy/categories/${cat.id}`, { method: 'DELETE' })
     await fetchCategories()
   } catch (e) { console.error('[Taxonomy] deleteCategory:', e) }
 }
@@ -602,9 +601,8 @@ const fetchTags = async () => {
       ...(tagSearch.value && { search: tagSearch.value }),
       ...(tagCategoryFilter.value && { category: tagCategoryFilter.value })
     })
-    const res = await fetch(`/api/taxonomy/tags?${params}`, { headers: authHeaders() })
-    if (res.ok) {
-      const data = await res.json()
+    const data = await apiFetch(`/api/taxonomy/tags?${params}`)
+    if (data) {
       tags.value = data.tags || []
       tagsTotalPages.value = data.totalPages || 1
     }
@@ -615,19 +613,19 @@ const fetchTags = async () => {
 const saveTag = async () => {
   if (!tagForm.value.name?.trim()) return
   try {
-    const url = editingTag.value
-      ? `/api/taxonomy/tags/${editingTag.value.id}`
-      : '/api/taxonomy/tags'
-    const method = editingTag.value ? 'PUT' : 'POST'
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(tagForm.value)
-    })
-    if (res.ok) {
-      await fetchTags()
-      closeTagModal()
+    if (editingTag.value) {
+      await apiFetch(`/api/taxonomy/tags/${editingTag.value.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(tagForm.value)
+      })
+    } else {
+      await apiFetch('/api/taxonomy/tags', {
+        method: 'POST',
+        body: JSON.stringify(tagForm.value)
+      })
     }
+    await fetchTags()
+    closeTagModal()
   } catch (e) { console.error('[Taxonomy] saveTag:', e) }
 }
 
@@ -635,17 +633,14 @@ const saveBulkTags = async () => {
   const names = bulkTagNames.value.split('\n').map(n => n.trim()).filter(Boolean)
   if (!names.length) return
   try {
-    const res = await fetch('/api/taxonomy/tags/bulk', {
+    await apiFetch('/api/taxonomy/tags/bulk', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ names, category: bulkTagCategory.value || undefined })
     })
-    if (res.ok) {
-      await fetchTags()
-      showBulkCreateTag.value = false
-      bulkTagNames.value = ''
-      bulkTagCategory.value = ''
-    }
+    await fetchTags()
+    showBulkCreateTag.value = false
+    bulkTagNames.value = ''
+    bulkTagCategory.value = ''
   } catch (e) { console.error('[Taxonomy] saveBulkTags:', e) }
 }
 
@@ -658,8 +653,7 @@ const editTag = (tag) => {
 const deleteTag = async (tag) => {
   if (!confirm(`Supprimer l'étiquette "#${tag.name}" ?`)) return
   try {
-    await fetch(`/api/taxonomy/tags/${tag.id}`, {
-      method: 'DELETE', headers: authHeaders() })
+    await apiFetch(`/api/taxonomy/tags/${tag.id}`, { method: 'DELETE' })
     await fetchTags()
   } catch (e) { console.error('[Taxonomy] deleteTag:', e) }
 }

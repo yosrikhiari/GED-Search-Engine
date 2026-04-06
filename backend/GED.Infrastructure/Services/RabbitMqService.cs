@@ -308,6 +308,6 @@ public class RabbitMqService : IMessageQueueService, IAsyncDisposable, IDisposab
 
         try { _connection?.CloseAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
         try { _connection?.DisposeAsync().GetAwaiter().GetResult(); } catch { /* best effort */ }
-        _lock.Dispose();
+        try { _lock.Dispose(); } catch { /* best effort */ }
     }
 }

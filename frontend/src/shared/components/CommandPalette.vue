@@ -265,10 +265,10 @@ watch(query, async (q) => {
   }
   isLoading.value = true
   try {
-    const token = localStorage.getItem('ged_token')
     const res = await fetch('/api/documents/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ query: q, page: 1, pageSize: 8 })
     })
     if (res.ok) {

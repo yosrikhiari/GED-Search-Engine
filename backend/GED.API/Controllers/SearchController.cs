@@ -139,35 +139,38 @@ public class SearchController : ControllerBase
             var searchService = scope.ServiceProvider.GetRequiredService<ISearchService>();
             var mapper = scope.ServiceProvider.GetRequiredService<IDocumentMapper>();
 
-            var rawDocs = await db.Database
-                .SqlQueryRaw<DocumentRow>(@"
-                    SELECT id, title, description, file_name AS FileName, file_path AS FilePath, 
-                           content_type AS ContentType, file_size AS FileSize, created_at AS CreatedAt, 
-                           document_date AS DocumentDate, modified_at AS ModifiedAt, 
-                           status AS Status, is_ocr_processed AS IsOcrProcessed, 
-                           ocr_text AS OcrText, extracted_text AS ExtractedText, category AS Category 
-                    FROM documents WHERE status = 'Indexed'")
-                .ToListAsync();
-
-            if (!rawDocs.Any())
-            {
-                return Ok(new { message = "No documents to re-index", count = 0 });
-            }
-
             var domainDocs = new List<Document>();
 
-            foreach (var row in rawDocs)
+            var batchSize = 500;
+            var skip = 0;
+
+            while (true)
             {
-                var tags = DocumentMapperExtensions.DeserializeTagsOrDefault(null);
-                var metadata = DocumentMapperExtensions.DeserializeMetadataOrDefault(null);
-                
-                var doc = mapper.ToDomainFromRow(row, tags, metadata);
-                domainDocs.Add(doc);
+                var batchDocs = await db.Documents
+                    .AsNoTracking()
+                    .Where(d => d.Status == DocumentStatus.Indexed)
+                    .OrderBy(d => d.Id)
+                    .Skip(skip)
+                    .Take(batchSize)
+                    .ToListAsync();
+
+                if (!batchDocs.Any()) break;
+
+                foreach (var entity in batchDocs)
+                {
+                    var tags = DocumentMapperExtensions.DeserializeTagsOrDefault(null);
+                    var metadata = DocumentMapperExtensions.DeserializeMetadataOrDefault(null);
+                    var doc = mapper.ToDomain(entity, tags, metadata);
+                    domainDocs.Add(doc);
+                }
+
+                if (batchDocs.Count < batchSize) break;
+                skip += batchSize;
             }
 
             if (!domainDocs.Any())
             {
-                return Ok(new { message = "No documents could be mapped for re-indexing", count = 0 });
+                return Ok(new { message = "No documents to re-index", count = 0 });
             }
 
             await searchService.BulkIndexDocumentsAsync(domainDocs);

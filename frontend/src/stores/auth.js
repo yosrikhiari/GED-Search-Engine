@@ -58,7 +58,6 @@ export const useAuthStore = defineStore('auth', () => {
     } finally {
       user.value = null
       localStorage.removeItem('ged_user')
-      localStorage.removeItem('ged_access_token')
       isLoading.value = false
     }
   }

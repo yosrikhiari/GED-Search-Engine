@@ -1883,7 +1883,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { format } from 'date-fns'
 import { logger } from '../logger.js'
@@ -1907,10 +1907,8 @@ const userInitials = computed(() => {
   const n = user.value?.fullName || user.value?.username || '?'
   return n.split(' ').map(c => c[0]).join('').toUpperCase().slice(0, 2)
 })
-const authHeaders = () => {
-  const t = localStorage.getItem('ged_token')
-  return t ? { Authorization: `Bearer ${t}` } : {}
-}
+// Auth is handled via cookies (credentials: 'include') — no Bearer token needed
+const authHeaders = () => ({})
 const logout = () => { localStorage.clear(); router.push('/login') }
 
 onMounted(() => {
@@ -1918,6 +1916,15 @@ onMounted(() => {
   // Start pending polling if there are pending documents
   if (searchResults.value?.pendingDocuments?.length > 0) {
     startPendingPoll()
+  }
+})
+
+onUnmounted(() => {
+  stopPendingPoll()
+  stopOcrPolling()
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
   }
 })
 
@@ -1996,7 +2003,8 @@ const refreshSearchResults = async () => {
   try {
     const res = await fetch('/api/search/query', {
       method:  'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body:    JSON.stringify({ query: '', page: 1, pageSize: 50 })
     })
     if (res.ok) {
@@ -2111,7 +2119,8 @@ const fetchPickerDocs = async () => {
     // Use Natural search type - backend handles "show all" queries via NLP detection
     const res = await fetch('/api/search/query', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ query: '*', searchType: 0, page: 1, pageSize: 500 })
     })
     if (res.ok) {
@@ -2147,7 +2156,7 @@ const onSearchInput = () => {
   if (searchQuery.value.trim().length < 2) { showAutocomplete.value = false; autocompleteSuggestions.value = []; return }
   _acTimer = setTimeout(async () => {
     try {
-      const r = await fetch(`/api/search/suggestions?q=${encodeURIComponent(searchQuery.value)}`, { headers: authHeaders() })
+      const r = await fetch(`/api/search/suggestions?q=${encodeURIComponent(searchQuery.value)}`, { credentials: 'include' })
       if (r.ok) {
         const data = await r.json()
         autocompleteSuggestions.value = Array.isArray(data) ? data.slice(0, 7) : []
@@ -2290,7 +2299,7 @@ const formatFileSize = (b) => {
 let _blobUrl = null
 const revokeBlobUrl = () => { if (_blobUrl) { URL.revokeObjectURL(_blobUrl); _blobUrl = null } }
 const fetchBlobUrl = async (path, mime) => {
-  const res  = await fetch(path, { headers: authHeaders() })
+  const res  = await fetch(path, { credentials: 'include' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const buf  = await res.arrayBuffer()
   const type = mime || res.headers.get('content-type')?.split(';')[0].trim() || 'application/octet-stream'
@@ -2306,7 +2315,7 @@ const startOcrPolling = (docId) => {
   ocrPollInterval.value = setInterval(async () => {
     n++
     try {
-      const res = await fetch(`/api/documents/${docId}/ocr-status`, { headers: authHeaders() })
+      const res = await fetch(`/api/documents/${docId}/ocr-status`, { credentials: 'include' })
       if (res.status === 401) { stopOcrPolling(); logout(); return }
       if (!res.ok) { if (n >= 50) stopOcrPolling(); return }
       const d = await res.json(); ocrStatus.value = d
@@ -2334,7 +2343,7 @@ const viewDocument = async (doc) => {
   suggestions.value = []; viewerTab.value = 'preview'; officeMode.value = 'text'
 
   try {
-    const r = await fetch(`/api/documents/${doc.id}`, { headers: authHeaders() })
+    const r = await fetch(`/api/documents/${doc.id}`, { credentials: 'include' })
     if (r.ok) { const fresh = await r.json(); currentDocument.value = { ...fresh, score: doc.score, highlights: doc.highlights } }
   } catch { /* non-fatal */ }
 
@@ -2344,17 +2353,17 @@ const viewDocument = async (doc) => {
     if (isPDF(doc.contentType)||isImage(doc.contentType)||isAudio(doc.contentType)||isVideo(doc.contentType)) {
       try { documentUrl.value = await fetchBlobUrl(dlPath, doc.contentType) } catch { documentUrl.value = dlPath }
     } else if (isText(doc.contentType)) {
-      const r = await fetch(dlPath, { headers: authHeaders() })
+      const r = await fetch(dlPath, { credentials: 'include' })
       documentContent.value = r.ok ? await r.text() : '(impossible de charger le fichier)'
     } else if (isOffice(doc.contentType)) {
       try {
-        const r = await fetch(ocrPath, { headers: authHeaders() })
+        const r = await fetch(ocrPath, { credentials: 'include' })
         if (r.ok) { const d = await r.json(); ocrStatus.value = d; if (d.extractedText) documentContent.value = d.extractedText }
       } catch { /* non-fatal */ }
     }
     if (isPDF(doc.contentType)||isImage(doc.contentType)) {
       try {
-        const r = await fetch(ocrPath, { headers: authHeaders() })
+        const r = await fetch(ocrPath, { credentials: 'include' })
         if (r.ok) {
           const d = await r.json(); ocrStatus.value = d
           if ([OcrStatus.Pending,OcrStatus.Processing,OcrStatus.TextExtracted,OcrStatus.LlmCleaning].includes(d.status)) startOcrPolling(doc.id)
@@ -2370,7 +2379,7 @@ const fetchSuggestions = async (docId) => {
   if (suggestionsCache.has(docId)) { suggestions.value = suggestionsCache.get(docId); return }
   suggestionsLoading.value = true
   try {
-    const r = await fetch(`/api/search/suggestions/${docId}?count=5`, { headers: authHeaders() })
+    const r = await fetch(`/api/search/suggestions/${docId}?count=5`, { credentials: 'include' })
     if (r.ok) { const raw = (await r.json()).filter(s => s.documentId !== docId); suggestions.value = raw; suggestionsCache.set(docId, raw) }
   } catch { /* non-fatal */ } finally { suggestionsLoading.value = false }
 }
@@ -2390,7 +2399,7 @@ const searchByTag = (tag) => { closeDocumentViewer(); searchQuery.value = tag; h
 
 const deleteDoc = async (doc) => {
   if (!confirm(`Supprimer "${doc.title}" ? Cette action est irréversible.`)) return
-  const r = await fetch(`/api/documents/${doc.id}`, { method:'DELETE', headers:{ ...authHeaders(), 'Content-Type':'application/json' } })
+  const r = await fetch(`/api/documents/${doc.id}`, { method:'DELETE', credentials: 'include' })
   if (r.ok) { closeDocumentViewer(); handleSearch() }
   else alert('Erreur lors de la suppression.')
 }
@@ -2440,7 +2449,8 @@ const askRag = async () => {
   try {
     const res = await fetch('/api/rag/ask', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         query,
         language: 'fr',
@@ -2473,7 +2483,8 @@ const performSearch = async () => {
   try {
     const res = await fetch('/api/search/query', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body:    JSON.stringify(buildSearchBody(1))
     })
 
@@ -2521,7 +2532,8 @@ const goToPage = async (page) => {
   try {
     const res = await fetch('/api/search/query', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body:    JSON.stringify(buildSearchBody(page))
     })
     if (res.ok) {

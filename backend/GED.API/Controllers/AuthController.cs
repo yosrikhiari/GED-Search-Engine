@@ -109,9 +109,17 @@ public async Task<IActionResult> Logout()
     /// </summary>
     [HttpGet("users")]
     [Authorize(Roles = "Admin")]
-    public ActionResult<List<UserDto>> GetUsers()
+    public IActionResult GetUsers()
     {
-        return Ok(_authService.GetAllUsers());
+        try
+        {
+            return Ok(_authService.GetAllUsers());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting users");
+            return StatusCode(500, ErrorResponse.Create("Failed to retrieve users"));
+        }
     }
 
     /// <summary>
@@ -146,10 +154,18 @@ public async Task<IActionResult> Logout()
     [Authorize(Roles = "Admin")]
     public IActionResult DeactivateUser(Guid id)
     {
-        var ok = _authService.DeactivateUser(id);
-        if (!ok)
-            return NotFound(ErrorResponse.Create("User not found", HttpContext.Items["CorrelationId"]?.ToString()));
-        return Ok(new { message = "User deactivated." });
+        try
+        {
+            var ok = _authService.DeactivateUser(id);
+            if (!ok)
+                return NotFound(ErrorResponse.Create("User not found", HttpContext.Items["CorrelationId"]?.ToString()));
+            return Ok(new { message = "User deactivated." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deactivating user {UserId}", id);
+            return StatusCode(500, ErrorResponse.Create("Failed to deactivate user"));
+        }
     }
 
     private string? GetClientIpAddress()
@@ -158,10 +174,15 @@ public async Task<IActionResult> Logout()
         if (!string.IsNullOrEmpty(forwardedFor))
         {
             var ip = forwardedFor.Split(',').First().Trim();
-            if (!string.IsNullOrEmpty(ip))
+            if (!string.IsNullOrEmpty(ip) && IsTrustedProxy(ip))
                 return ip;
         }
         
         return HttpContext.Connection.RemoteIpAddress?.ToString();
+    }
+
+    private static bool IsTrustedProxy(string ip)
+    {
+        return ip is "127.0.0.1" or "::1" or "localhost" || ip.StartsWith("10.") || ip.StartsWith("172.16.") || ip.StartsWith("172.17.") || ip.StartsWith("172.18.") || ip.StartsWith("172.19.") || ip.StartsWith("172.2") || ip.StartsWith("172.30.") || ip.StartsWith("172.31.") || ip.StartsWith("192.168.");
     }
 }

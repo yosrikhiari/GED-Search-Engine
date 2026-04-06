@@ -10,16 +10,19 @@ public class DeadLetterQueueMonitoringService : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<DeadLetterQueueMonitoringService> _logger;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly TimeSpan _checkInterval = TimeSpan.FromMinutes(5);
     private readonly int _alertThreshold = 10;
 
     public DeadLetterQueueMonitoringService(
         IServiceProvider serviceProvider,
         ILogger<DeadLetterQueueMonitoringService> logger,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IHttpClientFactory httpClientFactory)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _httpClientFactory = httpClientFactory;
         _alertThreshold = configuration.GetValue<int>("DLQ:AlertThreshold", 10);
     }
 
@@ -56,8 +59,8 @@ public class DeadLetterQueueMonitoringService : BackgroundService
     {
         var queues = new[] 
         { 
-            ("ocr-queue.dlq", "ocr-dlq"),
-            ("indexing-queue.dlq", "indexing-dlq")
+            ("ocr-dead-letter", "ocr-dlq"),
+            ("indexing-dead-letter", "indexing-dlq")
         };
 
         foreach (var (queueName, metricName) in queues)
@@ -105,9 +108,9 @@ public class DeadLetterQueueMonitoringService : BackgroundService
             var rabbitUser = Environment.GetEnvironmentVariable("RABBITMQ_USER") ?? "admin";
             var rabbitPass = Environment.GetEnvironmentVariable("RABBITMQ_PASSWORD") ?? "admin123";
 
-            var url = $"http://{rabbitHost}:{rabbitPort}/api/queues/%2F/{Uri.EscapeDataString(queueName)}";
+            var url = $"http://{rabbitHost}:{rabbitPort}/api/queues/{Uri.EscapeDataString("/")}/{Uri.EscapeDataString(queueName)}";
             
-            using var httpClient = new HttpClient();
+            using var httpClient = _httpClientFactory.CreateClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
             httpClient.DefaultRequestHeaders.Authorization = 
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", 

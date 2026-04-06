@@ -61,8 +61,7 @@ public class CategoryAccessHandler : AuthorizationHandler<CategoryAccessRequirem
 
         if (string.IsNullOrWhiteSpace(category))
         {
-            // No category specified - let the controller decide
-            context.Succeed(requirement);
+            context.Fail();
             return Task.CompletedTask;
         }
 

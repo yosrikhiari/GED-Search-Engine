@@ -214,7 +214,7 @@ services:
       test: ["CMD", "ollama", "list"]
       interval: 15s
       timeout: 10s
-      retries: 10
+      retries: 5
       start_period: 30s
     restart: unless-stopped
 
@@ -230,17 +230,11 @@ services:
       - ged-network
     environment:
       - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
     command: >
-      sh -c "
-        echo 'Waiting for Ollama to be ready...' &&
-        until ollama list > /dev/null 2>&1; do
-          echo 'Waiting...' && sleep 5
-        done &&
-        echo 'Ollama ready. Checking models...' &&
-        ollama list | grep -q 'mistral' || (echo 'Pulling mistral...' && ollama pull mistral) &&
-        ollama list | grep -q 'bge-m3' || (echo 'Pulling bge-m3...' && ollama pull bge-m3) &&
-        echo 'All models ready.'
-      "
+      "ollama pull mistral &&
+       ollama pull bge-m3 &&
+       echo 'All models ready.'"
     restart: "no"
 
   # ── OCR Worker Service (scalable) ───────────────────────────────────────────────
@@ -434,7 +428,7 @@ services:
       tika:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
     networks:
       - ged-network
     volumes:

@@ -7,21 +7,16 @@ ARG VITE_API_BASE_URL=""
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 
 COPY package*.json ./
-
-# Install ALL deps including devDependencies (tailwind, postcss, autoprefixer)
 RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
 
-# Verify Tailwind can see your source files before building
-RUN echo "Checking Tailwind content files:" && \
-    find src -name "*.vue" | head -5 && \
-    cat Tailwind.config.js
-
-RUN npm run build
-
-# Verify CSS was generated
-RUN echo "Built assets:" && ls -lh dist/assets/
+# If dist already exists locally, skip rebuild
+RUN if [ -d dist ] && [ -f dist/index.html ]; then \
+      echo "Using existing dist folder"; \
+    else \
+      echo "Building frontend..." && npm run build; \
+    fi
 
 FROM nginx:alpine AS production
 WORKDIR /usr/share/nginx/html

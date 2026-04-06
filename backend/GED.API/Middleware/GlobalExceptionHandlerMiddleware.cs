@@ -36,6 +36,12 @@ public class GlobalExceptionHandlerMiddleware
 
     private async Task HandleExceptionAsync(HttpContext context, Exception exception)
     {
+        if (context.Response.HasStarted)
+        {
+            _logger.LogWarning("Response has already started, cannot handle exception properly");
+            return;
+        }
+
         var correlationId = context.Items["CorrelationId"]?.ToString() 
             ?? context.Request.Headers["X-Correlation-ID"].FirstOrDefault()
             ?? Guid.NewGuid().ToString("N")[..12];
@@ -100,12 +106,10 @@ public class GlobalExceptionHandlerMiddleware
 
     private static string? GetSensitiveDetails(Exception ex)
     {
-        // Only include non-sensitive details in development
-#if DEBUG
-        return ex.ToString();
-#else
+        var env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        if (env == "Development")
+            return ex.ToString();
         return null;
-#endif
     }
 }
 

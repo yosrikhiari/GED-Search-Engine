@@ -52,6 +52,7 @@ public class DocumentExpirationService : BackgroundService
 
         // Find documents past their expiration date
         var expiredDocs = await db.Documents
+            .AsNoTracking()
             .Where(d => d.Metadata != null)
             .ToListAsync(cancellationToken);
 
@@ -72,13 +73,16 @@ public class DocumentExpirationService : BackgroundService
             try
             {
                 // Trigger webhook before deletion
-                await webhookService?.TriggerEventAsync("document.expired", new
+                if (webhookService != null)
                 {
-                    documentId = doc.Id,
-                    title = doc.Title,
-                    category = doc.Category,
-                    expiredAt = now
-                }, null)!;
+                    await webhookService.TriggerEventAsync("document.expired", new
+                    {
+                        documentId = doc.Id,
+                        title = doc.Title,
+                        category = doc.Category,
+                        expiredAt = now
+                    }, null);
+                }
 
                 // Mark as expired (soft delete)
                 doc.Status = GED.Core.Models.DocumentStatus.Expired;
@@ -128,7 +132,10 @@ public class DocumentExpirationService : BackgroundService
                 }
             }
         }
-        catch { /* ignore malformed JSON */ }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Malformed JSON in metadata: {ex.Message}");
+        }
 
         return false;
     }

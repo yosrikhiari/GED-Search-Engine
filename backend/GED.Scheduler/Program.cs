@@ -94,6 +94,7 @@ else
 }
 
 builder.Services.AddScoped<OpenSearchService>();
+builder.Services.AddSingleton<INlpService, NoOpNlpService>();
 builder.Services.AddScoped<ISearchService>(sp =>
     new CachedSearchService(
         sp.GetRequiredService<OpenSearchService>(),

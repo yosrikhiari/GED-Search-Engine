@@ -183,6 +183,11 @@ public class AuthService : IUserContext, IAuthService
 
             // Find user by ID
             var user = _users.FirstOrDefault(u => u.Id == session.UserId);
+            if (user != null && !user.IsActive)
+            {
+                _cache?.Remove(cacheKey);
+                return null;
+            }
             return user;
         }
         catch (Exception ex)
@@ -500,6 +505,7 @@ public class AuthService : IUserContext, IAuthService
             if (!string.IsNullOrWhiteSpace(request.Password))
                 user.PasswordHash = HashPassword(request.Password);
 
+            _usersByUsername[user.Username.ToLowerInvariant()] = user;
             SaveUsers();
             return (true, null);
         }
@@ -513,6 +519,7 @@ public class AuthService : IUserContext, IAuthService
             var user = _users.FirstOrDefault(u => u.Id == id);
             if (user == null) return false;
             user.IsActive = false;
+            _usersByUsername.Remove(user.Username.ToLowerInvariant());
             SaveUsers();
             return true;
         }
@@ -808,12 +815,17 @@ public class AuthService : IUserContext, IAuthService
     {
         if (_useDatabase && _dbFactory != null)
         {
-            SaveUsersToDatabase();
+            try
+            {
+                SaveUsersToDatabase();
+                return;
+            }
+            catch
+            {
+                _logger.LogWarning("Database save failed, falling back to file save");
+            }
         }
-        else
-        {
-            SaveUsersToFile();
-        }
+        SaveUsersToFile();
     }
 
     private void SaveUsersToDatabase()
@@ -844,6 +856,7 @@ public class AuthService : IUserContext, IAuthService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to save users to database");
+            throw;
         }
     }
 

@@ -85,18 +85,15 @@ echo ""
 echo "📥 Importing saved objects..."
 
 # Filter out the summary line (last line with exportedCount)
-TEMP_NDJSON=$(mktemp)
+TEMP_NDJSON="/tmp/saved_objects_import.ndjson"
 grep -v '"exportedCount":' "$EXPORT_FILE" > "$TEMP_NDJSON" || cat "$EXPORT_FILE" > "$TEMP_NDJSON"
 
-# Import saved objects with overwrite
+# Import saved objects with overwrite - pass filename explicitly to preserve extension
 IMPORT_RESPONSE=$(curl -s -X POST "$DASHBOARDS_URL/api/saved_objects/_import?overwrite=true" \
   -H "osd-xsrf: true" \
-  -F "file=@$TEMP_NDJSON")
+  -F "file=@$TEMP_NDJSON;filename=saved_objects.ndjson;type=application/ndjson")
 
 rm -f "$TEMP_NDJSON"
-IMPORT_RESPONSE=$(curl -s -X POST "$DASHBOARDS_URL/api/saved_objects/_import?overwrite=true" \
-  -H "osd-xsrf: true" \
-  -F "file=@$EXPORT_FILE")
 
 # Check response
 if echo "$IMPORT_RESPONSE" | grep -q '"success":true'; then

@@ -40,6 +40,7 @@ public class TaxonomyController : ControllerBase
     // ── Categories ────────────────────────────────────────────────────────────
 
     [HttpGet("categories")]
+    [Authorize(Roles = "Admin")]
     public Task<IActionResult> GetCategories()
     {
         lock (_lock) return Task.FromResult<IActionResult>(Ok(_categories.ToList()));
@@ -121,11 +122,18 @@ public class TaxonomyController : ControllerBase
     [HttpPost("categories/reorder")]
     public async Task<IActionResult> ReorderCategories([FromBody] List<Guid> categoryIds)
     {
+        if (categoryIds == null || !categoryIds.Any())
+            return BadRequest(ErrorResponse.Create("Category IDs are required"));
+
+        var distinctIds = categoryIds.Distinct().ToList();
+        if (distinctIds.Count > 100)
+            return BadRequest(ErrorResponse.Create("Maximum 100 categories per reorder operation"));
+
         lock (_lock)
         {
-            for (int i = 0; i < categoryIds.Count; i++)
+            for (int i = 0; i < distinctIds.Count; i++)
             {
-                var cat = _categories.FirstOrDefault(c => c.Id == categoryIds[i]);
+                var cat = _categories.FirstOrDefault(c => c.Id == distinctIds[i]);
                 if (cat != null) cat.SortOrder = i;
             }
         }
@@ -369,6 +377,7 @@ public class TaxonomyController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to save taxonomy to {Path}", _taxonomyFilePath);
+            throw;
         }
     }
 

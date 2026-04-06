@@ -401,6 +401,7 @@ public class OpenSearchService : ISearchService
             var docIds = documents.Select(d => d.Id).ToList();
             
             var dbStatuses = await _db.Documents
+                .AsNoTracking()
                 .Where(d => docIds.Contains(d.Id))
                 .Select(d => new { d.Id, d.Status, d.IsOcrProcessed, d.Metadata })
                 .ToListAsync(cancellationToken);
@@ -446,6 +447,7 @@ public class OpenSearchService : ISearchService
         {
             // Get pending documents (Status != Indexed and not already in search results)
             var pendingQuery = _db.Documents
+                .AsNoTracking()
                 .Where(d => d.Status != DocumentStatus.Indexed && d.Status != DocumentStatus.Deleted);
 
             // Exclude documents already in the indexed results
@@ -467,12 +469,14 @@ public class OpenSearchService : ISearchService
 
             // Get total count of pending documents for UI badge
             var totalPendingCount = await _db.Documents
+                .AsNoTracking()
                 .Where(d => d.Status != DocumentStatus.Indexed && d.Status != DocumentStatus.Deleted)
                 .CountAsync(cancellationToken);
 
             // Get all outbox messages for queue position calculation
             var pendingDocIds = pendingEntities.Select(e => e.Id).ToList();
             var outboxMessages = await _db.OutboxMessages
+                .AsNoTracking()
                 .Where(m => pendingDocIds.Contains(m.Id) ||
                            m.Payload.Contains("DocumentId") && m.ProcessedAt == null)
                 .OrderBy(m => m.CreatedAt)
@@ -558,8 +562,9 @@ public class OpenSearchService : ISearchService
         DocumentEntity entity,
         List<OutboxMessage> outboxMessages)
     {
+        var docIdStr = $"\"{entity.Id}\"";
         var docOutboxMessages = outboxMessages
-            .Where(m => m.Payload.Contains(entity.Id.ToString()))
+            .Where(m => m.Payload.Contains(docIdStr))
             .OrderBy(m => m.CreatedAt)
             .ToList();
 
@@ -924,6 +929,7 @@ public class OpenSearchService : ISearchService
 
         // Fetch ACL grants for chunk documents
         var aclUserIds = await _db.DocumentAcls
+            .AsNoTracking()
             .Where(a => a.DocumentId == document.Id &&
                         (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
             .Select(a => a.UserId.ToString())
@@ -1810,6 +1816,7 @@ public class OpenSearchService : ISearchService
         {
             // Fetch current ACL grants
             var aclUserIds = await _db.DocumentAcls
+                .AsNoTracking()
                 .Where(a => a.DocumentId == documentId &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
                 .Select(a => a.UserId.ToString())
@@ -1907,6 +1914,7 @@ public class OpenSearchService : ISearchService
             var docIds = docs.Select(d => d.Id).ToList();
             
             var allAclRows = await _db.DocumentAcls
+                .AsNoTracking()
                 .Where(a => docIds.Contains(a.DocumentId) &&
                             (a.ExpiresAt == null || a.ExpiresAt > DateTime.UtcNow))
                 .Select(a => new { a.DocumentId, a.UserId })

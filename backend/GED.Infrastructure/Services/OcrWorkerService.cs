@@ -348,7 +348,11 @@ public partial class OcrWorkerService : BackgroundService
                                     CorrelationId = correlationId,
                                     DocumentId = msg.DocumentId.ToString()
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(startEvt) ?? Task.CompletedTask;
+                                _ = Task.Run(async () =>
+                                {
+                                    try { await _pipelineEventService!.EmitPipelineEventAsync(startEvt); }
+                                    catch (Exception ex) { _logger.LogWarning(ex, "Pipeline event emission failed for OCR started"); }
+                                });
 
                                 await ProcessOcrJobAsync(msg, stoppingToken);
                                 sw.Stop();
@@ -362,7 +366,11 @@ public partial class OcrWorkerService : BackgroundService
                                     DocumentId = msg.DocumentId.ToString(),
                                     DurationMs = sw.ElapsedMilliseconds
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(completedEvt) ?? Task.CompletedTask;
+                                _ = Task.Run(async () =>
+                                {
+                                    try { await _pipelineEventService!.EmitPipelineEventAsync(completedEvt); }
+                                    catch (Exception ex) { _logger.LogWarning(ex, "Pipeline event emission failed for OCR completed"); }
+                                });
 
                                 ackSent = await SafeAckAsync(channel, deliveryTag, ackSent);
 
@@ -391,7 +399,11 @@ public partial class OcrWorkerService : BackgroundService
                                     ErrorMessage = ex.Message,
                                     ErrorType = ex.GetType().Name
                                 };
-                                _ = _pipelineEventService?.EmitPipelineEventAsync(failedEvt) ?? Task.CompletedTask;
+                                _ = Task.Run(async () =>
+                                {
+                                    try { await _pipelineEventService!.EmitPipelineEventAsync(failedEvt); }
+                                    catch (Exception evtEx) { _logger.LogWarning(evtEx, "Pipeline event emission failed for OCR failed"); }
+                                });
 
                                 // Nack first — if the DB call below also fails we still want
                                 // the message dead-lettered rather than stuck unacked
@@ -616,19 +628,28 @@ public partial class OcrWorkerService : BackgroundService
                 var tempDir = Path.GetTempPath();
                 var jobId = Guid.NewGuid().ToString("N");
                 var outputPdfPath = Path.Combine(tempDir, $"ocr_out_{jobId}.pdf");
+                string? processedPdfPath = null;
                 
-                var processedPdfPath = await imageOcr.ProcessImageAsync(
-                    document.FilePath, outputPdfPath, message.Language ?? "eng", ct);
-                
-                // Now extract text from the OCR-processed PDF
-                ocrResult = await ocrService.ProcessDocumentAsync(
-                    message.DocumentId, File.OpenRead(processedPdfPath), message.Language ?? "eng", ct);
-                
-                // Clean up temp PDF
-                try { File.Delete(processedPdfPath); }
-                catch (Exception ex)
+                try
                 {
-                    _logger.LogWarning(ex, "Failed to cleanup temp PDF: {Path}", processedPdfPath);
+                    processedPdfPath = await imageOcr.ProcessImageAsync(
+                        document.FilePath, outputPdfPath, message.Language ?? "eng", ct);
+                    
+                    // Now extract text from the OCR-processed PDF
+                    ocrResult = await ocrService.ProcessDocumentAsync(
+                        message.DocumentId, File.OpenRead(processedPdfPath), message.Language ?? "eng", ct);
+                }
+                finally
+                {
+                    // Clean up temp PDF
+                    if (processedPdfPath != null)
+                    {
+                        try { File.Delete(processedPdfPath); }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to cleanup temp PDF: {Path}", processedPdfPath);
+                        }
+                    }
                 }
             }
             else

@@ -2517,149 +2517,148 @@
             v-show="viewerTab === 'history'"
             class="viewer-details-pane viewer-history-panel"
           >
-              <div class="detail-section">
-                <h3 class="detail-section-title">
-                  <svg
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  ><path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                  /></svg>
-                  Informations du fichier
-                </h3>
-                <dl class="detail-list">
-                  <div class="dl-row">
-                    <dt>Type</dt><dd><span class="mime-badge">{{ getFileExtension(currentDocument?.fileName).toUpperCase() }}</span><span class="mime-text">{{ currentDocument?.contentType }}</span></dd>
-                  </div>
-                  <div class="dl-row">
-                    <dt>Taille</dt><dd>{{ formatSize(currentDocument?.fileSize) }}</dd>
-                  </div>
-                  <div class="dl-row">
-                    <dt>Statut</dt><dd>
-                      <span
-                        class="status-dot"
-                        :class="getDocStatusClass(currentDocument?.id, currentDocument?.status)"
-                      >{{ getDocStatusLabel(currentDocument?.id, currentDocument?.status) }}</span>
-                    </dd>
-                  </div>
-                  <div class="dl-row">
-                    <dt>Importé</dt><dd>{{ formatDateLong(currentDocument?.createdAt) }}</dd>
-                  </div>
-                  <div
-                    v-if="currentDocument?.createdBy"
-                    class="dl-row"
+            <div class="detail-section">
+              <h3 class="detail-section-title">
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                ><path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                /></svg>
+                Informations du fichier
+              </h3>
+              <dl class="detail-list">
+                <div class="dl-row">
+                  <dt>Type</dt><dd><span class="mime-badge">{{ getFileExtension(currentDocument?.fileName).toUpperCase() }}</span><span class="mime-text">{{ currentDocument?.contentType }}</span></dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Taille</dt><dd>{{ formatSize(currentDocument?.fileSize) }}</dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Statut</dt><dd>
+                    <span
+                      class="status-dot"
+                      :class="getDocStatusClass(currentDocument?.id, currentDocument?.status)"
+                    >{{ getDocStatusLabel(currentDocument?.id, currentDocument?.status) }}</span>
+                  </dd>
+                </div>
+                <div class="dl-row">
+                  <dt>Importé</dt><dd>{{ formatDateLong(currentDocument?.createdAt) }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.createdBy"
+                  class="dl-row"
+                >
+                  <dt>Par</dt><dd>{{ currentDocument.createdBy }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.modifiedAt"
+                  class="dl-row"
+                >
+                  <dt>Modifié</dt><dd>{{ formatDateLong(currentDocument.modifiedAt) }}</dd>
+                </div>
+                <div
+                  v-if="currentDocument?.id"
+                  class="dl-row"
+                >
+                  <dt>ID</dt><dd
+                    class="dd-mono"
+                    style="font-size:.68rem"
                   >
-                    <dt>Par</dt><dd>{{ currentDocument.createdBy }}</dd>
-                  </div>
-                  <div
-                    v-if="currentDocument?.modifiedAt"
-                    class="dl-row"
-                  >
-                    <dt>Modifié</dt><dd>{{ formatDateLong(currentDocument.modifiedAt) }}</dd>
-                  </div>
-                  <div
-                    v-if="currentDocument?.id"
-                    class="dl-row"
-                  >
-                    <dt>ID</dt><dd
-                      class="dd-mono"
-                      style="font-size:.68rem"
-                    >
-                      {{ currentDocument.id }}
-                    </dd>
-                  </div>
-                </dl>
+                    {{ currentDocument.id }}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+            <div
+              v-if="currentDocument?.tags?.length"
+              class="detail-section"
+            >
+              <h3 class="detail-section-title">
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                ><path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
+                /></svg>
+                Étiquettes
+              </h3>
+              <div class="tags-cloud">
+                <span
+                  v-for="tag in currentDocument.tags"
+                  :key="tag"
+                  class="tag-cloud-item"
+                >#{{ tag }}</span>
+              </div>
+            </div>
+            <div class="detail-section">
+              <h3 class="detail-section-title">
+                <svg
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                ><path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                /></svg>
+                Traitement
+              </h3>
+              <div
+                v-if="historyLoading"
+                class="preview-loading"
+              >
+                <div class="pulse-ring" /><p>Chargement de l'historique...</p>
               </div>
               <div
-                v-if="currentDocument?.tags?.length"
-                class="detail-section"
+                v-else-if="!processingHistory.length"
+                class="preview-empty"
               >
-                <h3 class="detail-section-title">
-                  <svg
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  ><path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"
-                  /></svg>
-                  Étiquettes
-                </h3>
-                <div class="tags-cloud">
-                  <span
-                    v-for="tag in currentDocument.tags"
-                    :key="tag"
-                    class="tag-cloud-item"
-                  >#{{ tag }}</span>
-                </div>
+                <p>Aucun historique de traitement disponible</p>
               </div>
-              <div class="detail-section">
-                <h3 class="detail-section-title">
-                  <svg
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  ><path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                  /></svg>
-                  Traitement
-                </h3>
+              <div
+                v-else
+                class="history-timeline"
+              >
                 <div
-                  v-if="historyLoading"
-                  class="preview-loading"
+                  v-for="(item, idx) in processingHistory"
+                  :key="idx"
+                  class="timeline-item"
+                  :class="item.status.toLowerCase()"
                 >
-                  <div class="pulse-ring" /><p>Chargement de l'historique...</p>
-                </div>
-                <div
-                  v-else-if="!processingHistory.length"
-                  class="preview-empty"
-                >
-                  <p>Aucun historique de traitement disponible</p>
-                </div>
-                <div
-                  v-else
-                  class="history-timeline"
-                >
-                  <div
-                    v-for="(item, idx) in processingHistory"
-                    :key="idx"
-                    class="timeline-item"
-                    :class="item.status.toLowerCase()"
-                  >
-                    <div class="timeline-marker">
-                      <div class="marker-dot" /><div
-                        v-if="idx < processingHistory.length - 1"
-                        class="marker-line"
-                      />
+                  <div class="timeline-marker">
+                    <div class="marker-dot" /><div
+                      v-if="idx < processingHistory.length - 1"
+                      class="marker-line"
+                    />
+                  </div>
+                  <div class="timeline-content">
+                    <div class="timeline-header">
+                      <span class="timeline-stage">{{ getStageName(item.stage) }}</span><span class="timeline-duration">{{ formatDuration(item.durationMs) }}</span>
                     </div>
-                    <div class="timeline-content">
-                      <div class="timeline-header">
-                        <span class="timeline-stage">{{ getStageName(item.stage) }}</span><span class="timeline-duration">{{ formatDuration(item.durationMs) }}</span>
-                      </div>
-                      <div class="timeline-time">
-                        {{ new Date(item.timestamp).toLocaleString('fr-FR') }}
-                      </div>
-                      <div
-                        v-if="item.message"
-                        class="timeline-msg"
-                      >
-                        {{ item.message }}
-                      </div>
-                      <div
-                        v-if="item.status === 'Failed'"
-                        class="timeline-error"
-                      >
-                        {{ item.message || 'Erreur' }}
-                      </div>
+                    <div class="timeline-time">
+                      {{ new Date(item.timestamp).toLocaleString('fr-FR') }}
+                    </div>
+                    <div
+                      v-if="item.message"
+                      class="timeline-msg"
+                    >
+                      {{ item.message }}
+                    </div>
+                    <div
+                      v-if="item.status === 'Failed'"
+                      class="timeline-error"
+                    >
+                      {{ item.message || 'Erreur' }}
                     </div>
                   </div>
                 </div>
@@ -2667,6 +2666,7 @@
             </div>
           </div>
         </div>
+      </div>
       <AccessManagementModal
         v-if="showAccessModal"
         :initial-tab="accessModalTab"
@@ -2945,220 +2945,277 @@
 
     <!-- ── UPLOAD MODAL (Batch) ───────────────────────────────────────────────── -->
     <teleport to="body">
-    <div
-      v-if="showUpload"
-      class="modal-overlay"
-      @click.self="closeUploadModal"
-    >
-      <div class="modal modal-large">
-        <div class="modal-header">
-          <h2 v-if="batchImportState === 'processing'">
-            Traitement en cours...
-          </h2>
-          <h2 v-else-if="batchImportState === 'completed'">
-            Import terminé
-          </h2>
-          <h2 v-else-if="batchImportState === 'error'">
-            Échec de l'import
-          </h2>
-          <h2 v-else>
-            Importer des documents (Batch)
-          </h2>
-          <button
-            class="close-btn"
-            @click="closeUploadModal"
-          >
-            ✕
-          </button>
-        </div>
-      
-        <!-- Error State - Show failed files with retry option -->
-        <div
-          v-if="batchImportState === 'error'"
-          class="modal-body"
-        >
-          <div class="batch-error-summary">
-            <p>{{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s) n'ont pas pu être importé(s)</p>
-          </div>
-          <div class="batch-doc-list">
-            <div
-              v-for="(doc, idx) in batchDocuments"
-              :key="idx"
-              class="batch-doc-item error"
-            >
-              <span class="batch-doc-icon">⚠️</span>
-              <div class="batch-doc-info">
-                <p class="batch-doc-name">
-                  {{ doc.name }}
-                </p>
-                <p class="batch-doc-error">
-                  {{ doc.error }}
-                </p>
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
+      <div
+        v-if="showUpload"
+        class="modal-overlay"
+        @click.self="closeUploadModal"
+      >
+        <div class="modal modal-large">
+          <div class="modal-header">
+            <h2 v-if="batchImportState === 'processing'">
+              Traitement en cours...
+            </h2>
+            <h2 v-else-if="batchImportState === 'completed'">
+              Import terminé
+            </h2>
+            <h2 v-else-if="batchImportState === 'error'">
+              Échec de l'import
+            </h2>
+            <h2 v-else>
+              Importer des documents (Batch)
+            </h2>
             <button
-              class="btn-ghost"
+              class="close-btn"
               @click="closeUploadModal"
             >
-              Fermer
-            </button>
-            <button
-              class="btn-primary"
-              @click="retryFailedFiles"
-            >
-              Réessayer {{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s)
+              ✕
             </button>
           </div>
-        </div>
       
-        <!-- Processing State - Show real-time status -->
-        <div
-          v-else-if="batchImportState === 'processing'"
-          class="modal-body"
-        >
-          <div class="batch-progress-info">
-            <p>{{ batchDocuments.filter(d => d.status === 'indexed').length }} / {{ batchDocuments.length }} document(s) traité(s)</p>
-          </div>
-          <div class="batch-filter-bar">
-            <input
-              v-model="batchFilterQuery"
-              type="text"
-              placeholder="Filtrer par nom ou catégorie..."
-              class="batch-filter-input"
-            >
-          </div>
-          <div class="batch-doc-list batch-doc-list-scrollable">
-            <div
-              v-for="(doc, idx) in filteredBatchDocuments"
-              :key="idx"
-              :class="['batch-doc-item', doc.status]"
-            >
-              <span class="batch-doc-icon">
-                <span v-if="doc.status === 'indexed'">✅</span>
-                <span v-else-if="doc.status === 'queued'">⏳</span>
-                <span v-else>🔄</span>
-              </span>
-              <div class="batch-doc-info">
-                <p class="batch-doc-name">
-                  {{ doc.name }}
-                </p>
-                <p
-                  v-if="doc.category"
-                  class="batch-doc-category"
-                >
-                  Catégorie: {{ doc.category }}
-                </p>
-                <p class="batch-doc-stage">
-                  <span v-if="doc.status === 'indexed'">Terminé</span>
-                  <span
-                    v-else-if="doc.queuePosition"
-                    class="queue-pos-badge"
-                  >#{{ doc.queuePosition }} - {{ doc.stageLabel }}</span>
-                  <span v-else>{{ doc.stageLabel }}</span>
-                </p>
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <p class="batch-hint">
-              Les documents seront disponibles dans les résultats de recherche une fois traités.
-            </p>
-          </div>
-        </div>
-      
-        <!-- Completed State -->
-        <div
-          v-else-if="batchImportState === 'completed'"
-          class="modal-body"
-        >
-          <div class="batch-success-summary">
-            <p class="success-icon">
-              🎉
-            </p>
-            <p>{{ batchDocuments.length }} document(s) importé(s) et traité(s) avec succès !</p>
-          </div>
-          <div class="batch-doc-list">
-            <div
-              v-for="(doc, idx) in batchDocuments"
-              :key="idx"
-              class="batch-doc-item indexed"
-            >
-              <span class="batch-doc-icon">✅</span>
-              <div class="batch-doc-info">
-                <p class="batch-doc-name">
-                  {{ doc.name }}
-                </p>
-                <p class="batch-doc-stage">
-                  Terminé
-                </p>
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button
-              class="btn-primary"
-              @click="closeUploadModal"
-            >
-              Fermer
-            </button>
-          </div>
-        </div>
-      
-        <!-- Upload State - File Selection -->
-        <div
-          v-else
-          class="modal-body"
-        >
+          <!-- Error State - Show failed files with retry option -->
           <div
-            v-if="selectedFiles.length === 0"
-            class="drop-zone"
-            @click="$refs.fileInput.click()"
-            @dragover.prevent
-            @drop.prevent="onDropMultiple"
+            v-if="batchImportState === 'error'"
+            class="modal-body"
           >
-            <div class="drop-icon">
-              📁
+            <div class="batch-error-summary">
+              <p>{{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s) n'ont pas pu être importé(s)</p>
             </div>
-            <p class="drop-text">
-              Cliquez ou glissez plusieurs fichiers ici
-            </p>
-            <p class="drop-sub">
-              PDF, Word, Excel, Images…
-            </p>
-            <input
-              ref="fileInput"
-              type="file"
-              class="hidden-input"
-              multiple
-              @change="onFileSelectMultiple"
-            >
+            <div class="batch-doc-list">
+              <div
+                v-for="(doc, idx) in batchDocuments"
+                :key="idx"
+                class="batch-doc-item error"
+              >
+                <span class="batch-doc-icon">⚠️</span>
+                <div class="batch-doc-info">
+                  <p class="batch-doc-name">
+                    {{ doc.name }}
+                  </p>
+                  <p class="batch-doc-error">
+                    {{ doc.error }}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                class="btn-ghost"
+                @click="closeUploadModal"
+              >
+                Fermer
+              </button>
+              <button
+                class="btn-primary"
+                @click="retryFailedFiles"
+              >
+                Réessayer {{ batchDocuments.filter(d => d.status === 'failed').length }} fichier(s)
+              </button>
+            </div>
           </div>
+      
+          <!-- Processing State - Show real-time status -->
+          <div
+            v-else-if="batchImportState === 'processing'"
+            class="modal-body"
+          >
+            <div class="batch-progress-info">
+              <p>{{ batchDocuments.filter(d => d.status === 'indexed').length }} / {{ batchDocuments.length }} document(s) traité(s)</p>
+            </div>
+            <div class="batch-filter-bar">
+              <input
+                v-model="batchFilterQuery"
+                type="text"
+                placeholder="Filtrer par nom ou catégorie..."
+                class="batch-filter-input"
+              >
+            </div>
+            <div class="batch-doc-list batch-doc-list-scrollable">
+              <div
+                v-for="(doc, idx) in filteredBatchDocuments"
+                :key="idx"
+                :class="['batch-doc-item', doc.status]"
+              >
+                <span class="batch-doc-icon">
+                  <span v-if="doc.status === 'indexed'">✅</span>
+                  <span v-else-if="doc.status === 'queued'">⏳</span>
+                  <span v-else>🔄</span>
+                </span>
+                <div class="batch-doc-info">
+                  <p class="batch-doc-name">
+                    {{ doc.name }}
+                  </p>
+                  <p
+                    v-if="doc.category"
+                    class="batch-doc-category"
+                  >
+                    Catégorie: {{ doc.category }}
+                  </p>
+                  <p class="batch-doc-stage">
+                    <span v-if="doc.status === 'indexed'">Terminé</span>
+                    <span
+                      v-else-if="doc.queuePosition"
+                      class="queue-pos-badge"
+                    >#{{ doc.queuePosition }} - {{ doc.stageLabel }}</span>
+                    <span v-else>{{ doc.stageLabel }}</span>
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <p class="batch-hint">
+                Les documents seront disponibles dans les résultats de recherche une fois traités.
+              </p>
+            </div>
+          </div>
+      
+          <!-- Completed State -->
+          <div
+            v-else-if="batchImportState === 'completed'"
+            class="modal-body"
+          >
+            <div class="batch-success-summary">
+              <p class="success-icon">
+                🎉
+              </p>
+              <p>{{ batchDocuments.length }} document(s) importé(s) et traité(s) avec succès !</p>
+            </div>
+            <div class="batch-doc-list">
+              <div
+                v-for="(doc, idx) in batchDocuments"
+                :key="idx"
+                class="batch-doc-item indexed"
+              >
+                <span class="batch-doc-icon">✅</span>
+                <div class="batch-doc-info">
+                  <p class="batch-doc-name">
+                    {{ doc.name }}
+                  </p>
+                  <p class="batch-doc-stage">
+                    Terminé
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                class="btn-primary"
+                @click="closeUploadModal"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+      
+          <!-- Upload State - File Selection -->
           <div
             v-else
-            class="files-preview-list"
+            class="modal-body"
           >
-            <div class="batch-list-header">
-              <label class="batch-select-all">
+            <div
+              v-if="selectedFiles.length === 0"
+              class="drop-zone"
+              @click="$refs.fileInput.click()"
+              @dragover.prevent
+              @drop.prevent="onDropMultiple"
+            >
+              <div class="drop-icon">
+                📁
+              </div>
+              <p class="drop-text">
+                Cliquez ou glissez plusieurs fichiers ici
+              </p>
+              <p class="drop-sub">
+                PDF, Word, Excel, Images…
+              </p>
+              <input
+                ref="fileInput"
+                type="file"
+                class="hidden-input"
+                multiple
+                @change="onFileSelectMultiple"
+              >
+            </div>
+            <div
+              v-else
+              class="files-preview-list"
+            >
+              <div class="batch-list-header">
+                <label class="batch-select-all">
+                  <input
+                    type="checkbox"
+                    :checked="batchSelectedFiles.length === selectedFiles.length"
+                    @change="selectAllBatchFiles"
+                  >
+                  <span>Tout sélectionner ({{ selectedFiles.length }} fichiers)</span>
+                </label>
+                <div
+                  v-if="batchSelectedFiles.length > 0"
+                  class="batch-assign"
+                >
+                  <span>Catégorie pour {{ batchSelectedFiles.length }} sélectionné(s) :</span>
+                  <select
+                    class="form-input mini"
+                    @change="assignCategoryToSelected($event.target.value); $event.target.value = ''"
+                  >
+                    <option value="">
+                      Assigner...
+                    </option>
+                    <option
+                      v-for="c in categories"
+                      :key="c"
+                      :value="c"
+                    >
+                      {{ c }}
+                    </option>
+                  </select>
+                </div>
+              </div>
+              <div
+                v-for="(file, index) in selectedFiles"
+                :key="index"
+                class="file-preview-item"
+                :class="{ selected: batchSelectedFiles.includes(index) }"
+              >
+                <div class="file-order-controls">
+                  <button
+                    class="order-btn"
+                    :disabled="index === 0"
+                    title="Déplacer vers le haut"
+                    @click="moveFileUp(index)"
+                  >
+                    ▲
+                  </button>
+                  <span class="file-order-num">{{ index + 1 }}</span>
+                  <button
+                    class="order-btn"
+                    :disabled="index === selectedFiles.length - 1"
+                    title="Déplacer vers le bas"
+                    @click="moveFileDown(index)"
+                  >
+                    ▼
+                  </button>
+                </div>
                 <input
                   type="checkbox"
-                  :checked="batchSelectedFiles.length === selectedFiles.length"
-                  @change="selectAllBatchFiles"
+                  :checked="batchSelectedFiles.includes(index)"
+                  @change="toggleBatchFile(index)"
                 >
-                <span>Tout sélectionner ({{ selectedFiles.length }} fichiers)</span>
-              </label>
-              <div
-                v-if="batchSelectedFiles.length > 0"
-                class="batch-assign"
-              >
-                <span>Catégorie pour {{ batchSelectedFiles.length }} sélectionné(s) :</span>
+                <span class="file-emoji">{{ getFileIcon(file.type) }}</span>
+                <div class="file-details">
+                  <p class="doc-name">
+                    {{ file.name }}
+                  </p>
+                  <p class="muted">
+                    {{ formatSize(file.size) }}
+                  </p>
+                </div>
                 <select
-                  class="form-input mini"
-                  @change="assignCategoryToSelected($event.target.value); $event.target.value = ''"
+                  :value="getFileCategory(index)"
+                  class="form-input file-category-select"
+                  @change="setFileCategory(index, $event.target.value)"
                 >
                   <option value="">
-                    Assigner...
+                    — Catégorie —
                   </option>
                   <option
                     v-for="c in categories"
@@ -3168,97 +3225,40 @@
                     {{ c }}
                   </option>
                 </select>
+                <button
+                  class="btn-icon-sm danger"
+                  @click="removeFile(index)"
+                >
+                  ✕
+                </button>
               </div>
             </div>
+
             <div
-              v-for="(file, index) in selectedFiles"
-              :key="index"
-              class="file-preview-item"
-              :class="{ selected: batchSelectedFiles.includes(index) }"
+              v-if="selectedFiles.length > 0 && !allFilesHaveCategory"
+              class="batch-warning"
             >
-              <div class="file-order-controls">
-                <button
-                  class="order-btn"
-                  :disabled="index === 0"
-                  title="Déplacer vers le haut"
-                  @click="moveFileUp(index)"
-                >
-                  ▲
-                </button>
-                <span class="file-order-num">{{ index + 1 }}</span>
-                <button
-                  class="order-btn"
-                  :disabled="index === selectedFiles.length - 1"
-                  title="Déplacer vers le bas"
-                  @click="moveFileDown(index)"
-                >
-                  ▼
-                </button>
-              </div>
-              <input
-                type="checkbox"
-                :checked="batchSelectedFiles.includes(index)"
-                @change="toggleBatchFile(index)"
-              >
-              <span class="file-emoji">{{ getFileIcon(file.type) }}</span>
-              <div class="file-details">
-                <p class="doc-name">
-                  {{ file.name }}
-                </p>
-                <p class="muted">
-                  {{ formatSize(file.size) }}
-                </p>
-              </div>
-              <select
-                :value="getFileCategory(index)"
-                class="form-input file-category-select"
-                @change="setFileCategory(index, $event.target.value)"
-              >
-                <option value="">
-                  — Catégorie —
-                </option>
-                <option
-                  v-for="c in categories"
-                  :key="c"
-                  :value="c"
-                >
-                  {{ c }}
-                </option>
-              </select>
+              <span>⚠️ Veuillez sélectionner une catégorie pour chaque fichier avant d'importer.</span>
+            </div>
+            <div class="modal-footer">
               <button
-                class="btn-icon-sm danger"
-                @click="removeFile(index)"
+                class="btn-ghost"
+                @click="closeUploadModal"
               >
-                ✕
+                Annuler
+              </button>
+              <button
+                :disabled="selectedFiles.length === 0 || !allFilesHaveCategory || batchImportState === 'uploading'"
+                class="btn-primary"
+                @click="doUploadBatch"
+              >
+                <span v-if="batchImportState === 'uploading'">Transfert... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
+                <span v-else>Importer {{ selectedFiles.length }} fichier(s)</span>
               </button>
             </div>
           </div>
-
-          <div
-            v-if="selectedFiles.length > 0 && !allFilesHaveCategory"
-            class="batch-warning"
-          >
-            <span>⚠️ Veuillez sélectionner une catégorie pour chaque fichier avant d'importer.</span>
-          </div>
-          <div class="modal-footer">
-            <button
-              class="btn-ghost"
-              @click="closeUploadModal"
-            >
-              Annuler
-            </button>
-            <button
-              :disabled="selectedFiles.length === 0 || !allFilesHaveCategory || batchImportState === 'uploading'"
-              class="btn-primary"
-              @click="doUploadBatch"
-            >
-              <span v-if="batchImportState === 'uploading'">Transfert... {{ uploadProgress }}/{{ selectedFiles.length }}</span>
-              <span v-else>Importer {{ selectedFiles.length }} fichier(s)</span>
-            </button>
-          </div>
         </div>
       </div>
-    </div>
     </teleport>
   </div>
 </template>
@@ -5353,6 +5353,10 @@ onUnmounted(() => {
   stopDocListPolling()
   stopOcrPolling()
   stopPendingPoll()
+  if (batchCheckInterval.value) {
+    clearInterval(batchCheckInterval.value)
+    batchCheckInterval.value = null
+  }
 })
 </script>
 

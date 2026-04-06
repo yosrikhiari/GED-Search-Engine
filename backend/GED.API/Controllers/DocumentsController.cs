@@ -17,6 +17,7 @@ namespace GED.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class DocumentsController : ControllerBase
 {
     private readonly IDocumentService _documentService;
@@ -39,6 +40,23 @@ public class DocumentsController : ControllerBase
     };
 
     private bool _resourceSaverEnabled;
+
+    private string? GetUserRole() => User.FindFirst(ClaimTypes.Role)?.Value;
+    private string? GetUsername() => User.FindFirst(ClaimTypes.Name)?.Value;
+
+    private bool CanAccessDocument(Document doc)
+    {
+        var role = GetUserRole();
+        if (role == "Admin") return true;
+        var username = GetUsername();
+        return doc.CreatedBy == username || doc.ModifiedBy == username;
+    }
+
+    private IActionResult? ForbidIfCannotAccess(Document doc)
+    {
+        if (CanAccessDocument(doc)) return null;
+        return StatusCode(403, ErrorResponse.Create("Access denied — you do not own this document"));
+    }
 
     public DocumentsController(
         IDocumentService documentService,
@@ -583,13 +601,17 @@ public async Task<ActionResult<Document>> UploadDocument(
     }
 
     [HttpGet("{id}")]
-    public async Task<ActionResult<Document>> GetDocument(Guid id)
+    public async Task<IActionResult> GetDocument(Guid id)
     {
         try
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
             if (document == null)
                 return NotFound(ErrorResponse.Create("Document not found", HttpContext.Items["CorrelationId"]?.ToString()));
+            
+            var forbid = ForbidIfCannotAccess(document);
+            if (forbid != null) return forbid;
+            
             return Ok(document);
         }
         catch (Exception ex)
@@ -631,6 +653,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         {
             var document = await _documentService.GetDocumentByIdAsync(id);
             if (document == null) return NotFound(ErrorResponse.Create("Document not found"));
+
+            var forbid = ForbidIfCannotAccess(document);
+            if (forbid != null) return forbid;
 
             var stream = await _documentService.GetDocumentContentAsync(id);
             return File(stream, document.ContentType, document.FileName);
@@ -684,6 +709,9 @@ public async Task<ActionResult<Document>> UploadDocument(
     {
         if (documentIds == null || !documentIds.Any())
             return BadRequest(ErrorResponse.Create("No document IDs provided"));
+
+        if (documentIds.Count > 500)
+            return BadRequest(ErrorResponse.Create("Maximum 500 items per bulk operation"));
 
         var username = User.FindFirst(ClaimTypes.Name)?.Value ?? "unknown";
         
@@ -790,6 +818,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         if (updates == null || !updates.Any())
             return BadRequest(ErrorResponse.Create("No priority updates provided"));
 
+        if (updates.Count > 500)
+            return BadRequest(ErrorResponse.Create("Maximum 500 items per bulk operation"));
+
         try
         {
             var documentIds = updates.Select(u => u.DocumentId).ToList();
@@ -847,6 +878,9 @@ public async Task<ActionResult<Document>> UploadDocument(
         if (request.DocumentIds == null || !request.DocumentIds.Any())
             return BadRequest(ErrorResponse.Create("No document IDs provided"));
 
+        if (request.DocumentIds.Count > 500)
+            return BadRequest(ErrorResponse.Create("Maximum 500 items per bulk operation"));
+
         if (string.IsNullOrWhiteSpace(request.Category))
             return BadRequest(ErrorResponse.Create("Category is required"));
 
@@ -898,12 +932,22 @@ public async Task<ActionResult<Document>> UploadDocument(
     }
 
     [HttpPut("{id}")]
-    public async Task<ActionResult<Document>> UpdateDocument(Guid id, [FromBody] Document document)
+    public async Task<IActionResult> UpdateDocument(Guid id, [FromBody] Document document)
     {
         try
         {
+            if (document.Id == Guid.Empty)
+                return BadRequest(ErrorResponse.Create("Invalid document ID"));
+
             if (id != document.Id)
                 return BadRequest(ErrorResponse.Create("ID mismatch"));
+
+            var existing = await _documentService.GetDocumentByIdAsync(id);
+            if (existing == null)
+                return NotFound(ErrorResponse.Create("Document not found"));
+
+            var forbid = ForbidIfCannotAccess(existing);
+            if (forbid != null) return forbid;
 
             var updated = await _documentService.UpdateDocumentAsync(id, document);
             await _searchService.UpdateDocumentIndexAsync(updated);

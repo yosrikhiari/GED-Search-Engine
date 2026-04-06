@@ -51,7 +51,11 @@ public class DocumentAclController : ControllerBase
         var acls     = await _db.DocumentAcls
             .Where(a => a.DocumentId == documentId)
             .ToListAsync();
-        var allUsers = _authService.GetAllUsers().ToDictionary(u => u.Id);
+
+        var userIds = acls.Select(a => a.UserId).Distinct().ToList();
+        var allUsers = _authService.GetAllUsers()
+            .Where(u => userIds.Contains(u.Id))
+            .ToDictionary(u => u.Id);
 
         var result = acls.Select(a =>
         {
@@ -319,11 +323,12 @@ public class DocumentAclController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        // Re-index affected documents
-        foreach (var docId in revokedDocIds)
+        // Re-index affected documents in batch
+        if (revokedDocIds.Any())
         {
-            var doc = await _documentService.GetDocumentByIdAsync(docId);
-            if (doc != null) await _searchService.UpdateDocumentIndexAsync(doc);
+            var docs = await _documentService.GetDocumentsByIdsAsync(revokedDocIds.ToList());
+            if (docs.Any())
+                await _searchService.BulkIndexDocumentsAsync(docs);
         }
 
         _logger.LogInformation(
@@ -355,6 +360,9 @@ public class DocumentAclController : ControllerBase
         var tasks = request.UserIds.Select(userId => 
             GrantSingleAclAsync(documentId, userId, request.Permission, request.ExpiresAt, adminId.Value, affectedDocIds));
         var taskResults = await Task.WhenAll(tasks);
+
+        // Batch-save all ACL changes
+        await _db.SaveChangesAsync();
 
         // Batch re-index (N+1 fix)
         await ReindexDocumentsAsync(affectedDocIds);
@@ -413,7 +421,7 @@ public class DocumentAclController : ControllerBase
     }
 
     private async Task<SingleAclResult> GrantSingleAclAsync(
-        Guid docId, Guid userId, int permission, DateTime? expiresAt, Guid adminId, HashSet<Guid> affectedDocIds)
+        Guid docId, Guid userId, int permission, DateTime? expiresAt, Guid adminId, HashSet<Guid> affectedDocIds, bool saveChanges = false)
     {
         try
         {
@@ -449,7 +457,6 @@ public class DocumentAclController : ControllerBase
                 });
             }
 
-            await _db.SaveChangesAsync();
             affectedDocIds.Add(docId);
 
             return new SingleAclResult { Succeeded = true };

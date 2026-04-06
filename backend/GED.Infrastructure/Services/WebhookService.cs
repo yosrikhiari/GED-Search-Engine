@@ -107,17 +107,24 @@ public class WebhookService : IWebhookService
                 foreach (var addr in addresses)
                 {
                     if (System.Net.IPAddress.IsLoopback(addr)) return true;
-                if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                {
-                    var bytes = addr.GetAddressBytes();
-                    // 10.0.0.0/8
-                    if (bytes[0] == 10) return true;
-                    // 172.16.0.0/12
-                    if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return true;
-                    // 192.168.0.0/16
-                    if (bytes[0] == 192 && bytes[1] == 168) return true;
+                    if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    {
+                        var bytes = addr.GetAddressBytes();
+                        // 10.0.0.0/8
+                        if (bytes[0] == 10) return true;
+                        // 172.16.0.0/12
+                        if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) return true;
+                        // 192.168.0.0/16
+                        if (bytes[0] == 192 && bytes[1] == 168) return true;
+                        // 169.254.0.0/16 (link-local, AWS metadata, etc.)
+                        if (bytes[0] == 169 && bytes[1] == 254) return true;
+                    }
+                    if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                    {
+                        // IPv6 link-local (fe80::/10)
+                        if (addr.IsIPv6LinkLocal) return true;
+                    }
                 }
-            }
             return false;
         }
         catch
@@ -234,7 +241,7 @@ public class WebhookService : IWebhookService
         }
         
         var client = _httpClientFactory.CreateClient("webhook");
-        client.Timeout = TimeSpan.FromSeconds(webhook.TimeoutSeconds);
+        client.Timeout = TimeSpan.FromSeconds(Math.Max(5, webhook.TimeoutSeconds));
 
         for (int attempt = 1; attempt <= webhook.MaxRetries; attempt++)
         {

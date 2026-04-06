@@ -152,8 +152,13 @@ public class AutoReindexService : BackgroundService
                 _logger.LogError(ex, "Unhandled error in AutoReindexService loop");
             }
 
-            // Wait 1 minute before next iteration
-            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+            // Calculate delay to next scheduled run
+            var nextStale = _lastStaleCheck + _staleInterval;
+            var nextMissing = _lastMissingCheck + _missingInterval;
+            var nextFailed = _lastFailedCheck + _failedInterval;
+            var nextRun = new[] { nextStale, nextMissing, nextFailed }.Min();
+            var delay = nextRun > now ? nextRun - now : TimeSpan.FromMinutes(1);
+            await Task.Delay(delay, stoppingToken);
         }
 
         _logger.LogInformation("🛑 AutoReindexService stopped");

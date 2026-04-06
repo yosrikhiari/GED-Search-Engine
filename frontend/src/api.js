@@ -288,3 +288,6 @@ export const safeApi = {
 }
 
 export default { auth, documents, search, rag, groups, safeApi, ApiError }
+
+// Also export apiFetch directly for components that need it
+export { apiFetch }
